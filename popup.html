@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            width: 300px;
+            padding: 10px;
+            font-family: Arial, sans-serif;
+        }
+        .status {
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+        }
+        .status.active {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+        .status.inactive {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+        button {
+            width: 100%;
+            padding: 8px;
+            background-color: #1976d2;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #1565c0;
+        }
+        .stats {
+            margin-top: 15px;
+            font-size: 14px;
+        }
+        .test-mode {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+        }
+        .test-mode-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 40px;
+            height: 20px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 20px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 2px;
+            bottom: 2px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #1976d2;
+        }
+        input:checked + .slider:before {
+            transform: translateX(20px);
+        }
+        .test-rule {
+            margin-top: 10px;
+        }
+        .test-rule input {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 5px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .test-rule button {
+            margin-top: 5px;
+        }
+        .test-rules-list {
+            margin-top: 10px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .test-rule-item {
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .test-rule-item button {
+            width: auto;
+            padding: 2px 5px;
+            margin: 0 0 0 5px;
+            font-size: 12px;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="status active">
+        Netflix 字幕優化功能已啟動
+    </div>
+    <div class="stats">
+        <p>目前影片：<span id="currentVideo">未偵測到影片</span></p>
+        <p>已優化字幕數：<span id="replacementCount">0</span></p>
+    </div>
+    <button id="toggleButton">停用功能</button>
+    
+    <!-- 測試模式區域 -->
+    <div class="test-mode">
+        <div class="test-mode-header">
+            <h3 style="margin: 0;">測試模式</h3>
+            <label class="switch">
+                <input type="checkbox" id="testModeToggle">
+                <span class="slider"></span>
+            </label>
+        </div>
+        
+        <div id="testModeContent" class="hidden">
+            <p style="font-size: 12px; color: #666;">在測試模式下，字幕替換將只匹配文本內容，不考慮時間戳和視頻 ID。</p>
+            
+            <!-- 添加測試規則 -->
+            <div class="test-rule">
+                <input type="text" id="originalText" placeholder="原文字幕">
+                <input type="text" id="replacementText" placeholder="替換文本">
+                <button id="addTestRule">添加測試規則</button>
+            </div>
+            
+            <!-- 測試規則列表 -->
+            <div class="test-rules-list" id="testRulesList">
+                <!-- 測試規則項目將在這裡動態添加 -->
+            </div>
+        </div>
+    </div>
+    
+    <script src="popup.js"></script>
+</body>
+</html>
