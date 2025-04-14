@@ -15,80 +15,199 @@ let testRules = []; // 格式: [{ original: '原文', replacement: '替換文' }
 
 // 監聽來自 content script 的訊息
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.type === 'CHECK_SUBTITLE') {
-        const { videoId, timestamp, text } = request;
+    console.log('收到訊息:', request.type, request);
+    console.log('發送者:', sender);
+    
+    try {
+        if (!request || !request.type) {
+            console.error('無效的請求格式:', request);
+            sendResponse({ success: false, error: '無效的請求格式' });
+            return false;
+        }
         
-        // 檢查是否有需要替換的字幕
-        const replacement = checkSubtitleReplacement(videoId, timestamp, text);
-        sendResponse({ replacement });
-        
-        return true; // 保持連接開啟，等待非同步回應
-    } else if (request.type === 'TOGGLE_TEST_MODE') {
-        isTestModeEnabled = request.isTestModeEnabled;
-        console.log('測試模式已' + (isTestModeEnabled ? '啟用' : '停用'));
-        
-        // 保存設置到 storage
-        chrome.storage.local.set({ isTestModeEnabled });
-        
-        sendResponse({ success: true });
-    } else if (request.type === 'UPDATE_TEST_RULES') {
-        testRules = request.testRules;
-        console.log('測試規則已更新:', testRules);
-        
-        // 保存設置到 storage
-        chrome.storage.local.set({ testRules });
-        
-        sendResponse({ success: true });
-    } else if (request.type === 'GET_SETTINGS') {
-        // 處理獲取設置的請求
-        const keys = request.keys || ['isEnabled', 'debugMode', 'isTestModeEnabled', 'testRules'];
-        
-        chrome.storage.local.get(keys, (result) => {
-            console.log('獲取設置:', result);
+        if (request.type === 'CHECK_SUBTITLE') {
+            console.log('處理字幕檢查請求...');
+            const { videoId, timestamp, text } = request;
             
-            // 如果沒有找到 isEnabled 設置，默認為 true
-            if (result.isEnabled === undefined) {
-                result.isEnabled = true;
+            if (!videoId || !text) {
+                console.error('字幕檢查請求缺少必要參數:', request);
+                sendResponse({ success: false, error: '缺少必要參數' });
+                return false;
             }
             
-            // 如果沒有找到 debugMode 設置，默認為 false
-            if (result.debugMode === undefined) {
-                result.debugMode = false;
+            // 檢查是否有需要替換的字幕
+            console.log(`檢查字幕替換: videoId=${videoId}, timestamp=${timestamp}, text="${text}"`);
+            const replacement = checkSubtitleReplacement(videoId, timestamp, text);
+            
+            console.log('字幕檢查結果:', replacement ? `替換為: "${replacement}"` : '無需替換');
+            sendResponse({ replacement, success: true });
+            
+            return true; // 保持連接開啟，等待非同步回應
+        } else if (request.type === 'TOGGLE_TEST_MODE') {
+            console.log('處理測試模式切換請求...');
+            isTestModeEnabled = request.isTestModeEnabled;
+            console.log('測試模式已' + (isTestModeEnabled ? '啟用' : '停用'));
+            
+            // 保存設置到 storage
+            chrome.storage.local.set({ isTestModeEnabled }, () => {
+                if (chrome.runtime.lastError) {
+                    console.error('保存測試模式設置時出錯:', chrome.runtime.lastError);
+                    sendResponse({ success: false, error: chrome.runtime.lastError.message });
+                } else {
+                    console.log('測試模式設置已保存');
+                    sendResponse({ success: true });
+                }
+            });
+            
+            return true; // 保持連接開啟，等待非同步回應
+        } else if (request.type === 'TOGGLE_DEBUG_MODE') {
+            console.log('處理調試模式切換請求...');
+            const debugMode = request.debugMode;
+            console.log('調試模式已' + (debugMode ? '啟用' : '停用'));
+            
+            // 保存設置到 storage
+            chrome.storage.local.set({ debugMode }, () => {
+                if (chrome.runtime.lastError) {
+                    console.error('保存調試模式設置時出錯:', chrome.runtime.lastError);
+                    sendResponse({ success: false, error: chrome.runtime.lastError.message });
+                } else {
+                    console.log('調試模式設置已保存');
+                    sendResponse({ success: true });
+                }
+            });
+            
+            return true; // 保持連接開啟，等待非同步回應
+        } else if (request.type === 'UPDATE_TEST_RULES') {
+            console.log('處理測試規則更新請求...');
+            testRules = request.testRules;
+            console.log('測試規則已更新:', testRules);
+            
+            // 保存設置到 storage
+            chrome.storage.local.set({ testRules }, () => {
+                if (chrome.runtime.lastError) {
+                    console.error('保存測試規則時出錯:', chrome.runtime.lastError);
+                    sendResponse({ success: false, error: chrome.runtime.lastError.message });
+                } else {
+                    console.log('測試規則已保存');
+                    sendResponse({ success: true });
+                }
+            });
+            
+            return true; // 保持連接開啟，等待非同步回應
+        } else if (request.type === 'GET_SETTINGS') {
+            console.log('處理獲取設置請求...');
+            // 處理獲取設置的請求
+            const keys = request.keys || ['isEnabled', 'debugMode', 'isTestModeEnabled', 'testRules'];
+            console.log('請求的設置鍵:', keys);
+            
+            chrome.storage.local.get(keys, (result) => {
+                if (chrome.runtime.lastError) {
+                    console.error('獲取設置時出錯:', chrome.runtime.lastError);
+                    sendResponse({ success: false, error: chrome.runtime.lastError.message });
+                    return;
+                }
+                
+                console.log('獲取設置結果:', result);
+                
+                // 如果沒有找到 isEnabled 設置，默認為 true
+                if (result.isEnabled === undefined) {
+                    result.isEnabled = true;
+                }
+                
+                // 如果沒有找到 debugMode 設置，默認為 false
+                if (result.debugMode === undefined) {
+                    result.debugMode = false;
+                }
+                
+                // 添加測試模式狀態
+                if (result.isTestModeEnabled === undefined) {
+                    result.isTestModeEnabled = isTestModeEnabled;
+                }
+                
+                // 添加測試規則
+                if (result.testRules === undefined) {
+                    result.testRules = testRules;
+                }
+                
+                console.log('返回設置:', result);
+                sendResponse({ ...result, success: true });
+            });
+            
+            return true; // 保持連接開啟，等待非同步回應
+        } else if (request.type === 'CONTENT_SCRIPT_LOADED') {
+            console.log('內容腳本已加載:', sender.tab ? sender.tab.url : '未知頁面');
+            sendResponse({ success: true, message: '已確認內容腳本加載' });
+            return false; // 不需要保持連接開啟
+        } else if (request.type === 'SAVE_VIDEO_INFO') {
+            console.log('處理保存視頻信息請求...');
+            // 處理保存視頻信息的請求
+            const videoInfo = request.data;
+            console.log('保存視頻信息:', videoInfo);
+            
+            if (!videoInfo) {
+                console.error('無效的視頻信息:', videoInfo);
+                sendResponse({ success: false, error: '無效的視頻信息' });
+                return false;
             }
             
-            // 添加測試模式狀態
-            if (result.isTestModeEnabled === undefined) {
-                result.isTestModeEnabled = isTestModeEnabled;
+            chrome.storage.local.set(videoInfo, () => {
+                if (chrome.runtime.lastError) {
+                    console.error('保存視頻信息時出錯:', chrome.runtime.lastError);
+                    sendResponse({ success: false, error: chrome.runtime.lastError.message });
+                } else {
+                    console.log('視頻信息已保存到存儲中');
+                    sendResponse({ success: true });
+                }
+            });
+            
+            return true; // 保持連接開啟，等待非同步回應
+        } else if (request.type === 'SUBMIT_TRANSLATION') {
+            console.log('處理提交翻譯請求...');
+            // 處理提交翻譯的請求
+            console.log('收到翻譯提交:', request);
+            
+            if (!request.videoId || !request.timestamp || !request.original || !request.translation) {
+                console.error('翻譯提交缺少必要參數:', request);
+                sendResponse({ success: false, error: '缺少必要參數' });
+                return false;
             }
             
-            // 添加測試規則
-            if (result.testRules === undefined) {
-                result.testRules = testRules;
-            }
-            
-            sendResponse(result);
-        });
-        
-        return true; // 保持連接開啟，等待非同步回應
-    } else if (request.type === 'CONTENT_SCRIPT_LOADED') {
-        console.log('內容腳本已加載:', sender.tab ? sender.tab.url : '未知頁面');
-        sendResponse({ success: true });
-    } else if (request.type === 'SAVE_VIDEO_INFO') {
-        // 處理保存視頻信息的請求
-        const videoInfo = request.data;
-        console.log('保存視頻信息:', videoInfo);
-        
-        chrome.storage.local.set(videoInfo, () => {
-            if (chrome.runtime.lastError) {
-                console.error('保存視頻信息時出錯:', chrome.runtime.lastError);
-                sendResponse({ success: false, error: chrome.runtime.lastError.message });
-            } else {
-                console.log('視頻信息已保存到存儲中');
+            // 模擬成功響應
+            console.log('模擬處理翻譯提交...');
+            setTimeout(() => {
+                console.log('翻譯提交處理完成');
                 sendResponse({ success: true });
+            }, 500);
+            
+            return true; // 保持連接開啟，等待非同步回應
+        } else if (request.type === 'RATE_SUBTITLE') {
+            console.log('處理字幕評分請求...');
+            // 處理字幕評分的請求
+            console.log('收到字幕評分:', request);
+            
+            if (!request.videoId || !request.timestamp || !request.text || !request.rating) {
+                console.error('字幕評分缺少必要參數:', request);
+                sendResponse({ success: false, error: '缺少必要參數' });
+                return false;
             }
-        });
-        
-        return true; // 保持連接開啟，等待非同步回應
+            
+            // 模擬成功響應
+            console.log('模擬處理字幕評分...');
+            setTimeout(() => {
+                console.log('字幕評分處理完成');
+                sendResponse({ success: true });
+            }, 500);
+            
+            return true; // 保持連接開啟，等待非同步回應
+        } else {
+            console.warn('未處理的消息類型:', request.type);
+            sendResponse({ success: false, error: `未處理的消息類型: ${request.type}` });
+            return false;
+        }
+    } catch (error) {
+        console.error('處理消息時出錯:', error);
+        sendResponse({ success: false, error: error.message });
+        return false;
     }
 });
 
@@ -186,7 +305,7 @@ chrome.storage.local.get(['isTestModeEnabled', 'testRules'], (result) => {
 
 // 初始化擴充功能
 chrome.runtime.onInstalled.addListener(() => {
-    console.log('Netflix 字幕優化擴充功能已安裝');
+    console.log('字幕助手擴充功能已安裝');
     
     // 初始化模擬資料 - 添加更多測試數據
     mockDatabase = {

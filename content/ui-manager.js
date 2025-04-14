@@ -1,12 +1,17 @@
 /**
- * Netflix 字幕優化擴充功能 - UI 管理模組
+ * 字幕助手擴充功能 - UI 管理模組
  * 
  * 這個模組負責創建和管理自定義 UI 層，顯示替換後的字幕。
  */
 
+import { sendMessage, onMessage } from './messaging.js';
+
 // 自定義 UI 元素
 let customSubtitleContainer = null;
 let customSubtitleElement = null;
+
+// 調試模式
+let debugMode = false;
 
 // 字幕樣式設置
 let subtitleStyle = {
@@ -39,6 +44,9 @@ export function initUIManager() {
   // 從存儲中載入字幕樣式設置
   loadSubtitleStyle();
   
+  // 載入調試模式設置
+  loadDebugMode();
+  
   // 監聽視窗大小變化，調整字幕位置
   window.addEventListener('resize', updateSubtitlePosition);
   
@@ -49,11 +57,44 @@ export function initUIManager() {
 }
 
 /**
+ * 從存儲中載入調試模式設置
+ */
+function loadDebugMode() {
+  // 使用 sendMessage 而不是直接存取 chrome.storage
+  sendMessage({
+    type: 'GET_SETTINGS',
+    keys: ['debugMode']
+  })
+  .then(result => {
+    if (result && result.debugMode !== undefined) {
+      debugMode = result.debugMode;
+      console.log('載入調試模式設置:', debugMode);
+    }
+  })
+  .catch(error => {
+    console.error('載入調試模式設置時出錯:', error);
+  });
+  
+  // 監聽設置變更
+  onMessage((message) => {
+    if (message.type === 'TOGGLE_DEBUG_MODE') {
+      debugMode = message.debugMode;
+      console.log('調試模式設置已更新:', debugMode);
+    }
+  });
+}
+
+/**
  * 從存儲中載入字幕樣式設置
  */
 function loadSubtitleStyle() {
-  chrome.storage.local.get('subtitleStyle', (result) => {
-    if (result.subtitleStyle) {
+  // 使用 sendMessage 而不是直接存取 chrome.storage
+  sendMessage({
+    type: 'GET_SETTINGS',
+    keys: ['subtitleStyle']
+  })
+  .then(result => {
+    if (result && result.subtitleStyle) {
       subtitleStyle = { ...subtitleStyle, ...result.subtitleStyle };
       console.log('載入字幕樣式設置:', subtitleStyle);
       
@@ -62,12 +103,15 @@ function loadSubtitleStyle() {
         applySubtitleStyle();
       }
     }
+  })
+  .catch(error => {
+    console.error('載入字幕樣式設置時出錯:', error);
   });
   
-  // 監聽字幕樣式設置變更
-  chrome.storage.onChanged.addListener((changes) => {
-    if (changes.subtitleStyle) {
-      subtitleStyle = { ...subtitleStyle, ...changes.subtitleStyle.newValue };
+  // 監聽設置變更
+  onMessage((message) => {
+    if (message.type === 'SUBTITLE_STYLE_UPDATED' && message.subtitleStyle) {
+      subtitleStyle = { ...subtitleStyle, ...message.subtitleStyle };
       console.log('字幕樣式設置已更新:', subtitleStyle);
       
       // 更新字幕元素樣式
@@ -82,34 +126,51 @@ function loadSubtitleStyle() {
  * 創建自定義字幕容器
  */
 function createCustomSubtitleContainer() {
+  console.log('創建自定義字幕容器...');
+  
   // 檢查是否已經存在
   if (customSubtitleContainer) {
+    console.log('字幕容器已存在，不需要重新創建');
     return;
   }
   
   // 創建容器元素
   customSubtitleContainer = document.createElement('div');
-  customSubtitleContainer.id = 'netflix-subtitle-optimizer-container';
-  customSubtitleContainer.style.position = 'absolute';
-  customSubtitleContainer.style.zIndex = '9999';
-  customSubtitleContainer.style.pointerEvents = 'none'; // 允許點擊穿透
+  customSubtitleContainer.id = 'subtitle-assistant-container';
+  customSubtitleContainer.style.position = 'fixed'; // 改為 fixed 定位，確保不受滾動影響
+  customSubtitleContainer.style.zIndex = '99999'; // 增加 z-index 確保在最上層
+  customSubtitleContainer.style.pointerEvents = 'none'; // 初始設置為點擊穿透
   customSubtitleContainer.style.display = 'none'; // 初始隱藏
+  customSubtitleContainer.style.textAlign = 'center'; // 確保字幕居中
+  customSubtitleContainer.style.width = '100%'; // 設置寬度為 100%
+  customSubtitleContainer.style.bottom = '10%'; // 預設位置在底部
+  customSubtitleContainer.style.left = '0'; // 預設位置在左側
+  
+  console.log('字幕容器元素已創建');
+  
+  // 添加測試用邊框和背景，方便調試
+  customSubtitleContainer.style.border = '2px solid red';
+  customSubtitleContainer.style.backgroundColor = 'rgba(255, 0, 0, 0.1)';
   
   // 創建字幕元素
   customSubtitleElement = document.createElement('div');
-  customSubtitleElement.id = 'netflix-subtitle-optimizer-text';
+  customSubtitleElement.id = 'subtitle-assistant-text';
   
   // 應用字幕樣式
   applySubtitleStyle();
   
   // 創建交互按鈕容器
   interactionButtons = document.createElement('div');
-  interactionButtons.id = 'netflix-subtitle-optimizer-buttons';
+  interactionButtons.id = 'subtitle-assistant-buttons';
   interactionButtons.style.display = 'none';
   interactionButtons.style.position = 'absolute';
   interactionButtons.style.top = '-30px';
-  interactionButtons.style.right = '0';
+  interactionButtons.style.left = '50%'; // 置中
+  interactionButtons.style.transform = 'translateX(-50%)'; // 確保真正置中
   interactionButtons.style.pointerEvents = 'auto'; // 允許點擊
+  interactionButtons.style.backgroundColor = 'rgba(0, 0, 0, 0.5)'; // 半透明背景
+  interactionButtons.style.padding = '5px';
+  interactionButtons.style.borderRadius = '4px';
   
   // 創建按鈕
   const submitButton = createButton('提交翻譯', handleSubmitTranslation);
@@ -185,7 +246,10 @@ function applySubtitleStyle() {
  * @param {Object} subtitleData - 字幕數據
  */
 export function showSubtitle(subtitleData) {
+  console.log('顯示字幕:', subtitleData);
+  
   if (!customSubtitleContainer || !customSubtitleElement) {
+    console.log('字幕容器或字幕元素不存在，創建自定義字幕容器');
     createCustomSubtitleContainer();
   }
   
@@ -193,13 +257,59 @@ export function showSubtitle(subtitleData) {
   currentSubtitle = subtitleData;
   
   // 設置字幕文本
-  customSubtitleElement.textContent = subtitleData.text;
+  let displayText = subtitleData.text;
+  
+  // 添加標記，無論是否處於調試模式
+  displayText = `[自訂] ${displayText}`;
+  
+  // 如果是替換的字幕，添加標記
+  if (subtitleData.isReplaced) {
+    displayText = `[替換] ${displayText}`;
+  }
+  
+  console.log('顯示字幕文本:', displayText);
+  
+  customSubtitleElement.textContent = displayText;
   
   // 更新字幕位置
+  console.log('更新字幕位置...');
   updateSubtitlePosition(subtitleData.position);
   
-  // 顯示字幕容器
+  // 確保字幕容器可見
   customSubtitleContainer.style.display = 'block';
+  
+  // 添加額外的可見性檢查，無論是否處於調試模式
+  console.log('字幕容器樣式:', {
+    display: customSubtitleContainer.style.display,
+    position: customSubtitleContainer.style.position,
+    top: customSubtitleContainer.style.top,
+    left: customSubtitleContainer.style.left,
+    width: customSubtitleContainer.style.width,
+    zIndex: customSubtitleContainer.style.zIndex
+  });
+  
+  // 添加測試用背景色，無論是否處於調試模式
+  customSubtitleElement.style.backgroundColor = 'rgba(255, 0, 0, 0.3)';
+  
+  // 確保字幕元素可見
+  customSubtitleElement.style.display = 'inline-block';
+  
+  // 檢查字幕元素是否在DOM中
+  if (document.body.contains(customSubtitleContainer)) {
+    console.log('字幕容器已在DOM中');
+  } else {
+    console.warn('字幕容器不在DOM中，重新添加');
+    document.body.appendChild(customSubtitleContainer);
+  }
+  
+  // 強制重繪
+  setTimeout(() => {
+    console.log('強制重繪字幕容器');
+    customSubtitleContainer.style.display = 'none';
+    // 強制瀏覽器重繪
+    void customSubtitleContainer.offsetHeight;
+    customSubtitleContainer.style.display = 'block';
+  }, 50);
 }
 
 /**
@@ -219,27 +329,90 @@ export function hideSubtitle() {
  * @param {Object} position - 位置信息
  */
 function updateSubtitlePosition(position) {
-  if (!customSubtitleContainer || !currentSubtitle) return;
+  console.log('更新字幕位置，傳入位置:', position);
   
-  // 如果參數是事件對象，則使用當前字幕的位置
-  const pos = position && position.top ? position : currentSubtitle.position;
+  if (!customSubtitleContainer) {
+    console.error('字幕容器不存在，無法更新位置');
+    return;
+  }
   
   // 獲取視頻播放器元素
-  const videoPlayer = document.querySelector('.watch-video');
-  if (!videoPlayer) return;
+  const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video');
+  if (!videoPlayer) {
+    console.log('找不到視頻播放器元素，嘗試其他選擇器');
+    
+    // 嘗試其他可能的選擇器
+    const altVideoPlayer = document.querySelector('.VideoContainer, .nf-player-container, .NFPlayer, [data-uia="video-player"]');
+    
+    if (altVideoPlayer) {
+      console.log('使用替代選擇器找到視頻播放器');
+      const playerRect = altVideoPlayer.getBoundingClientRect();
+      console.log('視頻播放器位置和大小:', playerRect);
+      
+      // 使用固定位置，但基於播放器位置
+      customSubtitleContainer.style.position = 'fixed';
+      customSubtitleContainer.style.bottom = '20%';
+      customSubtitleContainer.style.left = `${playerRect.left}px`;
+      customSubtitleContainer.style.width = `${playerRect.width}px`;
+      customSubtitleContainer.style.textAlign = 'center';
+      
+      console.log('使用替代播放器位置設置字幕位置');
+      return;
+    }
+    
+    // 如果仍然找不到，使用固定位置作為備用
+    console.log('無法找到任何視頻播放器，使用固定位置作為備用');
+    customSubtitleContainer.style.position = 'fixed';
+    customSubtitleContainer.style.bottom = '10%';
+    customSubtitleContainer.style.left = '0';
+    customSubtitleContainer.style.width = '100%';
+    customSubtitleContainer.style.textAlign = 'center';
+    
+    return;
+  }
   
   // 獲取視頻播放器的位置和大小
   const playerRect = videoPlayer.getBoundingClientRect();
+  console.log('視頻播放器位置和大小:', playerRect);
   
-  // 計算字幕容器的位置
-  // 通常字幕在視頻底部，留出一定空間
+  // 如果有當前字幕數據且有原始字幕元素的位置信息，優先使用它
+  if (currentSubtitle && currentSubtitle.position) {
+    const pos = currentSubtitle.position;
+    console.log('使用原始字幕位置:', pos);
+    
+    // 使用原始字幕的位置，但確保在播放器內
+    customSubtitleContainer.style.position = 'fixed';
+    customSubtitleContainer.style.top = `${pos.top}px`;
+    customSubtitleContainer.style.left = `${pos.left}px`;
+    customSubtitleContainer.style.width = `${pos.width}px`;
+    customSubtitleContainer.style.bottom = 'auto'; // 清除底部定位
+    
+    console.log(`更新字幕位置: top=${pos.top}, left=${pos.left}, width=${pos.width}`);
+    
+    return;
+  }
+  
+  // 如果沒有原始字幕位置，使用備用方法
+  console.log('沒有原始字幕位置，使用備用方法');
+  
+  // 使用播放器底部的位置
   const containerTop = playerRect.top + playerRect.height - 150;
   
-  // 設置字幕容器的位置
+  customSubtitleContainer.style.position = 'fixed';
   customSubtitleContainer.style.top = `${containerTop}px`;
   customSubtitleContainer.style.left = `${playerRect.left}px`;
   customSubtitleContainer.style.width = `${playerRect.width}px`;
+  customSubtitleContainer.style.bottom = 'auto'; // 清除底部定位
   customSubtitleContainer.style.textAlign = 'center';
+  
+  console.log(`使用備用字幕位置: top=${containerTop}, left=${playerRect.left}, width=${playerRect.width}`);
+  
+  // 確保字幕容器可見
+  customSubtitleContainer.style.display = 'block';
+  
+  // 添加測試用邊框和背景，確保可見
+  customSubtitleContainer.style.border = '2px solid red';
+  customSubtitleContainer.style.backgroundColor = 'rgba(255, 0, 0, 0.1)';
 }
 
 /**
@@ -251,6 +424,10 @@ function showInteractionButtons() {
     
     // 使字幕容器可以接收點擊事件
     customSubtitleContainer.style.pointerEvents = 'auto';
+    
+    if (debugMode) {
+      console.log('顯示交互按鈕');
+    }
   }
 }
 
@@ -263,6 +440,10 @@ function hideInteractionButtons() {
     
     // 恢復字幕容器的點擊穿透
     customSubtitleContainer.style.pointerEvents = 'none';
+    
+    if (debugMode) {
+      console.log('隱藏交互按鈕');
+    }
   }
 }
 
@@ -320,18 +501,23 @@ function handleSubmitTranslation() {
     
     if (newTranslation && newTranslation !== currentText) {
       // 發送翻譯提交請求
-      chrome.runtime.sendMessage({
+      sendMessage({
         type: 'SUBMIT_TRANSLATION',
         videoId: currentSubtitle.videoId,
         timestamp: currentSubtitle.timestamp,
         original: originalText,
         translation: newTranslation
-      }, (response) => {
+      })
+      .then(response => {
         if (response && response.success) {
           alert('翻譯提交成功！');
         } else {
           alert('翻譯提交失敗，請稍後再試。');
         }
+      })
+      .catch(error => {
+        console.error('提交翻譯時出錯:', error);
+        alert('翻譯提交失敗，請稍後再試。');
       });
     }
     
@@ -346,17 +532,21 @@ function handleLikeSubtitle() {
   if (!currentSubtitle) return;
   
   // 發送點讚請求
-  chrome.runtime.sendMessage({
+  sendMessage({
     type: 'RATE_SUBTITLE',
     videoId: currentSubtitle.videoId,
     timestamp: currentSubtitle.timestamp,
     text: currentSubtitle.text,
     rating: 'like'
-  }, (response) => {
+  })
+  .then(response => {
     if (response && response.success) {
       // 顯示成功提示
       showToast('已點讚！');
     }
+  })
+  .catch(error => {
+    console.error('點讚時出錯:', error);
   });
 }
 
@@ -367,17 +557,21 @@ function handleDislikeSubtitle() {
   if (!currentSubtitle) return;
   
   // 發送倒讚請求
-  chrome.runtime.sendMessage({
+  sendMessage({
     type: 'RATE_SUBTITLE',
     videoId: currentSubtitle.videoId,
     timestamp: currentSubtitle.timestamp,
     text: currentSubtitle.text,
     rating: 'dislike'
-  }, (response) => {
+  })
+  .then(response => {
     if (response && response.success) {
       // 顯示成功提示
       showToast('已倒讚！');
     }
+  })
+  .catch(error => {
+    console.error('倒讚時出錯:', error);
   });
 }
 

@@ -7,6 +7,9 @@ let currentVideoId = '';
 let isTestModeEnabled = false;
 let testRules = []; // 格式: [{ original: '原文', replacement: '替換文' }]
 
+// 調試模式狀態
+let debugMode = false;
+
 // 更新UI狀態
 function updateUI() {
     const statusDiv = document.querySelector('.status');
@@ -15,6 +18,7 @@ function updateUI() {
     const replacementCountSpan = document.getElementById('replacementCount');
     const testModeToggle = document.getElementById('testModeToggle');
     const testModeContent = document.getElementById('testModeContent');
+    const debugModeToggle = document.getElementById('debugModeToggle');
 
     // 更新狀態顯示
     statusDiv.className = `status ${isEnabled ? 'active' : 'inactive'}`;
@@ -35,6 +39,11 @@ function updateUI() {
         } else {
             testModeContent.classList.add('hidden');
         }
+    }
+    
+    // 更新調試模式狀態
+    if (debugModeToggle) {
+        debugModeToggle.checked = debugMode;
     }
     
     // 更新測試規則列表
@@ -88,6 +97,27 @@ function toggleTestMode() {
             isTestModeEnabled
         });
         
+        updateUI();
+    });
+}
+
+// 切換調試模式
+function toggleDebugMode() {
+    debugMode = !debugMode;
+    
+    // 儲存狀態
+    chrome.storage.local.set({ debugMode }, () => {
+        // 通知 content script 調試模式狀態變更
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (tabs[0]) {
+                chrome.tabs.sendMessage(tabs[0].id, { 
+                    type: 'TOGGLE_DEBUG_MODE',
+                    debugMode 
+                });
+            }
+        });
+        
+        console.log(`調試模式已${debugMode ? '啟用' : '停用'}`);
         updateUI();
     });
 }
@@ -231,7 +261,7 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('彈出窗口已加載');
     
     // 載入儲存的狀態
-    chrome.storage.local.get(['isEnabled', 'replacementCount', 'currentVideoId', 'isTestModeEnabled', 'testRules'], (result) => {
+    chrome.storage.local.get(['isEnabled', 'replacementCount', 'currentVideoId', 'isTestModeEnabled', 'testRules', 'debugMode'], (result) => {
         console.log('初始化時從存儲中獲取的數據:', result);
         
         if (result.isEnabled !== undefined) {
@@ -252,6 +282,10 @@ document.addEventListener('DOMContentLoaded', () => {
             testRules = result.testRules;
             console.log('初始化時從存儲中獲取的測試規則:', testRules);
         }
+        if (result.debugMode !== undefined) {
+            debugMode = result.debugMode;
+            console.log('初始化時從存儲中獲取的調試模式狀態:', debugMode);
+        }
         
         updateUI();
         
@@ -266,6 +300,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const testModeToggle = document.getElementById('testModeToggle');
     if (testModeToggle) {
         testModeToggle.addEventListener('change', toggleTestMode);
+    }
+    
+    // 綁定調試模式開關事件
+    const debugModeToggle = document.getElementById('debugModeToggle');
+    if (debugModeToggle) {
+        debugModeToggle.addEventListener('change', toggleDebugMode);
     }
     
     const addTestRuleButton = document.getElementById('addTestRule');

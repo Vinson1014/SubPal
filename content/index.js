@@ -1,5 +1,5 @@
 /**
- * Netflix 字幕優化擴充功能 - 內容腳本主入口點
+ * 字幕助手擴充功能 - 內容腳本主入口點
  * 
  * 這個文件是內容腳本的主入口點，負責初始化和協調各個模組。
  */
@@ -20,44 +20,64 @@ let debugMode = false;
  * 初始化擴充功能
  */
 function initExtension() {
-  console.log('Netflix 字幕優化擴充功能初始化中...');
+  console.log('字幕助手擴充功能初始化中...');
   
   // 初始化所有模組
   initMessaging();
+  console.log('消息傳遞模組初始化完成');
+  
   initVideoInfo();
+  console.log('視頻信息模組初始化完成');
+  
   initSubtitleDetector();
+  console.log('字幕偵測模組初始化完成');
+  
   initSubtitleReplacer();
+  console.log('字幕替換模組初始化完成');
+  
   initUIManager();
+  console.log('UI管理模組初始化完成');
   
   // 設置事件監聽器
+  console.log('設置事件監聽器...');
   setupEventListeners();
+  console.log('事件監聽器設置完成');
   
   // 從存儲中載入設置
   loadSettings();
   
-  console.log('Netflix 字幕優化擴充功能初始化完成');
+  console.log('字幕助手擴充功能初始化完成');
 }
 
 /**
  * 設置事件監聽器
  */
 function setupEventListeners() {
+  console.log('設置字幕偵測回調...');
+  
   // 監聽字幕偵測事件
   onSubtitleDetected((subtitleData) => {
-    if (!isEnabled) return;
+    console.log('字幕偵測回調被觸發:', subtitleData);
+    
+    if (!isEnabled) {
+      console.log('擴充功能已停用，不處理字幕');
+      return;
+    }
     
     const videoId = getVideoId();
     const timestamp = getCurrentTimestamp();
     
-    if (debugMode) {
-      console.log(`偵測到字幕: "${subtitleData.text}" (videoId: ${videoId}, timestamp: ${timestamp})`);
-    }
+    console.log(`偵測到字幕: "${subtitleData.text}" (videoId: ${videoId}, timestamp: ${timestamp})`);
     
     // 處理字幕替換
+    console.log('開始處理字幕替換...');
     processSubtitle(subtitleData, videoId, timestamp)
       .then(replacedSubtitle => {
         if (replacedSubtitle) {
+          console.log(`字幕替換成功: "${subtitleData.text}" -> "${replacedSubtitle.text}"`);
+          
           // 顯示替換後的字幕
+          console.log('顯示替換後的字幕...');
           showSubtitle(replacedSubtitle);
           
           // 更新替換計數
@@ -69,18 +89,24 @@ function setupEventListeners() {
             videoId,
             replacementCount
           });
-          
-          if (debugMode) {
-            console.log(`字幕已替換: "${subtitleData.text}" -> "${replacedSubtitle.text}"`);
-          }
         } else {
-          // 如果沒有替換，則隱藏自定義字幕
-          hideSubtitle();
+          console.log(`沒有找到替換規則，使用原始字幕: "${subtitleData.text}"`);
           
-          if (debugMode) {
-            console.log(`字幕未替換: "${subtitleData.text}"`);
-          }
+          // 創建原始字幕數據對象，添加必要的屬性
+          const originalSubtitleData = {
+            ...subtitleData,
+            videoId: videoId,
+            timestamp: timestamp,
+            isReplaced: false
+          };
+          
+          // 顯示原始字幕
+          console.log('顯示原始字幕...');
+          showSubtitle(originalSubtitleData);
         }
+      })
+      .catch(error => {
+        console.error('處理字幕替換時出錯:', error);
       });
   });
   

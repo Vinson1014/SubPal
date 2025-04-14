@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Netflix 字幕優化",
+  "name": "字幕助手",
   "version": "1.0",
-  "description": "自動優化 Netflix 字幕翻譯",
+  "description": "自動優化串流平台字幕翻譯",
   "permissions": [
     "activeTab",
     "storage"

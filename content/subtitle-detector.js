@@ -1,8 +1,10 @@
 /**
- * Netflix 字幕優化擴充功能 - 字幕偵測模組
+ * 字幕助手擴充功能 - 字幕偵測模組
  * 
- * 這個模組負責偵測 Netflix 播放器上的字幕，並提取字幕文本和時間信息。
+ * 這個模組負責偵測串流平台播放器上的字幕，並提取字幕文本和時間信息。
  */
+
+import { sendMessage, onMessage } from './messaging.js';
 
 // 事件回調函數
 let subtitleDetectedCallback = null;
@@ -11,8 +13,16 @@ let subtitleDetectedCallback = null;
 const SUBTITLE_SELECTORS = [
   '.player-timedtext-text-container', // 主要字幕容器
   '.player-timedtext-text-container span', // 字幕文本元素
-  '.player-timedtext' // 備用選擇器
+  '.player-timedtext', // 備用選擇器
+  '.VideoContainer div.player-timedtext', // 更具體的選擇器
+  '.VideoContainer div.player-timedtext-text-container', // 更具體的選擇器
+  'div[data-uia="player-timedtext-text-container"]', // 使用 data-uia 屬性
+  '.player-timedtext-text-container > span', // 直接子元素
+  '.player-timedtext > .player-timedtext-text-container' // 父子關係
 ];
+
+// 調試模式
+let debugMode = false;
 
 // MutationObserver 實例
 let observer = null;
@@ -22,6 +32,9 @@ let observer = null;
  */
 export function initSubtitleDetector() {
   console.log('初始化字幕偵測模組...');
+  
+  // 載入調試模式設置
+  loadDebugMode();
   
   // 創建 MutationObserver 實例
   observer = new MutationObserver(handleDOMChanges);
@@ -35,7 +48,69 @@ export function initSubtitleDetector() {
   // 立即檢查視頻播放器是否已存在
   checkForVideoPlayer();
   
+  // 定期檢查字幕元素
+  setInterval(scanForSubtitles, 2000);
+  
   console.log('字幕偵測模組初始化完成');
+}
+
+/**
+ * 從存儲中載入調試模式設置
+ */
+function loadDebugMode() {
+  // 使用 sendMessage 而不是直接存取 chrome.storage
+  sendMessage({
+    type: 'GET_SETTINGS',
+    keys: ['debugMode']
+  })
+  .then(result => {
+    if (result && result.debugMode !== undefined) {
+      debugMode = result.debugMode;
+      console.log('載入調試模式設置:', debugMode);
+    }
+  })
+  .catch(error => {
+    console.error('載入調試模式設置時出錯:', error);
+  });
+  
+  // 註冊消息處理器來監聽設置變更
+  onMessage((message) => {
+    if (message.type === 'TOGGLE_DEBUG_MODE') {
+      debugMode = message.debugMode;
+      console.log('調試模式設置已更新:', debugMode);
+    }
+  });
+}
+
+/**
+ * 主動掃描頁面尋找字幕元素
+ */
+function scanForSubtitles() {
+  if (debugMode) {
+    console.log('主動掃描字幕元素...');
+  }
+  
+  // 嘗試所有選擇器
+  for (const selector of SUBTITLE_SELECTORS) {
+    const elements = document.querySelectorAll(selector);
+    if (elements.length > 0) {
+      if (debugMode) {
+        console.log(`找到 ${elements.length} 個字幕元素，使用選擇器: ${selector}`);
+      }
+      
+      // 處理每個找到的元素
+      elements.forEach(element => {
+        processSubtitleElement(element);
+      });
+      
+      // 找到元素後不需要繼續嘗試其他選擇器
+      return;
+    }
+  }
+  
+  if (debugMode) {
+    console.log('未找到字幕元素');
+  }
 }
 
 /**
@@ -151,6 +226,14 @@ function processSubtitleElement(element) {
     return;
   }
   
+  if (debugMode) {
+    console.log(`處理字幕元素: "${text}"`);
+    console.log('元素類型:', element.tagName);
+    console.log('元素類名:', element.className);
+    console.log('元素 ID:', element.id);
+    console.log('元素屬性:', Array.from(element.attributes).map(attr => `${attr.name}="${attr.value}"`).join(', '));
+  }
+  
   // 獲取字幕位置信息
   const rect = element.getBoundingClientRect();
   const position = {
@@ -159,6 +242,10 @@ function processSubtitleElement(element) {
     width: rect.width,
     height: rect.height
   };
+  
+  if (debugMode) {
+    console.log('字幕位置:', position);
+  }
   
   // 獲取字幕樣式
   const style = window.getComputedStyle(element);
@@ -169,6 +256,10 @@ function processSubtitleElement(element) {
     backgroundColor: style.backgroundColor,
     textAlign: style.textAlign
   };
+  
+  if (debugMode) {
+    console.log('字幕樣式:', subtitleStyle);
+  }
   
   // 創建字幕數據對象
   const subtitleData = {
@@ -181,7 +272,12 @@ function processSubtitleElement(element) {
   
   // 觸發字幕偵測事件
   if (subtitleDetectedCallback) {
+    if (debugMode) {
+      console.log('觸發字幕偵測事件:', subtitleData);
+    }
     subtitleDetectedCallback(subtitleData);
+  } else if (debugMode) {
+    console.warn('字幕偵測回調未設置，無法處理字幕');
   }
 }
 
@@ -190,5 +286,12 @@ function processSubtitleElement(element) {
  * @param {Function} callback - 回調函數，接收字幕數據
  */
 export function onSubtitleDetected(callback) {
+  console.log('註冊字幕偵測回調:', callback ? '已提供回調函數' : '未提供回調函數');
   subtitleDetectedCallback = callback;
+  
+  // 立即檢查是否已經找到字幕元素
+  if (callback) {
+    console.log('回調已設置，主動掃描字幕元素...');
+    scanForSubtitles();
+  }
 }

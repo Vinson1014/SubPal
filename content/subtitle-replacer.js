@@ -1,8 +1,10 @@
 /**
- * Netflix 字幕優化擴充功能 - 字幕替換模組
+ * 字幕助手擴充功能 - 字幕替換模組
  * 
  * 這個模組負責處理字幕替換的邏輯，包括查詢替換規則和生成替換後的字幕內容。
  */
+
+import { sendMessage, onMessage } from './messaging.js';
 
 // 測試模式狀態
 let isTestModeEnabled = false;
@@ -17,16 +19,18 @@ export function initSubtitleReplacer() {
   // 從存儲中載入測試模式狀態和測試規則
   loadTestModeSettings();
   
-  // 監聽測試模式設置變更
-  chrome.storage.onChanged.addListener((changes) => {
-    if (changes.isTestModeEnabled) {
-      isTestModeEnabled = changes.isTestModeEnabled.newValue;
-      console.log(`測試模式已${isTestModeEnabled ? '啟用' : '停用'}`);
-    }
-    
-    if (changes.testRules) {
-      testRules = changes.testRules.newValue || [];
-      console.log('測試規則已更新:', testRules);
+  // 監聽設置變更
+  onMessage((message) => {
+    if (message.type === 'SETTINGS_CHANGED') {
+      if (message.changes.isTestModeEnabled !== undefined) {
+        isTestModeEnabled = message.changes.isTestModeEnabled;
+        console.log(`測試模式已${isTestModeEnabled ? '啟用' : '停用'}`);
+      }
+      
+      if (message.changes.testRules) {
+        testRules = message.changes.testRules || [];
+        console.log('測試規則已更新:', testRules);
+      }
     }
   });
   
@@ -37,16 +41,24 @@ export function initSubtitleReplacer() {
  * 從存儲中載入測試模式設置
  */
 function loadTestModeSettings() {
-  chrome.storage.local.get(['isTestModeEnabled', 'testRules'], (result) => {
-    if (result.isTestModeEnabled !== undefined) {
+  // 使用sendMessage而不是直接使用chrome.storage
+  sendMessage({
+    type: 'GET_SETTINGS',
+    keys: ['isTestModeEnabled', 'testRules']
+  })
+  .then(result => {
+    if (result && result.isTestModeEnabled !== undefined) {
       isTestModeEnabled = result.isTestModeEnabled;
       console.log(`載入測試模式狀態: ${isTestModeEnabled}`);
     }
     
-    if (result.testRules && Array.isArray(result.testRules)) {
+    if (result && result.testRules && Array.isArray(result.testRules)) {
       testRules = result.testRules;
       console.log('載入測試規則:', testRules);
     }
+  })
+  .catch(error => {
+    console.error('載入測試模式設置時出錯:', error);
   });
 }
 
@@ -112,22 +124,24 @@ function checkTestRules(text) {
  * @returns {Promise<string|null>} - 替換文本，如果沒有匹配則返回 null
  */
 async function queryBackendReplacement(text, videoId, timestamp) {
-  // 向 background script 發送請求
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({
+  // 使用sendMessage向後端發送請求
+  try {
+    const response = await sendMessage({
       type: 'CHECK_SUBTITLE',
       videoId,
       timestamp,
       text
-    }, (response) => {
-      if (response && response.replacement) {
-        console.log('後端替換成功:', text, '->', response.replacement);
-        resolve(response.replacement);
-      } else {
-        resolve(null);
-      }
     });
-  });
+    
+    if (response && response.replacement) {
+      console.log('後端替換成功:', text, '->', response.replacement);
+      return response.replacement;
+    }
+    return null;
+  } catch (error) {
+    console.error('查詢後端替換規則時出錯:', error);
+    return null;
+  }
 }
 
 /**

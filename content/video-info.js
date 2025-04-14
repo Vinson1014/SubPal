@@ -1,5 +1,5 @@
 /**
- * Netflix 字幕優化擴充功能 - 視頻信息模組
+ * 字幕助手擴充功能 - 視頻信息模組
  * 
  * 這個模組負責獲取當前播放視頻的 ID、時間戳和其他相關信息。
  */
@@ -50,7 +50,7 @@ export function initVideoInfo() {
  * 尋找視頻元素
  */
 function findVideoElement() {
-  // 尋找 Netflix 視頻元素
+  // 尋找視頻元素
   videoElement = document.querySelector('video');
   
   if (!videoElement) {
@@ -96,7 +96,7 @@ function extractVideoInfo() {
  * @returns {string|null} - 視頻 ID 或 null
  */
 function extractVideoIdFromUrl() {
-  // Netflix URL 格式: https://www.netflix.com/watch/81234567
+  // 串流平台 URL 格式，例如: https://www.netflix.com/watch/81234567
   const match = location.href.match(/netflix\.com\/watch\/(\d+)/);
   
   if (match && match[1]) {
