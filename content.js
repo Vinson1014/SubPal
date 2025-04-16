@@ -53,12 +53,12 @@ function setupCommunicationBridge() {
     
     // 處理消息
     const message = event.data;
-    console.log('收到來自模組化腳本的消息:', message.type, message);
+    // console.log('收到來自模組化腳本的消息:', message.type, message);
     
     // 轉發消息到 background script
     if (message.target === 'BACKGROUND' || message.type === 'SEND_TO_BACKGROUND') {
       const dataToSend = message.type === 'SEND_TO_BACKGROUND' ? message.data : message.data;
-      console.log('轉發消息到 background script:', dataToSend);
+      // console.log('轉發消息到 background script:', dataToSend);
       
       chrome.runtime.sendMessage(dataToSend, function(response) {
         // 檢查是否有錯誤
@@ -76,7 +76,7 @@ function setupCommunicationBridge() {
           return;
         }
         
-        console.log('收到來自 background script 的回應:', response);
+        // console.log('收到來自 background script 的回應:', response);
         
         // 將回應發送回模組化腳本
         window.postMessage({

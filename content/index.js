@@ -9,6 +9,13 @@ import { initSubtitleDetector, onSubtitleDetected } from './subtitle-detector.js
 import { initSubtitleReplacer, processSubtitle } from './subtitle-replacer.js';
 import { initUIManager, showSubtitle, hideSubtitle } from './ui-manager.js';
 import { initVideoInfo, getVideoId, getCurrentTimestamp } from './video-info.js';
+
+// 字幕內容快取，避免重複刷新造成閃爍
+let lastSubtitleCache = {
+  text: null,
+  htmlContent: null,
+  position: null
+};
 import { initMessaging, sendMessage, onMessage } from './messaging.js';
 
 // 擴充功能狀態
@@ -54,35 +61,72 @@ function initExtension() {
  */
 function setupEventListeners() {
   console.log('設置字幕偵測回調...');
-  
+
+  // 去重：只處理不同內容/位置的字幕
+  let lastDetectedSubtitle = {
+    text: null,
+    position: null
+  };
+
   // 監聽字幕偵測事件
   onSubtitleDetected((subtitleData) => {
+    // 去重判斷（只用 text+position）
+    if (
+      subtitleData.text === lastDetectedSubtitle.text &&
+      lastDetectedSubtitle.position &&
+      subtitleData.position &&
+      Math.abs(lastDetectedSubtitle.position.top - subtitleData.position.top) < 5 &&
+      Math.abs(lastDetectedSubtitle.position.left - subtitleData.position.left) < 5
+    ) {
+      // console.log('跳過重複字幕:', subtitleData.text, subtitleData.position);
+      return;
+    }
+    lastDetectedSubtitle.text = subtitleData.text;
+    lastDetectedSubtitle.position = subtitleData.position ? { ...subtitleData.position } : null;
+
     console.log('字幕偵測回調被觸發:', subtitleData);
-    
+
     if (!isEnabled) {
       console.log('擴充功能已停用，不處理字幕');
       return;
     }
-    
+
+    // 如果是空字幕，則隱藏自訂字幕
+    if (!subtitleData.text || subtitleData.isEmpty) {
+      console.log('偵測到空字幕，隱藏自訂字幕');
+      hideSubtitle();
+      return;
+    }
+
     const videoId = getVideoId();
     const timestamp = getCurrentTimestamp();
-    
-    console.log(`偵測到字幕: "${subtitleData.text}" (videoId: ${videoId}, timestamp: ${timestamp})`);
-    
+
+    // console.log(`偵測到字幕: "${subtitleData.text}" (videoId: ${videoId}, timestamp: ${timestamp})`);
+
     // 處理字幕替換
-    console.log('開始處理字幕替換...');
+    // console.log('開始處理字幕替換...');
     processSubtitle(subtitleData, videoId, timestamp)
       .then(replacedSubtitle => {
         if (replacedSubtitle) {
           console.log(`字幕替換成功: "${subtitleData.text}" -> "${replacedSubtitle.text}"`);
-          
+
           // 顯示替換後的字幕
-          console.log('顯示替換後的字幕...');
-          showSubtitle(replacedSubtitle);
-          
+          // console.log('顯示替換後的字幕...');
+          // 內容比對，只有變化才顯示
+          if (
+            replacedSubtitle.text !== lastSubtitleCache.text ||
+            replacedSubtitle.htmlContent !== lastSubtitleCache.htmlContent ||
+            JSON.stringify(replacedSubtitle.position) !== JSON.stringify(lastSubtitleCache.position)
+          ) {
+            showSubtitle(replacedSubtitle);
+            lastSubtitleCache.text = replacedSubtitle.text;
+            lastSubtitleCache.htmlContent = replacedSubtitle.htmlContent;
+            lastSubtitleCache.position = replacedSubtitle.position ? { ...replacedSubtitle.position } : null;
+          }
+
           // 更新替換計數
           replacementCount++;
-          
+
           // 發送統計信息更新
           sendMessage({
             type: 'UPDATE_STATS',
@@ -91,7 +135,7 @@ function setupEventListeners() {
           });
         } else {
           console.log(`沒有找到替換規則，使用原始字幕: "${subtitleData.text}"`);
-          
+
           // 創建原始字幕數據對象，添加必要的屬性
           const originalSubtitleData = {
             ...subtitleData,
@@ -99,10 +143,20 @@ function setupEventListeners() {
             timestamp: timestamp,
             isReplaced: false
           };
-          
+
           // 顯示原始字幕
-          console.log('顯示原始字幕...');
-          showSubtitle(originalSubtitleData);
+          // console.log('顯示原始字幕...');
+          // 內容比對，只有變化才顯示
+          if (
+            originalSubtitleData.text !== lastSubtitleCache.text ||
+            originalSubtitleData.htmlContent !== lastSubtitleCache.htmlContent ||
+            JSON.stringify(originalSubtitleData.position) !== JSON.stringify(lastSubtitleCache.position)
+          ) {
+            showSubtitle(originalSubtitleData);
+            lastSubtitleCache.text = originalSubtitleData.text;
+            lastSubtitleCache.htmlContent = originalSubtitleData.htmlContent;
+            lastSubtitleCache.position = originalSubtitleData.position ? { ...originalSubtitleData.position } : null;
+          }
         }
       })
       .catch(error => {
@@ -119,6 +173,9 @@ function setupEventListeners() {
       // 如果停用，隱藏所有自定義字幕
       if (!isEnabled) {
         hideSubtitle();
+        lastSubtitleCache.text = null;
+        lastSubtitleCache.htmlContent = null;
+        lastSubtitleCache.position = null;
       }
     } else if (message.type === 'TOGGLE_DEBUG_MODE') {
       debugMode = message.debugMode;

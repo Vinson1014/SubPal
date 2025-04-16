@@ -9,6 +9,10 @@ import { sendMessage, onMessage } from './messaging.js';
 // 事件回調函數
 let subtitleDetectedCallback = null;
 
+// 上一次處理的字幕文本和位置
+let lastSubtitleText = '';
+let lastSubtitlePosition = null;
+
 // 字幕元素選擇器
 const SUBTITLE_SELECTORS = [
   '.player-timedtext-text-container', // 主要字幕容器
@@ -48,8 +52,8 @@ export function initSubtitleDetector() {
   // 立即檢查視頻播放器是否已存在
   checkForVideoPlayer();
   
-  // 定期檢查字幕元素
-  setInterval(scanForSubtitles, 2000);
+  // 設置字幕容器觀察器
+  setupSubtitleObserver();
   
   console.log('字幕偵測模組初始化完成');
 }
@@ -83,33 +87,67 @@ function loadDebugMode() {
 }
 
 /**
+ * 設置字幕容器觀察器
+ */
+function setupSubtitleObserver() {
+  // 尋找字幕容器
+  const subtitleContainer = document.querySelector('.player-timedtext');
+  if (subtitleContainer) {
+    // 創建專門用於字幕容器的 MutationObserver
+    const subtitleObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'childList' || mutation.type === 'characterData') {
+          scanForSubtitles();
+          break;
+        }
+      }
+    });
+    
+    // 觀察字幕容器的變化
+    subtitleObserver.observe(subtitleContainer, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+    
+    console.log('已設置字幕容器觀察器');
+  } else {
+    // 如果找不到字幕容器，稍後再試
+    setTimeout(setupSubtitleObserver, 1000);
+  }
+}
+
+/**
  * 主動掃描頁面尋找字幕元素
  */
 function scanForSubtitles() {
   if (debugMode) {
     console.log('主動掃描字幕元素...');
   }
-  
-  // 嘗試所有選擇器
-  for (const selector of SUBTITLE_SELECTORS) {
-    const elements = document.querySelectorAll(selector);
-    if (elements.length > 0) {
-      if (debugMode) {
-        console.log(`找到 ${elements.length} 個字幕元素，使用選擇器: ${selector}`);
-      }
-      
-      // 處理每個找到的元素
-      elements.forEach(element => {
-        processSubtitleElement(element);
-      });
-      
-      // 找到元素後不需要繼續嘗試其他選擇器
-      return;
+
+  // 只針對最外層字幕 container 做偵測與合併
+  const containers = document.querySelectorAll('.player-timedtext-text-container');
+  if (containers.length > 0) {
+    if (debugMode) {
+      console.log(`找到 ${containers.length} 個字幕 container`);
     }
+    containers.forEach(container => {
+      processSubtitleContainerMerged(container);
+    });
+    return;
   }
-  
-  if (debugMode) {
-    console.log('未找到字幕元素');
+
+  // 沒有任何字幕時，主動觸發空字幕事件
+  if (subtitleDetectedCallback) {
+    if (debugMode) {
+      console.log('未找到字幕 container，觸發空字幕事件');
+    }
+    subtitleDetectedCallback({
+      text: '',
+      position: null,
+      element: null,
+      isEmpty: true
+    });
   }
 }
 
@@ -166,31 +204,8 @@ function checkForVideoPlayer() {
  * @param {MutationRecord[]} mutations - 變化記錄
  */
 function handleDOMChanges(mutations) {
-  // 檢查是否有字幕元素的變化
-  for (const mutation of mutations) {
-    // 如果是字幕元素的變化
-    if (isSubtitleElement(mutation.target)) {
-      processSubtitleElement(mutation.target);
-    }
-    
-    // 檢查新增的節點
-    if (mutation.addedNodes && mutation.addedNodes.length > 0) {
-      for (const node of mutation.addedNodes) {
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          // 檢查新增的元素是否是字幕元素
-          if (isSubtitleElement(node)) {
-            processSubtitleElement(node);
-          }
-          
-          // 檢查新增元素的子元素
-          const subtitleElements = node.querySelectorAll(SUBTITLE_SELECTORS.join(', '));
-          for (const element of subtitleElements) {
-            processSubtitleElement(element);
-          }
-        }
-      }
-    }
-  }
+  // 只要有 DOM 變化就重新掃描字幕（不再單獨處理每個元素）
+  scanForSubtitles();
 }
 
 /**
@@ -214,71 +229,92 @@ function isSubtitleElement(element) {
 }
 
 /**
- * 處理字幕元素
- * @param {Element} element - 字幕元素
+ * 合併 container 內所有 span，並正確抓取分行與位置
+ * @param {Element} container
  */
-function processSubtitleElement(element) {
-  // 提取字幕文本
-  const text = element.textContent.trim();
-  
-  // 如果字幕為空，則忽略
+function processSubtitleContainerMerged(container) {
+  // 直接抓取 container 的 innerHTML 與 textContent
+  const text = container.textContent.trim();
+  const htmlContent = container.innerHTML;
+
+  // 如果字幕為空，觸發空字幕事件
   if (!text) {
+    if (subtitleDetectedCallback) {
+      if (debugMode) {
+        console.log('偵測到空字幕，觸發隱藏事件');
+      }
+      subtitleDetectedCallback({
+        text: '',
+        position: null,
+        element: container,
+        isEmpty: true
+      });
+    }
     return;
   }
-  
-  if (debugMode) {
-    console.log(`處理字幕元素: "${text}"`);
-    console.log('元素類型:', element.tagName);
-    console.log('元素類名:', element.className);
-    console.log('元素 ID:', element.id);
-    console.log('元素屬性:', Array.from(element.attributes).map(attr => `${attr.name}="${attr.value}"`).join(', '));
-  }
-  
-  // 獲取字幕位置信息
-  const rect = element.getBoundingClientRect();
-  const position = {
-    top: rect.top,
-    left: rect.left,
-    width: rect.width,
-    height: rect.height
-  };
-  
-  if (debugMode) {
-    console.log('字幕位置:', position);
-  }
-  
-  // 獲取字幕樣式
-  const style = window.getComputedStyle(element);
-  const subtitleStyle = {
-    fontSize: style.fontSize,
-    fontFamily: style.fontFamily,
-    color: style.color,
-    backgroundColor: style.backgroundColor,
-    textAlign: style.textAlign
-  };
-  
-  if (debugMode) {
-    console.log('字幕樣式:', subtitleStyle);
-  }
-  
-  // 創建字幕數據對象
-  const subtitleData = {
-    text,
-    position,
-    style: subtitleStyle,
-    element,
-    timestamp: Date.now()
-  };
-  
-  // 觸發字幕偵測事件
-  if (subtitleDetectedCallback) {
-    if (debugMode) {
-      console.log('觸發字幕偵測事件:', subtitleData);
+
+  // 延遲抓取 position，確保 DOM 已排版
+  function getAndEmitPosition(retry = 0) {
+    const rect = container.getBoundingClientRect();
+    const position = {
+      top: rect.top,
+      left: rect.left,
+      width: rect.width,
+      height: rect.height
+    };
+
+    // 若 position 異常，最多重試 3 次
+    if ((position.top < 1 || position.left < 1 || position.width < 1) && retry < 3) {
+      setTimeout(() => getAndEmitPosition(retry + 1), 30 * (retry + 1));
+      return;
     }
-    subtitleDetectedCallback(subtitleData);
-  } else if (debugMode) {
-    console.warn('字幕偵測回調未設置，無法處理字幕');
+
+    // 去重：只用 text+position
+    if (
+      text === lastSubtitleText &&
+      lastSubtitlePosition &&
+      Math.abs(lastSubtitlePosition.top - position.top) < 5 &&
+      Math.abs(lastSubtitlePosition.left - position.left) < 5
+    ) {
+      if (debugMode) {
+        console.log('字幕文本和位置與上一次相同，不觸發更新');
+      }
+      return;
+    }
+    lastSubtitleText = text;
+    lastSubtitlePosition = { ...position };
+
+    // 樣式
+    const style = window.getComputedStyle(container);
+    const subtitleStyle = {
+      fontSize: style.fontSize,
+      fontFamily: style.fontFamily,
+      color: style.color,
+      backgroundColor: style.backgroundColor,
+      textAlign: style.textAlign
+    };
+
+    if (debugMode) {
+      console.log('原生 innerHTML 字幕:', text);
+      console.log('字幕位置:', position);
+      console.log('字幕樣式:', subtitleStyle);
+    }
+
+    // 回調
+    const subtitleData = {
+      text,
+      position,
+      style: subtitleStyle,
+      element: container,
+      htmlContent
+    };
+    if (subtitleDetectedCallback) {
+      subtitleDetectedCallback(subtitleData);
+    }
   }
+
+  // 延遲 1 frame 抓取位置
+  requestAnimationFrame(() => getAndEmitPosition(0));
 }
 
 /**

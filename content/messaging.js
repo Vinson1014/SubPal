@@ -23,7 +23,7 @@ export function initMessaging() {
         return;
       }
       
-      console.log('收到來自橋接器的消息:', event.data.type, event.data);
+      // console.log('收到來自橋接器的消息:', event.data.type, event.data);
       
       // 只處理從橋接器轉發的 Chrome 消息
       if (event.data.type === 'CHROME_MESSAGE') {
@@ -39,7 +39,7 @@ export function initMessaging() {
           }, '*');
         });
       } else if (event.data.type === 'RESPONSE') {
-        console.log('收到來自橋接器的回應:', event.data);
+        // console.log('收到來自橋接器的回應:', event.data);
       }
     });
     
@@ -49,7 +49,7 @@ export function initMessaging() {
       type: 'CONTENT_SCRIPT_LOADED'
     })
     .then(response => {
-      console.log('收到 background script 的回應:', response);
+      // console.log('收到 background script 的回應:', response);
     })
     .catch(error => {
       console.error('通知 background script 時出錯:', error);
@@ -164,13 +164,13 @@ function handleMessage(message, sender, sendResponse) {
  * @returns {Promise<any>} - 回應 Promise
  */
 export function sendMessage(message) {
-  console.log('發送消息:', message);
+  // console.log('發送消息:', message);
   
   return new Promise((resolve, reject) => {
     try {
       // 生成唯一消息 ID
       const messageId = Date.now() + Math.random().toString(36).substr(2, 9);
-      console.log(`生成消息 ID: ${messageId}`);
+      // console.log(`生成消息 ID: ${messageId}`);
       
       // 創建消息處理器
       const messageHandler = (event) => {
@@ -182,11 +182,11 @@ export function sendMessage(message) {
         
         // 檢查是否是對我們發送的消息的回應
         if (event.data.type === 'RESPONSE' && event.data.id === messageId) {
-          console.log(`收到消息 ID ${messageId} 的回應:`, event.data.data);
+          // console.log(`收到消息 ID ${messageId} 的回應:`, event.data.data);
           
           // 移除消息處理器
           window.removeEventListener('message', messageHandler);
-          console.log(`移除消息 ID ${messageId} 的處理器`);
+          // console.log(`移除消息 ID ${messageId} 的處理器`);
           
           // 解析 Promise
           resolve(event.data.data);
@@ -194,11 +194,11 @@ export function sendMessage(message) {
       };
       
       // 添加消息處理器
-      console.log(`添加消息 ID ${messageId} 的處理器`);
+      // console.log(`添加消息 ID ${messageId} 的處理器`);
       window.addEventListener('message', messageHandler);
       
       // 通過 postMessage 發送消息到橋接器
-      console.log(`發送消息 ID ${messageId} 到橋接器:`, message);
+      // console.log(`發送消息 ID ${messageId} 到橋接器:`, message);
       window.postMessage({
         type: 'SEND_TO_BACKGROUND',
         from: 'SUBTITLE_ASSISTANT',
@@ -208,9 +208,9 @@ export function sendMessage(message) {
       }, '*');
       
       // 設置超時
-      console.log(`設置消息 ID ${messageId} 的超時處理`);
+      // console.log(`設置消息 ID ${messageId} 的超時處理`);
       setTimeout(() => {
-        console.log(`消息 ID ${messageId} 超時`);
+        // console.log(`消息 ID ${messageId} 超時`);
         window.removeEventListener('message', messageHandler);
         reject(new Error('發送消息超時'));
       }, 5000);
