@@ -18,10 +18,17 @@ let lastSubtitleCache = {
 };
 import { initMessaging, sendMessage, onMessage } from './messaging.js';
 
-// 擴充功能狀態
+/**
+ * 擴充功能狀態與調試函式
+ */
 let isEnabled = true;
 let replacementCount = 0;
 let debugMode = false;
+
+// 僅在 debugMode 開啟時輸出日誌
+function debugLog(...args) {
+  if (debugMode) console.log('[Index]', ...args);
+}
 
 /**
  * 初始化擴充功能
@@ -31,7 +38,7 @@ function initExtension() {
   
   // 初始化所有模組
   initMessaging();
-  console.log('消息傳遞模組初始化完成');
+  debugLog('消息傳遞模組已就緒');
   
   initVideoInfo();
   console.log('視頻信息模組初始化完成');

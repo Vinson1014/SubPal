@@ -1,330 +1,313 @@
-// 擴充功能狀態
+// 狀態變數
 let isEnabled = true;
 let replacementCount = 0;
 let currentVideoId = '';
-
-// 測試模式狀態
 let isTestModeEnabled = false;
-let testRules = []; // 格式: [{ original: '原文', replacement: '替換文' }]
-
-// 調試模式狀態
+let testRules = [];
 let debugMode = false;
 
-// 更新UI狀態
-function updateUI() {
-    const statusDiv = document.querySelector('.status');
-    const toggleButton = document.getElementById('toggleButton');
-    const currentVideoSpan = document.getElementById('currentVideo');
-    const replacementCountSpan = document.getElementById('replacementCount');
-    const testModeToggle = document.getElementById('testModeToggle');
-    const testModeContent = document.getElementById('testModeContent');
-    const debugModeToggle = document.getElementById('debugModeToggle');
+// 新增：積分、貢獻數（mock）、userID
+let score = 20; // mock
+let contribCount = 50; // mock
+let replaceCount = 12; // mock
+let userId = '';
 
-    // 更新狀態顯示
-    statusDiv.className = `status ${isEnabled ? 'active' : 'inactive'}`;
-    statusDiv.textContent = isEnabled ? 'Netflix 字幕優化功能已啟動' : 'Netflix 字幕優化功能已停用';
-    
-    // 更新按鈕文字
-    toggleButton.textContent = isEnabled ? '停用功能' : '啟用功能';
-    
-    // 更新統計資訊
-    currentVideoSpan.textContent = currentVideoId || '未偵測到影片';
-    replacementCountSpan.textContent = replacementCount;
-    
-    // 更新測試模式狀態
-    if (testModeToggle) {
-        testModeToggle.checked = isTestModeEnabled;
-        if (isTestModeEnabled) {
-            testModeContent.classList.remove('hidden');
-        } else {
-            testModeContent.classList.add('hidden');
-        }
-    }
-    
-    // 更新調試模式狀態
-    if (debugModeToggle) {
-        debugModeToggle.checked = debugMode;
-    }
-    
-    // 更新測試規則列表
-    renderTestRules();
-}
+// ===== userID 相關 =====
 
-// 渲染測試規則列表
-function renderTestRules() {
-    const testRulesList = document.getElementById('testRulesList');
-    if (!testRulesList) return;
-    
-    // 清空列表
-    testRulesList.innerHTML = '';
-    
-    // 添加每個規則項目
-    testRules.forEach((rule, index) => {
-        const ruleItem = document.createElement('div');
-        ruleItem.className = 'test-rule-item';
-        
-        const ruleText = document.createElement('div');
-        ruleText.textContent = `${rule.original} → ${rule.replacement}`;
-        
-        const deleteButton = document.createElement('button');
-        deleteButton.textContent = '刪除';
-        deleteButton.addEventListener('click', () => deleteTestRule(index));
-        
-        ruleItem.appendChild(ruleText);
-        ruleItem.appendChild(deleteButton);
-        testRulesList.appendChild(ruleItem);
-    });
-    
-    // 如果沒有規則，顯示提示信息
-    if (testRules.length === 0) {
-        const emptyMessage = document.createElement('div');
-        emptyMessage.textContent = '尚未添加測試規則';
-        emptyMessage.style.color = '#999';
-        emptyMessage.style.padding = '5px';
-        testRulesList.appendChild(emptyMessage);
-    }
-}
-
-// 切換測試模式
-function toggleTestMode() {
-    isTestModeEnabled = !isTestModeEnabled;
-    
-    // 儲存狀態
-    chrome.storage.local.set({ isTestModeEnabled }, () => {
-        // 通知 background script 測試模式狀態變更
-        chrome.runtime.sendMessage({
-            type: 'TOGGLE_TEST_MODE',
-            isTestModeEnabled
-        });
-        
-        updateUI();
-    });
-}
-
-// 切換調試模式
-function toggleDebugMode() {
-    debugMode = !debugMode;
-    
-    // 儲存狀態
-    chrome.storage.local.set({ debugMode }, () => {
-        // 通知 content script 調試模式狀態變更
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs[0]) {
-                chrome.tabs.sendMessage(tabs[0].id, { 
-                    type: 'TOGGLE_DEBUG_MODE',
-                    debugMode 
-                });
+/**
+ * 取得或產生 userID
+ * 註冊 API 範例：呼叫後端 /users，送出 userID 與 nickname
+ */
+async function getUserId() {
+    return new Promise((resolve) => {
+        chrome.storage.local.get(['userID'], (result) => {
+            if (result.userID) {
+                resolve(result.userID);
+            } else {
+                const newId = crypto.randomUUID();
+                chrome.storage.local.set({ userID: newId }, () => resolve(newId));
             }
         });
-        
-        console.log(`調試模式已${debugMode ? '啟用' : '停用'}`);
-        updateUI();
     });
 }
 
-// 添加測試規則
-function addTestRule() {
-    const originalText = document.getElementById('originalText').value.trim();
-    const replacementText = document.getElementById('replacementText').value.trim();
-    
-    if (!originalText || !replacementText) {
-        alert('請輸入原文和替換文本');
+import { API_BASE_URL } from './content/config.js';
+
+/**
+ * 註冊/初始化用戶到後端
+ * @param {string} userID
+ * @param {string} [nickname]
+ * @returns {Promise<string>} 回傳 userID
+ */
+async function registerUser(userID, nickname) {
+    try {
+        const res = await fetch(`${API_BASE_URL}/users`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userID, nickname })
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.error || '註冊失敗');
+        }
+        const data = await res.json();
+        return data.userID;
+    } catch (e) {
+        showToast('用戶註冊失敗: ' + e.message);
+        throw e;
+    }
+}
+
+// 遮蔽 userID 顯示（前4+****+後4）
+function maskUserId(id) {
+    if (!id || id.length < 8) return id;
+    return id.slice(0, 4) + '****' + id.slice(-4);
+}
+
+// 複製 userID
+function copyUserId() {
+    if (!userId) return;
+    navigator.clipboard.writeText(userId).then(() => {
+        showToast('userID 已複製');
+    });
+}
+
+let restoreSectionTimeout = null;
+
+// 重設 userID
+function resetUserId() {
+    if (!confirm('確定要重設 userID？此操作無法還原。\n如果想要恢復舊有ID 請先重設一次')) return;
+    const newId = crypto.randomUUID();
+    chrome.storage.local.set({ userID: newId }, () => {
+        userId = newId;
+        updateUserIdUI();
+        showToast('userID 已重設');
+        // 顯示恢復 userID 區塊
+        showRestoreUserIdSection();
+    });
+}
+
+// 顯示恢復 userID 區塊
+function showRestoreUserIdSection() {
+    const section = document.getElementById('restore-userid-section');
+    if (section) {
+        section.classList.remove('hidden');
+        // 自動隱藏（如需可調整時間）
+        clearTimeout(restoreSectionTimeout);
+        restoreSectionTimeout = setTimeout(() => {
+            section.classList.add('hidden');
+            hideRestoreUserIdForm();
+        }, 20000);
+    }
+}
+
+// 隱藏恢復 userID 輸入表單
+function hideRestoreUserIdForm() {
+    const form = document.getElementById('restore-userid-form');
+    if (form) form.classList.add('hidden');
+    const input = document.getElementById('restore-userid-input');
+    if (input) input.value = '';
+}
+
+// 展開恢復 userID 輸入表單
+function showRestoreUserIdForm() {
+    const form = document.getElementById('restore-userid-form');
+    if (form) form.classList.remove('hidden');
+    const input = document.getElementById('restore-userid-input');
+    if (input) input.focus();
+}
+
+// 恢復 userID
+function restoreUserId() {
+    const input = document.getElementById('restore-userid-input');
+    if (!input) return;
+    const val = input.value.trim();
+    if (!val || val.length < 8) {
+        showToast('請輸入有效的 userID');
         return;
     }
-    
-    console.log('添加測試規則:', originalText, '->', replacementText);
-    
-    // 添加到規則列表
-    testRules.push({
-        original: originalText,
-        replacement: replacementText
-    });
-    
-    // 儲存規則
-    saveTestRules();
-    
-    // 清空輸入框
-    document.getElementById('originalText').value = '';
-    document.getElementById('replacementText').value = '';
-    
-    // 更新 UI
-    renderTestRules();
-    
-    // 顯示成功提示
-    const statusDiv = document.querySelector('.status');
-    const originalStatus = statusDiv.textContent;
-    const originalClass = statusDiv.className;
-    
-    statusDiv.textContent = '測試規則已添加！';
-    statusDiv.className = 'status active';
-    
-    setTimeout(() => {
-        statusDiv.textContent = originalStatus;
-        statusDiv.className = originalClass;
-    }, 2000);
-}
-
-// 刪除測試規則
-function deleteTestRule(index) {
-    testRules.splice(index, 1);
-    saveTestRules();
-    renderTestRules();
-}
-
-// 儲存測試規則
-function saveTestRules() {
-    chrome.storage.local.set({ testRules }, () => {
-        // 通知 background script 測試規則已更新
-        chrome.runtime.sendMessage({
-            type: 'UPDATE_TEST_RULES',
-            testRules
-        });
+    chrome.storage.local.set({ userID: val }, () => {
+        userId = val;
+        updateUserIdUI();
+        showToast('userID 已恢復');
+        hideRestoreUserIdForm();
+        // 隱藏整個區塊
+        const section = document.getElementById('restore-userid-section');
+        if (section) section.classList.add('hidden');
     });
 }
 
-// 切換擴充功能狀態
-function toggleExtension() {
-    isEnabled = !isEnabled;
-    
-    // 儲存狀態
-    chrome.storage.local.set({ isEnabled }, () => {
-        // 通知 content script 狀態變更
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs[0]) {
-                chrome.tabs.sendMessage(tabs[0].id, { 
-                    type: 'TOGGLE_EXTENSION',
-                    isEnabled 
-                });
-            }
-        });
-        
-        updateUI();
-    });
-}
-
-// 監聽來自 content script 的訊息
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.type === 'UPDATE_STATS') {
-        console.log('彈出窗口收到更新統計信息:', request);
-        currentVideoId = request.videoId;
-        replacementCount = request.replacementCount;
-        updateUI();
+// 更新 userID 顯示
+function updateUserIdUI() {
+    const userIdSpan = document.getElementById('user-id');
+    if (userIdSpan) {
+        userIdSpan.textContent = maskUserId(userId);
     }
-});
-
-// 主動獲取當前視頻信息
-function fetchCurrentVideoInfo() {
-    console.log('主動獲取當前視頻信息');
-    
-    // 從存儲中獲取最新的視頻 ID 和替換計數
-    chrome.storage.local.get(['currentVideoId', 'replacementCount'], (result) => {
-        console.log('從存儲中獲取的數據:', result);
-        
-        if (result.currentVideoId) {
-            currentVideoId = result.currentVideoId;
-            console.log('從存儲中獲取的視頻 ID:', currentVideoId);
-        }
-        
-        if (result.replacementCount !== undefined) {
-            replacementCount = result.replacementCount;
-        }
-        
-        updateUI();
-    });
-    
-    // 嘗試向當前活動標籤頁發送消息，請求最新的視頻 ID
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]) {
-            try {
-                chrome.tabs.sendMessage(tabs[0].id, { type: 'GET_VIDEO_INFO' }, (response) => {
-                    if (chrome.runtime.lastError) {
-                        console.log('發送消息時出錯:', chrome.runtime.lastError);
-                        return;
-                    }
-                    
-                    if (response && response.videoId) {
-                        console.log('從內容腳本獲取的視頻 ID:', response.videoId);
-                        currentVideoId = response.videoId;
-                        replacementCount = response.replacementCount || replacementCount;
-                        updateUI();
-                    }
-                });
-            } catch (error) {
-                console.log('嘗試發送消息時出錯:', error);
-            }
-        }
-    });
 }
 
-// 初始化
-document.addEventListener('DOMContentLoaded', () => {
-    console.log('彈出窗口已加載');
-    
-    // 載入儲存的狀態
-    chrome.storage.local.get(['isEnabled', 'replacementCount', 'currentVideoId', 'isTestModeEnabled', 'testRules', 'debugMode'], (result) => {
-        console.log('初始化時從存儲中獲取的數據:', result);
-        
-        if (result.isEnabled !== undefined) {
-            isEnabled = result.isEnabled;
-        }
-        if (result.replacementCount !== undefined) {
-            replacementCount = result.replacementCount;
-        }
-        if (result.currentVideoId !== undefined) {
-            currentVideoId = result.currentVideoId;
-            console.log('初始化時從存儲中獲取的視頻 ID:', currentVideoId);
-        }
-        if (result.isTestModeEnabled !== undefined) {
-            isTestModeEnabled = result.isTestModeEnabled;
-            console.log('初始化時從存儲中獲取的測試模式狀態:', isTestModeEnabled);
-        }
-        if (result.testRules && Array.isArray(result.testRules)) {
-            testRules = result.testRules;
-            console.log('初始化時從存儲中獲取的測試規則:', testRules);
-        }
-        if (result.debugMode !== undefined) {
-            debugMode = result.debugMode;
-            console.log('初始化時從存儲中獲取的調試模式狀態:', debugMode);
-        }
-        
-        updateUI();
-        
-        // 主動獲取當前視頻信息
-        fetchCurrentVideoInfo();
-    });
-    
-    // 綁定按鈕點擊事件
-    document.getElementById('toggleButton').addEventListener('click', toggleExtension);
-    
-    // 綁定測試模式相關事件
-    const testModeToggle = document.getElementById('testModeToggle');
-    if (testModeToggle) {
-        testModeToggle.addEventListener('change', toggleTestMode);
+// ===== UI 更新 =====
+
+function updateUI() {
+    // 狀態條
+    const statusBar = document.querySelector('.status-bar');
+    const mainToggle = document.getElementById('mainToggle');
+    if (statusBar && mainToggle) {
+        statusBar.className = 'status-bar' + (isEnabled ? ' active' : ' inactive');
+        mainToggle.checked = isEnabled;
     }
-    
-    // 綁定調試模式開關事件
+
+    // userID
+    updateUserIdUI();
+
+    // 積分、貢獻、替換數
+    document.getElementById('score').textContent = score;
+    document.getElementById('contrib-count').textContent = contribCount;
+    document.getElementById('replace-count').textContent = replaceCount;
+
+    // 影片資訊
+    document.getElementById('currentVideo').textContent = currentVideoId || '未偵測到影片';
+
+    // 測試/調試模式
     const debugModeToggle = document.getElementById('debugModeToggle');
-    if (debugModeToggle) {
-        debugModeToggle.addEventListener('change', toggleDebugMode);
+    if (debugModeToggle) debugModeToggle.checked = debugMode;
+    const testModeToggle = document.getElementById('testModeToggle');
+    if (testModeToggle) testModeToggle.checked = isTestModeEnabled;
+}
+
+// ===== Toast =====
+function showToast(msg) {
+    const toast = document.getElementById('success-toast');
+    if (!toast) return;
+    toast.textContent = msg;
+    toast.style.display = 'block';
+    setTimeout(() => {
+        toast.style.display = 'none';
+    }, 1800);
+}
+
+// ===== 事件綁定 =====
+
+document.addEventListener('DOMContentLoaded', async () => {
+    // 取得 userID
+    userId = await getUserId();
+    // 註冊/初始化用戶到後端（可選 nickname，這裡以空字串為例）
+    try {
+        await registerUser(userId, '');
+    } catch (e) {
+        // 已於 registerUser 顯示錯誤
     }
-    
-    const addTestRuleButton = document.getElementById('addTestRule');
-    if (addTestRuleButton) {
-        addTestRuleButton.addEventListener('click', addTestRule);
+    updateUserIdUI();
+
+    // 複製 userID
+    document.getElementById('copy-userid').addEventListener('click', copyUserId);
+
+    // 重設 userID
+    document.getElementById('reset-userid').addEventListener('click', resetUserId);
+
+    // 主開關
+    const mainToggle = document.getElementById('mainToggle');
+    mainToggle.addEventListener('change', (e) => {
+        isEnabled = e.target.checked;
+        // 1. 更新本地存儲
+        chrome.storage.local.set({ isEnabled });
+        // 2. 更新 UI
+        updateUI();
+        // 3. 發送消息通知 background 和 content
+        chrome.runtime.sendMessage({ type: 'TOGGLE_EXTENSION', isEnabled });
+    });
+
+    // 調試模式開關
+    const debugModeToggle = document.getElementById('debugModeToggle');
+    debugModeToggle.addEventListener('change', (e) => {
+        debugMode = e.target.checked;
+        // 1. 更新本地存儲
+        chrome.storage.local.set({ debugMode });
+        // 2. 更新 UI
+        updateUI();
+        // 3. 發送消息通知 background 和 content
+        chrome.runtime.sendMessage({ type: 'TOGGLE_DEBUG_MODE', debugMode });
+    });
+
+    // 測試模式開關 (保留原有邏輯，如果需要同步也需添加 sendMessage)
+    const testModeToggle = document.getElementById('testModeToggle');
+    testModeToggle.addEventListener('change', (e) => {
+        isTestModeEnabled = e.target.checked;
+        chrome.storage.local.set({ isTestModeEnabled });
+        updateUI();
+        // 如果需要，添加: chrome.runtime.sendMessage({ type: 'TOGGLE_TEST_MODE', isTestModeEnabled });
+    });
+
+    // 恢復 userID 相關事件
+    const restoreSection = document.getElementById('restore-userid-section');
+    const showRestoreLink = document.getElementById('show-restore-userid-link');
+    const restoreForm = document.getElementById('restore-userid-form');
+    const restoreBtn = document.getElementById('restore-userid-btn');
+    const restoreInput = document.getElementById('restore-userid-input');
+    if (showRestoreLink) {
+        showRestoreLink.addEventListener('click', (e) => {
+            e.preventDefault();
+            showRestoreUserIdForm();
+        });
     }
-    
-    // 為輸入框添加回車鍵提交功能
-    const originalTextInput = document.getElementById('originalText');
-    const replacementTextInput = document.getElementById('replacementText');
-    
-    if (originalTextInput && replacementTextInput) {
-        const handleEnterKey = (event) => {
-            if (event.key === 'Enter') {
-                addTestRule();
+    if (restoreBtn) {
+        restoreBtn.addEventListener('click', restoreUserId);
+    }
+    if (restoreInput) {
+        restoreInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') restoreUserId();
+        });
+    }
+
+    // 初始化時從 background 獲取最新狀態
+    chrome.runtime.sendMessage({ type: 'GET_SETTINGS', keys: ['isEnabled', 'debugMode', 'isTestModeEnabled', 'currentVideoId', 'replacementCount'] }, (response) => {
+        if (chrome.runtime.lastError) {
+            console.error('無法從 background 獲取初始設置:', chrome.runtime.lastError.message);
+            // 使用本地存儲作為備用
+            chrome.storage.local.get(['isEnabled', 'debugMode', 'isTestModeEnabled', 'currentVideoId', 'replacementCount'], (localResult) => {
+                isEnabled = localResult.isEnabled !== undefined ? localResult.isEnabled : true;
+                debugMode = localResult.debugMode || false;
+                isTestModeEnabled = localResult.isTestModeEnabled || false;
+                currentVideoId = localResult.currentVideoId || '';
+                replaceCount = localResult.replacementCount || 0;
+                updateUI();
+            });
+        } else if (response && response.success) {
+            console.log('從 background 獲取初始設置:', response);
+            isEnabled = response.isEnabled !== undefined ? response.isEnabled : true; // 預設啟用
+            debugMode = response.debugMode || false;
+            isTestModeEnabled = response.isTestModeEnabled || false;
+            currentVideoId = response.currentVideoId || '';
+            replaceCount = response.replacementCount || 0;
+            updateUI(); // 使用從 background 獲取的最新狀態更新 UI
+        } else {
+            console.warn('從 background 獲取初始設置失敗:', response?.error);
+            // 處理失敗情況，例如使用預設值或本地存儲
+            chrome.storage.local.get(['isEnabled', 'debugMode', 'isTestModeEnabled', 'currentVideoId', 'replacementCount'], (localResult) => {
+                isEnabled = localResult.isEnabled !== undefined ? localResult.isEnabled : true;
+                debugMode = localResult.debugMode || false;
+                isTestModeEnabled = localResult.isTestModeEnabled || false;
+                currentVideoId = localResult.currentVideoId || '';
+                replaceCount = localResult.replacementCount || 0;
+                updateUI();
+            });
+        }
+    });
+
+    // 監聽來自 background 的狀態更新消息 (可選，如果需要即時同步)
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.type === 'UPDATE_STATS') {
+            // 更新替換計數等統計信息
+            if (message.replacementCount !== undefined) {
+                replaceCount = message.replacementCount;
             }
-        };
-        
-        originalTextInput.addEventListener('keypress', handleEnterKey);
-        replacementTextInput.addEventListener('keypress', handleEnterKey);
-    }
+            if (message.videoId) {
+                currentVideoId = message.videoId;
+            }
+            updateUI();
+        }
+        // 可以添加更多消息類型來同步其他狀態
+    });
+
+    // 其他初始化（積分、貢獻可從 server 取得，這裡先 mock）
+    // updateUI(); // 移到獲取設置後再調用
 });

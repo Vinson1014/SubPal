@@ -2,53 +2,29 @@
 <html>
 <head>
     <meta charset="UTF-8">
+    <title>Netflix 字幕優化助手</title>
     <style>
         body {
-            width: 300px;
-            padding: 10px;
+            width: 320px;
+            padding: 14px 10px 10px 10px;
             font-family: Arial, sans-serif;
+            background: #f7f7f7;
         }
-        .status {
-            padding: 10px;
-            margin-bottom: 10px;
-            border-radius: 4px;
-        }
-        .status.active {
-            background-color: #e8f5e9;
-            color: #2e7d32;
-        }
-        .status.inactive {
-            background-color: #ffebee;
-            color: #c62828;
-        }
-        button {
-            width: 100%;
-            padding: 8px;
-            background-color: #1976d2;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-top: 10px;
-        }
-        button:hover {
-            background-color: #1565c0;
-        }
-        .stats {
-            margin-top: 15px;
-            font-size: 14px;
-        }
-        .test-mode {
-            margin-top: 15px;
-            padding: 10px;
-            background-color: #f5f5f5;
-            border-radius: 4px;
-        }
-        .test-mode-header {
+        .status-bar {
+            background: #e6f9e6;
+            color: #1a7f1a;
+            padding: 8px 12px;
+            border-radius: 8px;
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            margin-bottom: 10px;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            font-weight: bold;
+        }
+        .status-bar-title {
+            font-size: 1.5em;
+            font-weight: bold;
+            letter-spacing: 1px;
         }
         .switch {
             position: relative;
@@ -68,7 +44,7 @@
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: #ccc;
+            background-color: #e74c3c; /* 關閉時紅色 */
             transition: .4s;
             border-radius: 20px;
         }
@@ -84,97 +60,164 @@
             border-radius: 50%;
         }
         input:checked + .slider {
-            background-color: #1976d2;
+            background-color: #1a7f1a; /* 開啟時綠色 */
+        }
+        input:not(:checked) + .slider {
+            background-color: #e74c3c; /* 關閉時紅色 */
         }
         input:checked + .slider:before {
             transform: translateX(20px);
         }
-        .test-rule {
-            margin-top: 10px;
+        .card {
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            padding: 16px;
+            margin-bottom: 16px;
         }
-        .test-rule input {
-            width: 100%;
-            padding: 8px;
-            margin-bottom: 5px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            box-sizing: border-box;
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
         }
-        .test-rule button {
-            margin-top: 5px;
+        .user-id {
+            font-family: 'Consolas', monospace;
+            font-size: 1em;
+            background: #f5f5f5;
+            padding: 2px 8px;
+            border-radius: 6px;
+            margin-right: 4px;
         }
-        .test-rules-list {
-            margin-top: 10px;
-            max-height: 150px;
-            overflow-y: auto;
+        #copy-userid, #reset-userid {
+            background: #f5f5f5;
+            border: none;
+            border-radius: 6px;
+            padding: 4px 8px;
+            cursor: pointer;
+            transition: background 0.2s;
+            font-size: 0.95em;
         }
-        .test-rule-item {
-            padding: 5px;
-            border-bottom: 1px solid #eee;
+        #copy-userid:hover, #reset-userid:hover {
+            background: #ffeaea;
+        }
+        .score-info, .contribution-info {
+            font-size: 1.1em;
+            margin-bottom: 6px;
+        }
+        .contribution-info {
+            margin-top: 4px;
+        }
+        hr {
+            border: none;
+            border-top: 1px solid #eee;
+            margin: 8px 0;
+        }
+        .stats {
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        .toggle-section {
+            background: #f5f5f5;
+            border-radius: 8px;
+            padding: 12px 10px;
+            margin-bottom: 12px;
+        }
+        .toggle-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            margin-bottom: 6px;
         }
-        .test-rule-item button {
-            width: auto;
-            padding: 2px 5px;
-            margin: 0 0 0 5px;
+        .toggle-title {
+            font-size: 1.08em;
+            font-weight: bold;
+            margin: 0;
+        }
+        .toggle-desc {
             font-size: 12px;
+            color: #666;
+            margin-top: 2px;
         }
         .hidden {
+            display: none;
+        }
+        .success-toast {
+            background: #e6f9e6;
+            color: #1a7f1a;
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 13px;
+            position: fixed;
+            left: 50%;
+            top: 10px;
+            transform: translateX(-50%);
+            z-index: 999;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
             display: none;
         }
     </style>
 </head>
 <body>
-    <div class="status active">
-        Netflix 字幕優化功能已啟動
+    <div class="status-bar">
+        <span class="status-bar-title">字幕助手</span>
+        <label class="switch">
+            <input type="checkbox" id="mainToggle" checked>
+            <span class="slider"></span>
+        </label>
+    </div>
+    <div class="card">
+        <div class="user-info">
+            <span>userID: <span class="user-id" id="user-id">******</span></span>
+            <button id="copy-userid" title="複製 userID">複製</button>
+            <button id="reset-userid" title="重設 userID">重設</button>
+        </div>
+        <div class="score-info">
+            目前積分：<b id="score">**</b>
+        </div>
+        <!-- 恢復 userID 區塊（預設隱藏） -->
+        <div id="restore-userid-section" class="hidden" style="margin: 8px 0 0 0;">
+            <span style="font-size:12px;">
+                如果你有備份的 userID，<a href="#" id="show-restore-userid-link">請點此恢復</a>
+            </span>
+            <div id="restore-userid-form" class="hidden" style="margin-top:6px;">
+                <input type="text" id="restore-userid-input" placeholder="貼上 userID" style="width:140px;">
+                <button id="restore-userid-btn" style="padding:2px 8px;font-size:12px;">確定</button>
+            </div>
+        </div>
+        <hr>
+        <div class="contribution-info">
+            累積貢獻：<b id="contrib-count">**</b> 條字幕<br>
+            已自動替換：<b id="replace-count">**</b> 條字幕
+        </div>
     </div>
     <div class="stats">
-        <p>目前影片：<span id="currentVideo">未偵測到影片</span></p>
-        <p>已優化字幕數：<span id="replacementCount">0</span></p>
+        目前影片：<span id="currentVideo">未偵測到影片</span>
     </div>
-    <button id="toggleButton">停用功能</button>
-    
     <!-- 調試模式開關 -->
-    <div class="test-mode" style="margin-top: 10px; margin-bottom: 10px;">
-        <div class="test-mode-header">
-            <h3 style="margin: 0;">調試模式</h3>
+    <div class="toggle-section">
+        <div class="toggle-header">
+            <span class="toggle-title">調試模式</span>
             <label class="switch">
                 <input type="checkbox" id="debugModeToggle">
                 <span class="slider"></span>
             </label>
         </div>
-        <p style="font-size: 12px; color: #666; margin-top: 5px;">啟用調試模式可以在控制台查看詳細日誌，幫助排查問題。</p>
+        <div class="toggle-desc">啟用調試模式可以在控制台查看詳細日誌，幫助排查問題。</div>
     </div>
-    
-    <!-- 測試模式區域 -->
-    <div class="test-mode">
-        <div class="test-mode-header">
-            <h3 style="margin: 0;">測試模式</h3>
+    <!-- 測試模式區域（未來可移除） -->
+    <div class="toggle-section">
+        <div class="toggle-header">
+            <span class="toggle-title">測試模式</span>
             <label class="switch">
                 <input type="checkbox" id="testModeToggle">
                 <span class="slider"></span>
             </label>
         </div>
-        
-        <div id="testModeContent" class="hidden">
-            <p style="font-size: 12px; color: #666;">在測試模式下，字幕替換將只匹配文本內容，不考慮時間戳和視頻 ID。</p>
-            
-            <!-- 添加測試規則 -->
-            <div class="test-rule">
-                <input type="text" id="originalText" placeholder="原文字幕">
-                <input type="text" id="replacementText" placeholder="替換文本">
-                <button id="addTestRule">添加測試規則</button>
-            </div>
-            
-            <!-- 測試規則列表 -->
-            <div class="test-rules-list" id="testRulesList">
-                <!-- 測試規則項目將在這裡動態添加 -->
-            </div>
-        </div>
+        <div class="toggle-desc">啟用測試模式後，字幕替換將只匹配文本內容，不考慮時間戳和視頻 ID。</div>
     </div>
-    
-    <script src="popup.js"></script>
+    <div class="success-toast" id="success-toast"></div>
+    <script type="module" src="popup.js"></script>
 </body>
 </html>

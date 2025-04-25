@@ -25,8 +25,14 @@ const SUBTITLE_SELECTORS = [
   '.player-timedtext > .player-timedtext-text-container' // 父子關係
 ];
 
-// 調試模式
 let debugMode = false;
+
+// 僅在 debugMode 時輸出日誌
+function debugLog(...args) {
+  if (debugMode) {
+    console.log('[SubtitleDetector]', ...args);
+  }
+}
 
 // MutationObserver 實例
 let observer = null;
@@ -54,8 +60,6 @@ export function initSubtitleDetector() {
   
   // 設置字幕容器觀察器
   setupSubtitleObserver();
-  
-  console.log('字幕偵測模組初始化完成');
 }
 
 /**
@@ -70,7 +74,7 @@ function loadDebugMode() {
   .then(result => {
     if (result && result.debugMode !== undefined) {
       debugMode = result.debugMode;
-      console.log('載入調試模式設置:', debugMode);
+      debugLog('載入調試模式設置:', debugMode);
     }
   })
   .catch(error => {
@@ -81,7 +85,7 @@ function loadDebugMode() {
   onMessage((message) => {
     if (message.type === 'TOGGLE_DEBUG_MODE') {
       debugMode = message.debugMode;
-      console.log('調試模式設置已更新:', debugMode);
+      debugLog('調試模式設置已更新:', debugMode);
     }
   });
 }
@@ -110,7 +114,7 @@ function setupSubtitleObserver() {
       characterData: true
     });
     
-    console.log('已設置字幕容器觀察器');
+    debugLog('已設置字幕容器觀察器');
   } else {
     // 如果找不到字幕容器，稍後再試
     setTimeout(setupSubtitleObserver, 1000);
@@ -172,7 +176,7 @@ function startObserving() {
       attributes: true
     });
     
-    console.log('開始觀察視頻播放器區域');
+    debugLog('開始觀察視頻播放器區域');
   } else {
     // 如果找不到視頻播放器，則觀察整個文檔
     observer.observe(document.body, {
@@ -180,7 +184,7 @@ function startObserving() {
       subtree: true
     });
     
-    console.log('找不到視頻播放器，觀察整個文檔');
+    debugLog('找不到視頻播放器，觀察整個文檔');
     
     // 定期檢查視頻播放器是否已加載
     setTimeout(checkForVideoPlayer, 1000);
@@ -194,7 +198,7 @@ function checkForVideoPlayer() {
   const videoPlayer = document.querySelector('.watch-video');
   
   if (videoPlayer) {
-    console.log('找到視頻播放器，重新配置觀察器');
+    debugLog('找到視頻播放器，重新配置觀察器');
     startObserving();
   }
 }
@@ -322,12 +326,12 @@ function processSubtitleContainerMerged(container) {
  * @param {Function} callback - 回調函數，接收字幕數據
  */
 export function onSubtitleDetected(callback) {
-  console.log('註冊字幕偵測回調:', callback ? '已提供回調函數' : '未提供回調函數');
+  debugLog('註冊字幕偵測回調:', callback ? '已提供回調函數' : '未提供回調函數');
   subtitleDetectedCallback = callback;
   
   // 立即檢查是否已經找到字幕元素
   if (callback) {
-    console.log('回調已設置，主動掃描字幕元素...');
+    debugLog('回調已設置，主動掃描字幕元素...');
     scanForSubtitles();
   }
 }

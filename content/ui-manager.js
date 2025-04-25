@@ -13,6 +13,11 @@ const Z_INDEX = {
 };
 
 import { sendMessage, onMessage } from './messaging.js';
+// 引入 vote-manager 的接口
+import { handleVote } from './vote-manager.js';
+// 引入 translation-manager 的接口
+import { handleSubmitTranslation as submitTranslationViaManager } from './translation-manager.js';
+
 
 // 自定義 UI 元素
 let customSubtitleContainer = null;
@@ -335,7 +340,7 @@ export function showSubtitle(subtitleData) {
         // 再次嘗試定位
         updateSubtitlePosition(subtitleData.position);
       }
-    }, 80); // 80ms 後重試，可依實際情況調整
+    }, 30); // 30ms 後重試，可依實際情況調整
   }
 
   // 確保字幕容器可見
@@ -591,32 +596,69 @@ function handleSubmitTranslation() {
   dialog.style.borderRadius = '8px';
   dialog.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.2)';
   dialog.style.zIndex = Z_INDEX.DIALOG.toString();
-  dialog.style.width = '400px';
-  
-  // 創建對話框內容（美觀化＋新增調整原因欄位）
+  dialog.style.width = '450px'; // 稍微加寬以容納語言選擇
+
+  // 創建對話框內容（美觀化＋新增調整原因欄位 + 語言選擇）
   dialog.innerHTML = `
     <h3 style="margin-top: 0; margin-bottom: 18px; color: #222; font-size: 22px; font-weight: 600;">提交翻譯</h3>
     <div style="margin-bottom: 14px;">
-      <label for="original-text" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">原文</label>
+      <label for="original-text" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">原始翻譯</label>
       <input id="original-text" type="text" value="${originalText.replace(/"/g, '"')}" readonly
         style="width: 100%; box-sizing: border-box; background: #f3f4f6; color: #222; border: 1px solid #e0e0e0; border-radius: 5px; padding: 8px 10px; font-size: 15px; margin-bottom: 0;"/>
     </div>
     <div style="margin-bottom: 14px;">
-      <label for="translation-input" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">翻譯</label>
+      <label for="translation-input" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">修正翻譯</label>
       <textarea id="translation-input" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; height: 70px; color: #222; background: #fff; resize: vertical;">${currentText}</textarea>
     </div>
     <div style="margin-bottom: 18px;">
       <label for="reason-input" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">調整原因</label>
       <textarea id="reason-input" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; height: 50px; color: #222; background: #fff; resize: vertical;" placeholder="請簡述為何需要調整翻譯"></textarea>
     </div>
+    <div style="margin-bottom: 18px;">
+      <label for="language-select" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">字幕語言</label>
+      <select id="language-select" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; color: #222; background: #fff;">
+        <option value="">請選擇語言...</option>
+        <option value="en">English</option>
+        <option value="zh-TW">繁體中文</option>
+        <option value="zh-CN">简体中文</option>
+        <option value="ja">日本語</option>
+        <option value="ko">한국어</option>
+        <option value="es">Español</option>
+        <option value="fr">Français</option>
+        <option value="de">Deutsch</option>
+        <option value="other">其他 (請在原因中註明)</option>
+      </select>
+    </div>
     <div style="text-align: right;">
       <button id="cancel-translation" style="padding: 8px 18px; margin-right: 10px; background-color: #f5f5f5; color: #888; border: none; border-radius: 4px; cursor: pointer; font-size: 15px;">取消</button>
       <button id="submit-translation" style="padding: 8px 18px; background-color: #1976d2; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 15px; font-weight: 500;">提交</button>
     </div>
   `;
-  
+
   // 添加對話框到文檔
   document.body.appendChild(dialog);
+
+  const languageSelect = document.getElementById('language-select');
+
+  // 向 background 請求已儲存的語言
+  sendMessage({ type: 'GET_USER_LANGUAGE' })
+    .then(result => {
+      if (result && result.success && result.languageCode) {
+        languageSelect.value = result.languageCode;
+      }
+    })
+    .catch(error => {
+      console.error('獲取用戶語言設置失敗:', error);
+    });
+
+  // 監聽語言選擇變化，並儲存
+  languageSelect.addEventListener('change', () => {
+    const selectedLanguage = languageSelect.value;
+    if (selectedLanguage) {
+      sendMessage({ type: 'SAVE_USER_LANGUAGE', languageCode: selectedLanguage })
+        .catch(error => console.error('儲存用戶語言設置失敗:', error));
+    }
+  });
 
   // 事件監聽器
   document.getElementById('cancel-translation').addEventListener('click', () => {
@@ -627,36 +669,45 @@ function handleSubmitTranslation() {
     const translationInput = document.getElementById('translation-input');
     const reasonInput = document.getElementById('reason-input');
     const newTranslation = translationInput.value.trim();
-    const reason = reasonInput.value.trim();
+    const submissionReason = reasonInput.value.trim();
+    const selectedLanguage = languageSelect.value;
 
     if (!newTranslation) {
       alert('請輸入翻譯內容');
       return;
     }
-    if (!reason) {
+    if (!submissionReason) {
       alert('請填寫調整原因');
       return;
     }
+    if (!selectedLanguage) {
+      alert('請選擇字幕語言');
+      return;
+    }
 
-    // 發送翻譯提交請求（reason 一併帶出）
-    sendMessage({
-      type: 'SUBMIT_TRANSLATION',
+    // 調用 translation-manager 的接口
+    submitTranslationViaManager({
       videoId: currentSubtitle.videoId,
       timestamp: currentSubtitle.timestamp,
       original: originalText,
       translation: newTranslation,
-      reason: reason
+      submissionReason: submissionReason,
+      languageCode: selectedLanguage // 使用選擇的語言
     })
     .then(response => {
       if (response && response.success) {
+        // 提交成功後，也儲存一次語言選擇，確保下次開啟時是上次提交的語言
+        sendMessage({ type: 'SAVE_USER_LANGUAGE', languageCode: selectedLanguage })
+          .catch(error => console.error('儲存用戶語言設置失敗:', error));
         alert('翻譯提交成功！');
       } else {
-        alert('翻譯提交失敗，請稍後再試。');
+        const errorMsg = response?.error || '未知錯誤';
+        alert(`翻譯提交失敗：${errorMsg}，請稍後再試。`);
       }
     })
     .catch(error => {
       console.error('提交翻譯時出錯:', error);
-      alert('翻譯提交失敗，請稍後再試。');
+      alert(`翻譯提交失敗：${error.message}，請稍後再試。`);
     });
 
     document.body.removeChild(dialog);
@@ -668,23 +719,20 @@ function handleSubmitTranslation() {
  */
 function handleLikeSubtitle() {
   if (!currentSubtitle) return;
-  
-  // 發送點讚請求
-  sendMessage({
-    type: 'RATE_SUBTITLE',
-    videoId: currentSubtitle.videoId,
+  // 調用 vote-manager 的接口
+  handleVote({
+    translationID: currentSubtitle.translationID,
+    videoID: currentSubtitle.videoId,
+    originalSubtitle: currentSubtitle.text, // 可能不需要傳遞，取決於 vote-manager 實現
     timestamp: currentSubtitle.timestamp,
-    text: currentSubtitle.text,
-    rating: 'like'
+    voteType: 'upvote'
   })
-  .then(response => {
-    if (response && response.success) {
-      // 顯示成功提示
-      showToast('已點讚！');
-    }
+  .then(result => {
+    showToast('已點讚！'); // 可以在 vote-manager 中處理提示
   })
   .catch(error => {
-    console.error('點讚時出錯:', error);
+    console.error('投票失敗:', error);
+    showToast('投票失敗: ' + error.message); // 可以在 vote-manager 中處理提示
   });
 }
 
@@ -693,23 +741,20 @@ function handleLikeSubtitle() {
  */
 function handleDislikeSubtitle() {
   if (!currentSubtitle) return;
-  
-  // 發送倒讚請求
-  sendMessage({
-    type: 'RATE_SUBTITLE',
-    videoId: currentSubtitle.videoId,
+  // 調用 vote-manager 的接口
+  handleVote({
+    translationID: currentSubtitle.translationID,
+    videoID: currentSubtitle.videoId,
+    originalSubtitle: currentSubtitle.text, // 可能不需要傳遞
     timestamp: currentSubtitle.timestamp,
-    text: currentSubtitle.text,
-    rating: 'dislike'
+    voteType: 'downvote'
   })
-  .then(response => {
-    if (response && response.success) {
-      // 顯示成功提示
-      showToast('已倒讚！');
-    }
+  .then(result => {
+    showToast('已倒讚！'); // 可以在 vote-manager 中處理提示
   })
   .catch(error => {
-    console.error('倒讚時出錯:', error);
+    console.error('投票失敗:', error);
+    showToast('投票失敗: ' + error.message); // 可以在 vote-manager 中處理提示
   });
 }
 

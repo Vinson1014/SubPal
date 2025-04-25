@@ -5,7 +5,8 @@
   "description": "自動優化串流平台字幕翻譯",
   "permissions": [
     "activeTab",
-    "storage"
+    "storage",
+    "alarms"
   ],
   "host_permissions": [
     "*://*.netflix.com/*"
@@ -20,7 +21,8 @@
     }
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "web_accessible_resources": [
     {

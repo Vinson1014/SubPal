@@ -42,8 +42,6 @@ export function initVideoInfo() {
       setTimeout(extractVideoInfo, 1000);
     }
   }).observe(document, { subtree: true, childList: true });
-  
-  console.log('視頻信息模組初始化完成');
 }
 
 /**
@@ -211,11 +209,13 @@ export function getVideoTitle() {
 }
 
 /**
- * 獲取當前視頻語言
- * @returns {string} - 視頻語言
+ * 獲取當前視頻語言 (已棄用，改為手動選擇)
+ * @returns {string} - 'unknown'
  */
 export function getVideoLanguage() {
-  return currentVideoLanguage;
+  // console.warn('[Video Info] getVideoLanguage is deprecated. Language is now selected manually.');
+  return 'unknown'; // 直接返回 unknown，不再嘗試自動檢測
+  // return currentVideoLanguage; // 原始碼
 }
 
 /**
