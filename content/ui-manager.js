@@ -621,6 +621,9 @@ function hideInteractionButtons() {
 function handleSubmitTranslation() {
   if (!currentSubtitle) return;
   
+  // 記錄當前字幕的 timestamp
+  const recordedTimestamp = currentSubtitle.timestamp;
+  
   // 創建提交翻譯的浮動視窗（網頁內）
   const originalText = currentSubtitle.original || currentSubtitle.text;
   const currentText = currentSubtitle.text;
@@ -843,10 +846,10 @@ function handleSubmitTranslation() {
       return;
     }
 
-    // 調用 translation-manager 的接口
+    // 調用 translation-manager 的接口，使用記錄的 timestamp
     submitTranslationViaManager({
       videoId: currentSubtitle.videoId,
-      timestamp: currentSubtitle.timestamp,
+      timestamp: recordedTimestamp,
       original: originalText,
       translation: newTranslation,
       submissionReason: submissionReason,
