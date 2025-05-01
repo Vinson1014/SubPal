@@ -17,6 +17,7 @@ import { sendMessage, onMessage } from './messaging.js';
 import { handleVote } from './vote-manager.js';
 // 引入 translation-manager 的接口
 import { handleSubmitTranslation as submitTranslationViaManager } from './translation-manager.js';
+import { getCurrentTimestamp } from './video-info.js';
 
 
 // 自定義 UI 元素
@@ -25,6 +26,8 @@ let customSubtitleElement = null;
 
 // 調試模式
 let debugMode = false;
+let debugTimestampElement = null;
+let debugTimestampInterval = null;
 
 // 上一次的字幕位置
 let lastPosition = null;
@@ -97,10 +100,11 @@ function loadDebugMode() {
     type: 'GET_SETTINGS',
     keys: ['debugMode']
   })
-  .then(result => {
+.then(result => {
     if (result && result.debugMode !== undefined) {
       debugMode = result.debugMode;
       console.log('載入調試模式設置:', debugMode);
+      toggleDebugTimestamp(debugMode);
     }
   })
   .catch(error => {
@@ -112,8 +116,44 @@ function loadDebugMode() {
     if (message.type === 'TOGGLE_DEBUG_MODE') {
       debugMode = message.debugMode;
       console.log('調試模式設置已更新:', debugMode);
+      toggleDebugTimestamp(debugMode);
     }
   });
+}
+
+// 切換 debug timestamp 顯示與更新
+function toggleDebugTimestamp(enabled) {
+  if (enabled) {
+    if (!debugTimestampElement) {
+      debugTimestampElement = document.createElement('div');
+      debugTimestampElement.id = 'debug-timestamp';
+      Object.assign(debugTimestampElement.style, {
+        position: 'fixed',
+        top: '10px',
+        right: '10px',
+        zIndex: Z_INDEX.BUTTONS.toString(),
+        color: '#00ff00',
+        backgroundColor: 'rgba(0, 0, 0, 0.5)',
+        padding: '4px 6px',
+        borderRadius: '4px',
+        fontSize: '14px'
+      });
+      document.body.appendChild(debugTimestampElement);
+    }
+    debugTimestampElement.style.display = 'block';
+    if (debugTimestampInterval) clearInterval(debugTimestampInterval);
+    debugTimestampInterval = setInterval(() => {
+      debugTimestampElement.textContent = `Time: ${getCurrentTimestamp()}s`;
+    }, 500);
+  } else {
+    if (debugTimestampInterval) {
+      clearInterval(debugTimestampInterval);
+      debugTimestampInterval = null;
+    }
+    if (debugTimestampElement) {
+      debugTimestampElement.style.display = 'none';
+    }
+  }
 }
 
 /**
@@ -581,25 +621,41 @@ function hideInteractionButtons() {
 function handleSubmitTranslation() {
   if (!currentSubtitle) return;
   
-  // 創建提交翻譯的對話框
+  // 創建提交翻譯的浮動視窗（網頁內）
   const originalText = currentSubtitle.original || currentSubtitle.text;
   const currentText = currentSubtitle.text;
   
-  // 創建對話框元素
-  const dialog = document.createElement('div');
-  dialog.style.position = 'fixed';
-  dialog.style.top = '50%';
-  dialog.style.left = '50%';
-  dialog.style.transform = 'translate(-50%, -50%)';
-  dialog.style.backgroundColor = 'white';
-  dialog.style.padding = '24px';
-  dialog.style.borderRadius = '8px';
-  dialog.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.2)';
-  dialog.style.zIndex = Z_INDEX.DIALOG.toString();
-  dialog.style.width = '450px'; // 稍微加寬以容納語言選擇
+  // 創建浮動視窗容器
+  const floatingWindow = document.createElement('div');
+  floatingWindow.id = 'translation-floating-window';
+  floatingWindow.style.position = 'fixed';
+  floatingWindow.style.top = '50%';
+  floatingWindow.style.left = '50%';
+  floatingWindow.style.transform = 'translate(-50%, -50%)';
+  floatingWindow.style.backgroundColor = 'white';
+  floatingWindow.style.padding = '24px';
+  floatingWindow.style.borderRadius = '8px';
+  floatingWindow.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.2)';
+  floatingWindow.style.zIndex = Z_INDEX.DIALOG.toString();
+  floatingWindow.style.width = '450px';
+  floatingWindow.style.maxHeight = '80vh';
+  floatingWindow.style.overflowY = 'auto';
+  floatingWindow.style.boxSizing = 'border-box';
 
-  // 創建對話框內容（美觀化＋新增調整原因欄位 + 語言選擇）
-  dialog.innerHTML = `
+  // 創建一個 overlay 層，防止背景干擾
+  const overlay = document.createElement('div');
+  overlay.id = 'translation-overlay';
+  overlay.style.position = 'fixed';
+  overlay.style.top = '0';
+  overlay.style.left = '0';
+  overlay.style.width = '100%';
+  overlay.style.height = '100%';
+  overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+  overlay.style.zIndex = (Z_INDEX.DIALOG - 1).toString();
+  document.body.appendChild(overlay);
+
+  // 創建浮動視窗內容
+  floatingWindow.innerHTML = `
     <h3 style="margin-top: 0; margin-bottom: 18px; color: #222; font-size: 22px; font-weight: 600;">提交翻譯</h3>
     <div style="margin-bottom: 14px;">
       <label for="original-text" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">原始翻譯</label>
@@ -607,14 +663,6 @@ function handleSubmitTranslation() {
         style="width: 100%; box-sizing: border-box; background: #f3f4f6; color: #222; border: 1px solid #e0e0e0; border-radius: 5px; padding: 8px 10px; font-size: 15px; margin-bottom: 0;"/>
     </div>
     <div style="margin-bottom: 14px;">
-      <label for="translation-input" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">修正翻譯</label>
-      <textarea id="translation-input" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; height: 70px; color: #222; background: #fff; resize: vertical;">${currentText}</textarea>
-    </div>
-    <div style="margin-bottom: 18px;">
-      <label for="reason-input" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">調整原因</label>
-      <textarea id="reason-input" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; height: 50px; color: #222; background: #fff; resize: vertical;" placeholder="請簡述為何需要調整翻譯"></textarea>
-    </div>
-    <div style="margin-bottom: 18px;">
       <label for="language-select" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">字幕語言</label>
       <select id="language-select" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; color: #222; background: #fff;">
         <option value="">請選擇語言...</option>
@@ -629,43 +677,153 @@ function handleSubmitTranslation() {
         <option value="other">其他 (請在原因中註明)</option>
       </select>
     </div>
+    <div style="margin-bottom: 14px;">
+      <label for="translation-input" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">修正翻譯</label>
+      <textarea id="translation-input" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; height: 70px; color: #222; background: #fff; resize: vertical;">${currentText}</textarea>
+    </div>
+    <div style="margin-bottom: 18px;">
+      <label for="reason-input" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">調整原因</label>
+      <textarea id="reason-input" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; height: 50px; color: #222; background: #fff; resize: vertical;" placeholder="請簡述為何需要調整翻譯"></textarea>
+    </div>
     <div style="text-align: right;">
       <button id="cancel-translation" style="padding: 8px 18px; margin-right: 10px; background-color: #f5f5f5; color: #888; border: none; border-radius: 4px; cursor: pointer; font-size: 15px;">取消</button>
       <button id="submit-translation" style="padding: 8px 18px; background-color: #1976d2; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 15px; font-weight: 500;">提交</button>
     </div>
   `;
 
-  // 添加對話框到文檔
-  document.body.appendChild(dialog);
+  // 添加浮動視窗到文檔
+  document.body.appendChild(floatingWindow);
 
   const languageSelect = document.getElementById('language-select');
+  const translationInput = document.getElementById('translation-input');
 
-  // 向 background 請求已儲存的語言
-  sendMessage({ type: 'GET_USER_LANGUAGE' })
-    .then(result => {
-      if (result && result.success && result.languageCode) {
-        languageSelect.value = result.languageCode;
+  // 自動焦點到輸入框
+  setTimeout(() => {
+    translationInput.focus();
+  }, 0);
+
+  // 保存輸入狀態和光標位置
+  let savedTranslation = translationInput.value;
+  let savedTranslationCursorPosition = 0;
+  let savedReason = '';
+  let savedReasonCursorPosition = 0;
+  let lastFocusedInput = translationInput;
+
+  // 追蹤輸入欄位的內容和光標位置
+  translationInput.addEventListener('input', () => {
+    savedTranslation = translationInput.value;
+    savedTranslationCursorPosition = translationInput.selectionStart;
+    lastFocusedInput = translationInput;
+  });
+  translationInput.addEventListener('click', () => {
+    savedTranslationCursorPosition = translationInput.selectionStart;
+    lastFocusedInput = translationInput;
+  });
+  translationInput.addEventListener('keyup', () => {
+    savedTranslationCursorPosition = translationInput.selectionStart;
+    lastFocusedInput = translationInput;
+  });
+
+  const reasonInput = document.getElementById('reason-input');
+  reasonInput.addEventListener('input', () => {
+    savedReason = reasonInput.value;
+    savedReasonCursorPosition = reasonInput.selectionStart;
+    lastFocusedInput = reasonInput;
+  });
+  reasonInput.addEventListener('click', () => {
+    savedReasonCursorPosition = reasonInput.selectionStart;
+    lastFocusedInput = reasonInput;
+  });
+  reasonInput.addEventListener('keyup', () => {
+    savedReasonCursorPosition = reasonInput.selectionStart;
+    lastFocusedInput = reasonInput;
+  });
+
+  // 使用智能焦點管理機制：當焦點離開浮動視窗但不是去按鈕時進行保護
+  const handleFocusOut = (e) => {
+    // 檢查是否點擊按鈕 - 如果是，允許其正常工作
+    const clickedButton = e.relatedTarget && (
+      e.relatedTarget.id === 'submit-translation' || 
+      e.relatedTarget.id === 'cancel-translation'
+    );
+    
+    // 若焦點離開浮動視窗，且不是去往按鈕，則恢復焦點
+    if (!clickedButton && !floatingWindow.contains(e.relatedTarget)) {
+      // 恢復焦點到上次使用的輸入欄位並回復光標位置
+      setTimeout(() => {
+        if (lastFocusedInput === translationInput) {
+          translationInput.focus();
+          translationInput.setSelectionRange(savedTranslationCursorPosition, savedTranslationCursorPosition);
+        } else if (lastFocusedInput === reasonInput) {
+          reasonInput.focus();
+          reasonInput.setSelectionRange(savedReasonCursorPosition, savedReasonCursorPosition);
+        }
+      }, 0);
+    }
+  };
+  
+  // 在捕獲階段監聽 focusout 事件
+  floatingWindow.addEventListener('focusout', handleFocusOut, true);
+  
+  // 點擊 overlay 時回復焦點，並儲存引用以便清理
+  const handleOverlayClick = (e) => {
+    // 如果點擊的是 overlay 本身而非其子元素
+    if (e.target === overlay) {
+      e.preventDefault();
+      if (lastFocusedInput === translationInput) {
+        translationInput.focus();
+        translationInput.setSelectionRange(savedTranslationCursorPosition, savedTranslationCursorPosition);
+      } else if (lastFocusedInput === reasonInput) {
+        reasonInput.focus();
+        reasonInput.setSelectionRange(savedReasonCursorPosition, savedReasonCursorPosition);
       }
-    })
-    .catch(error => {
-      console.error('獲取用戶語言設置失敗:', error);
-    });
-
-  // 監聽語言選擇變化，並儲存
-  languageSelect.addEventListener('change', () => {
-    const selectedLanguage = languageSelect.value;
-    if (selectedLanguage) {
-      sendMessage({ type: 'SAVE_USER_LANGUAGE', languageCode: selectedLanguage })
-        .catch(error => console.error('儲存用戶語言設置失敗:', error));
+    }
+  };
+  
+  overlay.addEventListener('mousedown', handleOverlayClick);
+  
+  // 阻止事件傳播，但確保按鈕可點擊
+  floatingWindow.addEventListener('mousedown', (e) => {
+    // 只有點擊的不是按鈕時才阻止事件傳播
+    const clickedElement = e.target;
+    const isButton = clickedElement.tagName === 'BUTTON' ||
+                     clickedElement.id === 'submit-translation' ||
+                     clickedElement.id === 'cancel-translation';
+                     
+    if (!isButton) {
+      e.stopPropagation();
     }
   });
+  
+  // 監聽視窗大小變化事件，重新定位浮動視窗
+  const repositionWindow = () => {
+    floatingWindow.style.top = '50%';
+    floatingWindow.style.left = '50%';
+    floatingWindow.style.transform = 'translate(-50%, -50%)';
+  };
+  window.addEventListener('resize', repositionWindow);
+  
+  // 當關閉浮動視窗時，移除事件監聽器和 overlay
+  const cleanup = () => {
+    window.removeEventListener('resize', repositionWindow);
+    floatingWindow.removeEventListener('focusout', handleFocusOut, true);
+    if (document.body.contains(overlay)) {
+      overlay.removeEventListener('mousedown', handleOverlayClick);
+      document.body.removeChild(overlay);
+    }
+  };
+  
+  // 確保按鈕可以正常互動
+  const cancelButton = document.getElementById('cancel-translation');
+  const submitButton = document.getElementById('submit-translation');
+  cancelButton.style.pointerEvents = 'auto';
+  submitButton.style.pointerEvents = 'auto';
 
-  // 事件監聽器
-  document.getElementById('cancel-translation').addEventListener('click', () => {
-    document.body.removeChild(dialog);
+  cancelButton.addEventListener('click', () => {
+    cleanup();
+    document.body.removeChild(floatingWindow);
   });
-
-  document.getElementById('submit-translation').addEventListener('click', () => {
+  submitButton.addEventListener('click', () => {
     const translationInput = document.getElementById('translation-input');
     const reasonInput = document.getElementById('reason-input');
     const newTranslation = translationInput.value.trim();
@@ -692,25 +850,45 @@ function handleSubmitTranslation() {
       original: originalText,
       translation: newTranslation,
       submissionReason: submissionReason,
-      languageCode: selectedLanguage // 使用選擇的語言
+      languageCode: selectedLanguage
     })
     .then(response => {
       if (response && response.success) {
-        // 提交成功後，也儲存一次語言選擇，確保下次開啟時是上次提交的語言
         sendMessage({ type: 'SAVE_USER_LANGUAGE', languageCode: selectedLanguage })
           .catch(error => console.error('儲存用戶語言設置失敗:', error));
-        alert('翻譯提交成功！');
+        showToast('翻譯提交成功！');
       } else {
         const errorMsg = response?.error || '未知錯誤';
-        alert(`翻譯提交失敗：${errorMsg}，請稍後再試。`);
+        showToast(`翻譯提交失敗：${errorMsg}`);
       }
     })
     .catch(error => {
       console.error('提交翻譯時出錯:', error);
-      alert(`翻譯提交失敗：${error.message}，請稍後再試。`);
+      showToast(`翻譯提交失敗：${error.message}`);
     });
 
-    document.body.removeChild(dialog);
+    cleanup();
+    document.body.removeChild(floatingWindow);
+  });
+
+  // 向 background 請求已儲存的語言
+  sendMessage({ type: 'GET_USER_LANGUAGE' })
+    .then(result => {
+      if (result && result.success && result.languageCode) {
+        languageSelect.value = result.languageCode;
+      }
+    })
+    .catch(error => {
+      console.error('獲取用戶語言設置失敗:', error);
+    });
+
+  // 監聽語言選擇變化，並儲存
+  languageSelect.addEventListener('change', () => {
+    const selectedLanguage = languageSelect.value;
+    if (selectedLanguage) {
+      sendMessage({ type: 'SAVE_USER_LANGUAGE', languageCode: selectedLanguage })
+        .catch(error => console.error('儲存用戶語言設置失敗:', error));
+    }
   });
 }
 
