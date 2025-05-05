@@ -46,24 +46,60 @@ export function initVideoInfo() {
 
 /**
  * 尋找視頻元素
+ * @param {number} attempt - 當前重試次數
+ * @param {number} maxAttempts - 最大重試次數
  */
-function findVideoElement() {
+function findVideoElement(attempt = 1, maxAttempts = 5) {
   // 尋找視頻元素
   videoElement = document.querySelector('video');
   
   if (!videoElement) {
-    console.log('找不到視頻元素，將在稍後重試');
-    setTimeout(findVideoElement, 1000);
+    if (attempt <= maxAttempts) {
+      const delay = Math.pow(2, attempt - 1) * 500; // 遞增等待時間：0.5s, 1s, 2s, 4s, 8s
+      console.log(`找不到視頻元素，第 ${attempt} 次重試，將在 ${delay/1000} 秒後重試`);
+      setTimeout(() => findVideoElement(attempt + 1, maxAttempts), delay);
+    } else {
+      console.error(`已達最大重試次數 (${maxAttempts})，仍找不到視頻元素`);
+    }
     return;
   }
   
   console.log('找到視頻元素');
   
   // 監聽視頻播放事件
-  videoElement.addEventListener('play', extractVideoInfo);
+  videoElement.addEventListener('play', () => {
+    extractVideoInfo();
+    sendMessage({
+      type: 'PLAYER_STATE_CHANGE',
+      state: 'play',
+      timestamp: getCurrentTimestamp()
+    }).catch(error => {
+      console.error('發送播放狀態消息失敗:', error);
+    });
+    console.log('視頻播放，通知其他模組');
+  });
+  
+  videoElement.addEventListener('pause', () => {
+    sendMessage({
+      type: 'PLAYER_STATE_CHANGE',
+      state: 'pause',
+      timestamp: getCurrentTimestamp()
+    }).catch(error => {
+      console.error('發送暫停狀態消息失敗:', error);
+    });
+    console.log('視頻暫停，通知其他模組');
+  });
+  
   videoElement.addEventListener('seeked', () => {
     // 當用戶跳轉視頻時，可能需要更新時間戳
     console.log('視頻跳轉，當前時間:', getCurrentTimestamp());
+    sendMessage({
+      type: 'PLAYER_STATE_CHANGE',
+      state: 'seeked',
+      timestamp: getCurrentTimestamp()
+    }).catch(error => {
+      console.error('發送跳轉狀態消息失敗:', error);
+    });
   });
 }
 
@@ -113,6 +149,7 @@ function extractVideoIdFromUrl() {
 
 /**
  * 提取視頻標題
+ * 此項暫時未實現，需要根據具體平台進行調整。
  */
 function extractVideoTitle() {
   // 嘗試從頁面元素中提取視頻標題
@@ -135,6 +172,7 @@ function extractVideoTitle() {
 
 /**
  * 提取視頻語言
+ * 註: 目前這個功能無作用
  */
 function extractVideoLanguage() {
   // 嘗試從字幕選擇器中提取當前語言
@@ -163,6 +201,10 @@ function checkVideoChange() {
   if (newVideoId && newVideoId !== currentVideoId) {
     console.log('檢測到視頻變更:', currentVideoId, '->', newVideoId);
     extractVideoInfo();
+    // 重新初始化 videoElement 以確保抓取正確的元素
+    videoElement = null;
+    console.log('視頻變更，重新初始化 videoElement');
+    findVideoElement();
   }
 }
 
