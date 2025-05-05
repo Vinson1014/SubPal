@@ -13,6 +13,9 @@ let subtitleDetectedCallback = null;
 let lastSubtitleText = '';
 let lastSubtitlePosition = null;
 
+// 播放狀態
+let isPlaying = false;
+
 // 字幕元素選擇器
 const SUBTITLE_SELECTORS = [
   '.player-timedtext-text-container', // 主要字幕容器
@@ -126,14 +129,14 @@ function setupSubtitleObserver() {
  */
 function scanForSubtitles() {
   if (debugMode) {
-    console.log('主動掃描字幕元素...');
+    debugLog('主動掃描字幕元素...');
   }
 
   // 只針對最外層字幕 container 做偵測與合併
   const containers = document.querySelectorAll('.player-timedtext-text-container');
   if (containers.length > 0) {
     if (debugMode) {
-      console.log(`找到 ${containers.length} 個字幕 container`);
+      debugLog(`找到 ${containers.length} 個字幕 container`);
     }
     containers.forEach(container => {
       processSubtitleContainerMerged(container);
@@ -144,7 +147,7 @@ function scanForSubtitles() {
   // 沒有任何字幕時，主動觸發空字幕事件
   if (subtitleDetectedCallback) {
     if (debugMode) {
-      console.log('未找到字幕 container，觸發空字幕事件');
+      debugLog('未找到字幕 container，觸發空字幕事件');
     }
     subtitleDetectedCallback({
       text: '',
@@ -208,8 +211,14 @@ function checkForVideoPlayer() {
  * @param {MutationRecord[]} mutations - 變化記錄
  */
 function handleDOMChanges(mutations) {
-  // 只要有 DOM 變化就重新掃描字幕（不再單獨處理每個元素）
-  scanForSubtitles();
+  // 只有在影片未播放時才重新掃描字幕，以避免干擾輸入
+  if (!isPlaying) {
+    scanForSubtitles();
+  } else {
+    if (debugMode) {
+      debugLog('影片播放中，暫不掃描字幕以避免干擾');
+    }
+  }
 }
 
 /**
@@ -245,7 +254,7 @@ function processSubtitleContainerMerged(container) {
   if (!text) {
     if (subtitleDetectedCallback) {
       if (debugMode) {
-        console.log('偵測到空字幕，觸發隱藏事件');
+        debugLog('偵測到空字幕，觸發隱藏事件');
       }
       subtitleDetectedCallback({
         text: '',
@@ -281,7 +290,7 @@ function processSubtitleContainerMerged(container) {
       Math.abs(lastSubtitlePosition.left - position.left) < 5
     ) {
       if (debugMode) {
-        console.log('字幕文本和位置與上一次相同，不觸發更新');
+        debugLog('字幕文本和位置與上一次相同，不觸發更新');
       }
       return;
     }
@@ -299,9 +308,9 @@ function processSubtitleContainerMerged(container) {
     };
 
     if (debugMode) {
-      console.log('原生 innerHTML 字幕:', text);
-      console.log('字幕位置:', position);
-      console.log('字幕樣式:', subtitleStyle);
+      debugLog('原生 innerHTML 字幕:', text);
+      debugLog('字幕位置:', position);
+      debugLog('字幕樣式:', subtitleStyle);
     }
 
     // 回調
