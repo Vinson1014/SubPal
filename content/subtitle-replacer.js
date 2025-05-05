@@ -329,14 +329,11 @@ function checkAndTriggerPrefetch(currentTimestamp) {
       // 比較當前時間到下一個區間的start 是否大於FETCH_DURATION_SECONDS
       // 如果是，直接fetch 以新增一個區間(包含currentTime)
       if (interval.start - currentTimestamp > FETCH_DURATION_SECONDS) {
-        fetchSubtitleBatch(currentVideoId, currentTimestamp); 
+        fetchSubtitleBatch(currentVideoId, currentTimestamp); //利用fetch 建立一個新區間
       } else {
         fetchSubtitleBatch(currentVideoId, currentTimestamp);
-        relevantInterval = interval; // 找到下一個最近的區間
         relevantEnd = interval.end; // 更新 relevantEnd
       }
-
-
     }
   }
 
@@ -371,7 +368,7 @@ async function fetchSubtitleBatch(videoId, startTimestamp) {
   }
   const start = startTimestamp;
   const end = start + FETCH_DURATION_SECONDS;
-  if (isIntervalRequested(start)) {
+  if (isIntervalRequested(start) && isIntervalRequested(end - 0.1)) {
     debugLog(`區間 ${start.toFixed(1)}~${end.toFixed(1)} 已請求過，忽略`);
     return;
   }
