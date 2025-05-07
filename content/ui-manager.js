@@ -75,6 +75,36 @@ function debounce(func, wait) {
 }
 
 /**
+ * 計算文本所需的寬度
+ * @param {string} text - 要測量的文本或 HTML 內容
+ * @returns {number} - 文本所需的寬度（像素）
+ */
+function calculateTextWidth(text) {
+  // 創建臨時元素
+  const tempElement = document.createElement('div');
+  tempElement.style.position = 'absolute';
+  tempElement.style.visibility = 'hidden';
+  tempElement.style.whiteSpace = 'nowrap'; // 確保單行測量
+  // 應用與字幕元素相同的樣式
+  Object.assign(tempElement.style, {
+    fontSize: subtitleStyle.fontSize,
+    fontFamily: subtitleStyle.fontFamily,
+    fontWeight: subtitleStyle.fontWeight || 'normal',
+    fontStyle: subtitleStyle.fontStyle || 'normal',
+    padding: '5px 0px'
+  });
+  // 插入文本或 HTML 內容
+  tempElement.innerHTML = text;
+  // 添加到 DOM 以進行測量
+  document.body.appendChild(tempElement);
+  // 獲取寬度
+  const width = tempElement.offsetWidth;
+  // 移除臨時元素
+  document.body.removeChild(tempElement);
+  return width;
+}
+
+/**
  * 初始化 UI 管理模組
  */
 export function initUIManager() {
@@ -515,22 +545,36 @@ function updateSubtitleSize() {
     console.log('找不到原生字幕容器元素，無法調整字幕大小和位置');
     return;
   }
-
   // 獲取原生字幕容器的尺寸和位置
   const nativeRect = nativeSubtitle.getBoundingClientRect();
   console.log('原生字幕容器尺寸和位置:', nativeRect);
-
+  // 獲取播放器元素以計算最大寬度
+  const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
+  let maxWidth = 800; // 預設最大寬度
+  if (videoPlayer) {
+    const playerRect = videoPlayer.getBoundingClientRect();
+    maxWidth = playerRect.width * 0.8; // 播放器寬度的 80%
+  }
+  // 計算當前字幕文本所需的寬度
+  let textWidth = 0;
+  if (currentSubtitle && customSubtitleElement) {
+    textWidth = calculateTextWidth(customSubtitleElement.innerHTML);
+    console.log('字幕文本所需寬度:', textWidth);
+  }
+  // 設置容器寬度為文本所需寬度與原生寬度的較大值，但不超過最大寬度
+  const targetWidth = Math.min(maxWidth, Math.max(nativeRect.width, textWidth + 20)); // 加上一些 padding
   // 更新自訂字幕容器的尺寸和位置以匹配原生字幕容器
   if (customSubtitleContainer) {
-    customSubtitleContainer.style.width = `${nativeRect.width}px`;
+    customSubtitleContainer.style.width = `${targetWidth}px`;
     customSubtitleContainer.style.height = `${nativeRect.height}px`;
     customSubtitleContainer.style.top = `${nativeRect.top}px`;
-    customSubtitleContainer.style.left = `${nativeRect.left}px`;
+    // 居中對齊容器
+    const leftPosition = nativeRect.left + (nativeRect.width - targetWidth) / 2;
+    customSubtitleContainer.style.left = `${leftPosition}px`;
     customSubtitleContainer.style.bottom = 'auto';
-    console.log('自訂字幕容器已更新以匹配原生字幕容器尺寸和位置');
+    console.log('自訂字幕容器已更新以匹配原生字幕容器尺寸和位置，寬度調整為:', targetWidth);
   }
-
-  // 如果字幕元素存在，確保應用當前樣式，但不依賴原生字幕的字體大小
+  // 如果字幕元素存在，確保應用當前樣式
   if (customSubtitleElement) {
     applySubtitleStyle();
   }
