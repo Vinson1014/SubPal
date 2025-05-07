@@ -147,13 +147,9 @@ function setupMessageListeners() {
 function handlePlayerStateUpdate(state, timestamp) {
   if (state === 'play' && currentVideoId) {
     // 當播放器開始播放時，檢查是否需要獲取字幕
-    if (subtitleCache.length === 0) {
-      debugLog(`播放器播放，緩存為空，觸發字幕獲取 at ${timestamp}`);
-      fetchSubtitleBatch(currentVideoId, timestamp);
-    } else {
-      // 檢查是否需要預加載
-      checkAndTriggerPrefetch(timestamp);
-    }
+
+    // 檢查是否需要預加載
+    checkAndTriggerPrefetch(timestamp);
   }
   // 可以根據需要添加對 'pause' 或 'seeked' 的處理
 }
@@ -213,14 +209,7 @@ export async function processSubtitle(subtitleData, videoId, timestamp) {
   }
 
   // --- 4. 檢查是否需要觸發新的獲取 (如果緩存為空或時間戳超出範圍) ---
-  // 通常情況下，預加載機制會處理，但以防萬一
-  if (subtitleCache.length === 0) {
-      debugLog(`緩存為空，為時間戳 ${timestamp.toFixed(2)} 觸發請求`);
-      fetchSubtitleBatch(videoId, timestamp);
-  } else {
-      // 檢查是否需要預加載 (即使當前字幕未匹配，也可能需要加載後續的)
-      checkAndTriggerPrefetch(timestamp);
-  }
+  checkAndTriggerPrefetch(timestamp);
 
 
   // --- 5. 如果沒有找到替換規則，返回 null ---
@@ -311,9 +300,10 @@ function findReplacementInCache(currentOriginalText, currentTimestamp) {
  * @param {number} currentTimestamp - 當前字幕的時間戳 (秒)
  */
 function checkAndTriggerPrefetch(currentTimestamp) {
-  if (subtitleCache.length === 0) {
-    debugLog('緩存為空，不觸發預加載');
-    return;
+  // 檢查requestedIntervals是否為空 如果為空則直接發起請求一次
+  if (requestedIntervals.length === 0) {
+    debugLog(`requestedIntervals 為空，直接發起請求一次`);
+    fetchSubtitleBatch(currentVideoId, currentTimestamp);
   }
 
   // 找到與當前時間戳相關的最近 end timestamp
