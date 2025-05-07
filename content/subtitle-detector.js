@@ -297,7 +297,7 @@ function processSubtitleContainerMerged(container) {
     lastSubtitleText = text;
     lastSubtitlePosition = { ...position };
 
-    // 樣式
+    // 樣式提取僅用於調試或備用，不直接應用到顯示中
     const style = window.getComputedStyle(container);
     const subtitleStyle = {
       fontSize: style.fontSize,
@@ -313,11 +313,11 @@ function processSubtitleContainerMerged(container) {
       debugLog('字幕樣式:', subtitleStyle);
     }
 
-    // 回調
+    // 回調中包含 htmlContent 以保留原始換行結構
     const subtitleData = {
       text,
       position,
-      style: subtitleStyle,
+      style: subtitleStyle, // 僅用於調試，不影響最終顯示
       element: container,
       htmlContent
     };
