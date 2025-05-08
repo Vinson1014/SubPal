@@ -128,6 +128,11 @@ export function initUIManager() {
   // 監聽滾動事件，確保字幕容器始終可見（使用防抖）
   window.addEventListener('scroll', debounce(updateSubtitlePosition, 200));
   
+  // 監聽全螢幕模式變更事件
+  ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(event => {
+    document.addEventListener(event, handleFullscreenChange);
+  });
+  
   // 隱藏原生字幕，確保偵測功能仍然有效
   hideNativeSubtitles();
   
@@ -135,6 +140,77 @@ export function initUIManager() {
   updateSubtitleSize();
   
   console.log('UI 管理模組初始化完成');
+}
+
+/**
+ * 處理全螢幕模式變更事件
+ */
+function handleFullscreenChange() {
+  console.log('全螢幕模式變更，重新調整字幕位置和大小');
+  if (currentSubtitle) {
+    updateSubtitlePosition(currentSubtitle.position);
+    updateSubtitleSize();
+    // 強制確保字幕容器可見
+    if (customSubtitleContainer) {
+      customSubtitleContainer.style.display = 'block';
+      // 檢查 DOM 層級並重新附加到頂層
+      ensureTopLevelAttachment();
+    }
+    // 定期檢查字幕容器是否正確顯示
+    setTimeout(() => {
+      if (currentSubtitle && customSubtitleContainer && customSubtitleContainer.style.display !== 'block') {
+        console.log('字幕容器在全螢幕模式下未正確顯示，強制設置為可見');
+        customSubtitleContainer.style.display = 'block';
+        updateSubtitlePosition(currentSubtitle.position);
+        updateSubtitleSize();
+        // 再次確保附加到頂層
+        ensureTopLevelAttachment();
+      }
+    }, 500);
+  }
+}
+
+/**
+ * 確保自訂 UI 元素附加到視頻播放器內部
+ */
+function ensureTopLevelAttachment() {
+  // 查找視頻播放器元素
+  const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
+  if (!videoPlayer) {
+    console.log('找不到視頻播放器元素，無法附加 UI 元素到播放器內部');
+    // 如果找不到播放器，考慮是否需要回退到 body 或其他處理
+    return;
+  }
+
+  // 附加自訂字幕容器
+  if (customSubtitleContainer && customSubtitleContainer.parentElement !== videoPlayer) {
+    console.log('自訂字幕容器不在播放器內部，重新附加到播放器');
+    videoPlayer.appendChild(customSubtitleContainer);
+  }
+
+  // 附加互動按鈕
+  if (interactionButtons && interactionButtons.parentElement !== videoPlayer) {
+    console.log('互動按鈕不在播放器內部，重新附加到播放器');
+    videoPlayer.appendChild(interactionButtons);
+  }
+
+  // 附加提交頁面（如果存在）
+  const floatingWindow = document.getElementById('translation-floating-window');
+  const overlay = document.getElementById('translation-overlay');
+  if (floatingWindow && floatingWindow.parentElement !== videoPlayer) {
+    console.log('提交頁面浮動視窗不在播放器內部，重新附加到播放器');
+    videoPlayer.appendChild(floatingWindow);
+  }
+  if (overlay && overlay.parentElement !== videoPlayer) {
+    console.log('提交頁面 overlay 不在播放器內部，重新附加到播放器');
+    videoPlayer.appendChild(overlay);
+  }
+
+  // 附加 debug timestamp 元素（如果存在）
+  if (debugTimestampElement && debugTimestampElement.parentElement !== videoPlayer) {
+    console.log('Debug timestamp 元素不在播放器內部，重新附加到播放器');
+    videoPlayer.appendChild(debugTimestampElement);
+  }
 }
 
 /**
@@ -169,12 +245,19 @@ function loadDebugMode() {
 
 // 切換 debug timestamp 顯示與更新
 function toggleDebugTimestamp(enabled) {
+  // 查找視頻播放器元素
+  const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
+  if (!videoPlayer) {
+    console.error('找不到視頻播放器元素，無法顯示 debug timestamp');
+    return;
+  }
+
   if (enabled) {
     if (!debugTimestampElement) {
       debugTimestampElement = document.createElement('div');
       debugTimestampElement.id = 'debug-timestamp';
       Object.assign(debugTimestampElement.style, {
-        position: 'fixed',
+        position: 'absolute', // 改為 absolute 定位，相對於播放器
         top: '10px',
         right: '10px',
         zIndex: Z_INDEX.BUTTONS.toString(),
@@ -184,7 +267,8 @@ function toggleDebugTimestamp(enabled) {
         borderRadius: '4px',
         fontSize: '14px'
       });
-      document.body.appendChild(debugTimestampElement);
+      // 附加到播放器內部
+      videoPlayer.appendChild(debugTimestampElement);
     }
     debugTimestampElement.style.display = 'block';
     if (debugTimestampInterval) clearInterval(debugTimestampInterval);
@@ -241,21 +325,30 @@ function loadSubtitleStyle() {
 }
 
 /**
- * 創建自定義字幕容器
+ * 創建自定義 UI 元素並附加到視頻播放器內部
  */
 function createCustomSubtitleContainer() {
-  console.log('創建自定義字幕容器...');
-  
-  // 檢查是否已經存在
-  if (customSubtitleContainer) {
-    console.log('字幕容器已存在，不需要重新創建');
+  console.log('創建自定義 UI 元素...');
+
+  // 查找視頻播放器元素
+  const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
+  if (!videoPlayer) {
+    console.error('找不到視頻播放器元素，無法創建 UI 元素');
     return;
   }
-  
+
+  // 檢查是否已經存在
+  if (customSubtitleContainer) {
+    console.log('UI 元素已存在，不需要重新創建');
+    // 確保它們附加到正確的位置（播放器內部）
+    ensureTopLevelAttachment();
+    return;
+  }
+
   // 創建容器元素
   customSubtitleContainer = document.createElement('div');
   customSubtitleContainer.id = 'subtitle-assistant-container';
-  customSubtitleContainer.style.position = 'fixed'; // 改為 fixed 定位，確保不受滾動影響
+  customSubtitleContainer.style.position = 'absolute'; // 改為 absolute 定位，相對於播放器
   customSubtitleContainer.style.zIndex = Z_INDEX.SUBTITLE.toString(); // 統一 z-index
   customSubtitleContainer.style.pointerEvents = 'auto'; // 修改為可接收滑鼠事件
   customSubtitleContainer.style.display = 'none'; // 初始隱藏
@@ -264,27 +357,27 @@ function createCustomSubtitleContainer() {
   customSubtitleContainer.style.width = '100%'; // 設置寬度為 100%
   customSubtitleContainer.style.bottom = '10%'; // 預設位置在底部
   customSubtitleContainer.style.left = '0'; // 預設位置在左側
-  
+
   console.log('字幕容器元素已創建');
-  
+
   // 只在調試模式下添加測試用邊框和背景
   if (debugMode) {
     customSubtitleContainer.style.border = '2px solid red';
     customSubtitleContainer.style.backgroundColor = 'rgba(255, 0, 0, 0.1)';
   }
-  
+
   // 創建字幕元素
   customSubtitleElement = document.createElement('div');
   customSubtitleElement.id = 'subtitle-assistant-text';
-  
+
   // 應用字幕樣式
   applySubtitleStyle();
-  
+
   // 創建交互按鈕容器（作為字幕容器的子元素，絕對定位於右上角）
   interactionButtons = document.createElement('div');
   interactionButtons.id = 'subtitle-assistant-buttons';
   interactionButtons.style.display = 'none';
-  interactionButtons.style.position = 'fixed'; // 浮動於 body
+  interactionButtons.style.position = 'absolute'; // 浮動於播放器內部
   interactionButtons.style.flexDirection = 'row';
   interactionButtons.style.pointerEvents = 'auto';
   interactionButtons.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
@@ -299,20 +392,20 @@ function createCustomSubtitleContainer() {
   const submitButton = createButton('✏️', handleSubmitTranslation);
   const likeButton = createButton('👍', handleLikeSubtitle);
   const dislikeButton = createButton('👎', handleDislikeSubtitle);
-  
+
   // 添加按鈕到容器
   interactionButtons.appendChild(submitButton);
   interactionButtons.appendChild(likeButton);
   interactionButtons.appendChild(dislikeButton);
-  
+
   // 將元素添加到容器
   customSubtitleContainer.appendChild(customSubtitleElement);
 
-  // 將互動按鈕添加到 body（外側浮動）
-  document.body.appendChild(interactionButtons);
+  // 將互動按鈕添加到播放器內部
+  videoPlayer.appendChild(interactionButtons);
 
-  // 將容器添加到文檔
-  document.body.appendChild(customSubtitleContainer);
+  // 將容器添加到播放器內部
+  videoPlayer.appendChild(customSubtitleContainer);
 
   // 添加鼠標事件監聽器
   customSubtitleContainer.addEventListener('mouseenter', showInteractionButtons);
@@ -320,11 +413,9 @@ function createCustomSubtitleContainer() {
   interactionButtons.addEventListener('mouseenter', showInteractionButtons);
   interactionButtons.addEventListener('mouseleave', hideInteractionButtons);
 
-  // 設定 container 為 relative，並設最小寬度
-  customSubtitleContainer.style.position = 'relative';
   customSubtitleContainer.style.minWidth = '100px';
 
-  console.log('創建自定義字幕容器完成');
+  console.log('創建自定義 UI 元素完成');
 }
 
 /**
@@ -733,6 +824,13 @@ function hideInteractionButtons() {
  * 處理提交翻譯按鈕點擊
  */
 function handleSubmitTranslation() {
+  // 查找視頻播放器元素
+  const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
+  if (!videoPlayer) {
+    console.error('找不到視頻播放器元素，無法顯示提交頁面');
+    return;
+  }
+
   if (!currentSubtitle) return;
   
   // 記錄當前字幕的 timestamp
@@ -745,7 +843,7 @@ function handleSubmitTranslation() {
   // 創建浮動視窗容器
   const floatingWindow = document.createElement('div');
   floatingWindow.id = 'translation-floating-window';
-  floatingWindow.style.position = 'fixed';
+  floatingWindow.style.position = 'absolute'; // 改為 absolute 定位，相對於播放器
   floatingWindow.style.top = '50%';
   floatingWindow.style.left = '50%';
   floatingWindow.style.transform = 'translate(-50%, -50%)';
@@ -762,14 +860,19 @@ function handleSubmitTranslation() {
   // 創建一個 overlay 層，防止背景干擾
   const overlay = document.createElement('div');
   overlay.id = 'translation-overlay';
-  overlay.style.position = 'fixed';
+  overlay.style.position = 'absolute'; // 改為 absolute 定位，相對於播放器
   overlay.style.top = '0';
   overlay.style.left = '0';
   overlay.style.width = '100%';
   overlay.style.height = '100%';
   overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
   overlay.style.zIndex = (Z_INDEX.DIALOG - 1).toString();
-  document.body.appendChild(overlay);
+
+  // 確保 UI 元素附加到播放器內部
+  ensureTopLevelAttachment();
+
+  // 添加到播放器內部
+  videoPlayer.appendChild(overlay);
 
   // 創建浮動視窗內容
   floatingWindow.innerHTML = `
@@ -808,8 +911,8 @@ function handleSubmitTranslation() {
     </div>
   `;
 
-  // 添加浮動視窗到文檔
-  document.body.appendChild(floatingWindow);
+  // 添加浮動視窗到播放器內部
+  videoPlayer.appendChild(floatingWindow);
 
   const languageSelect = document.getElementById('language-select');
   const translationInput = document.getElementById('translation-input');
@@ -860,10 +963,10 @@ function handleSubmitTranslation() {
   const handleFocusOut = (e) => {
     // 檢查是否點擊按鈕 - 如果是，允許其正常工作
     const clickedButton = e.relatedTarget && (
-      e.relatedTarget.id === 'submit-translation' || 
+      e.relatedTarget.id === 'submit-translation' ||
       e.relatedTarget.id === 'cancel-translation'
     );
-    
+
     // 若焦點離開浮動視窗，且不是去往按鈕，則恢復焦點
     if (!clickedButton && !floatingWindow.contains(e.relatedTarget)) {
       // 恢復焦點到上次使用的輸入欄位並回復光標位置
@@ -878,10 +981,10 @@ function handleSubmitTranslation() {
       }, 0);
     }
   };
-  
+
   // 在捕獲階段監聽 focusout 事件
   floatingWindow.addEventListener('focusout', handleFocusOut, true);
-  
+
   // 點擊 overlay 時回復焦點，並儲存引用以便清理
   const handleOverlayClick = (e) => {
     // 如果點擊的是 overlay 本身而非其子元素
@@ -896,9 +999,9 @@ function handleSubmitTranslation() {
       }
     }
   };
-  
+
   overlay.addEventListener('mousedown', handleOverlayClick);
-  
+
   // 阻止事件傳播，但確保按鈕可點擊
   floatingWindow.addEventListener('mousedown', (e) => {
     // 只有點擊的不是按鈕時才阻止事件傳播
@@ -906,30 +1009,32 @@ function handleSubmitTranslation() {
     const isButton = clickedElement.tagName === 'BUTTON' ||
                      clickedElement.id === 'submit-translation' ||
                      clickedElement.id === 'cancel-translation';
-                     
+
     if (!isButton) {
       e.stopPropagation();
     }
   });
-  
+
   // 監聽視窗大小變化事件，重新定位浮動視窗
   const repositionWindow = () => {
     floatingWindow.style.top = '50%';
     floatingWindow.style.left = '50%';
     floatingWindow.style.transform = 'translate(-50%, -50%)';
   };
+  // Note: This resize listener might not be needed if positioned absolutely within the player.
+  // The player itself handles resizing. Let's keep it for now but be aware it might be redundant.
   window.addEventListener('resize', repositionWindow);
-  
+
   // 當關閉浮動視窗時，移除事件監聽器和 overlay
   const cleanup = () => {
     window.removeEventListener('resize', repositionWindow);
     floatingWindow.removeEventListener('focusout', handleFocusOut, true);
-    if (document.body.contains(overlay)) {
+    if (videoPlayer.contains(overlay)) { // Check if overlay is child of videoPlayer
       overlay.removeEventListener('mousedown', handleOverlayClick);
-      document.body.removeChild(overlay);
+      videoPlayer.removeChild(overlay);
     }
   };
-  
+
   // 確保按鈕可以正常互動
   const cancelButton = document.getElementById('cancel-translation');
   const submitButton = document.getElementById('submit-translation');
@@ -938,7 +1043,9 @@ function handleSubmitTranslation() {
 
   cancelButton.addEventListener('click', () => {
     cleanup();
-    document.body.removeChild(floatingWindow);
+    if (videoPlayer.contains(floatingWindow)) { // Check if floatingWindow is child of videoPlayer
+      videoPlayer.removeChild(floatingWindow);
+    }
   });
   submitButton.addEventListener('click', () => {
     const translationInput = document.getElementById('translation-input');
@@ -985,7 +1092,9 @@ function handleSubmitTranslation() {
     });
 
     cleanup();
-    document.body.removeChild(floatingWindow);
+    if (videoPlayer.contains(floatingWindow)) { // Check if floatingWindow is child of videoPlayer
+      videoPlayer.removeChild(floatingWindow);
+    }
   });
 
   // 向 background 請求已儲存的語言
