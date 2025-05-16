@@ -13,8 +13,6 @@ let subtitleDetectedCallback = null;
 let lastSubtitleText = '';
 let lastSubtitlePosition = null;
 
-// 播放狀態
-let isPlaying = false;
 
 // 字幕元素選擇器
 const SUBTITLE_SELECTORS = [
@@ -37,8 +35,6 @@ function debugLog(...args) {
   }
 }
 
-// MutationObserver 實例
-let observer = null;
 
 /**
  * 初始化字幕偵測模組
@@ -48,18 +44,6 @@ export function initSubtitleDetector() {
   
   // 載入調試模式設置
   loadDebugMode();
-  
-  // 創建 MutationObserver 實例
-  observer = new MutationObserver(handleDOMChanges);
-  
-  // 開始觀察 DOM 變化
-  startObserving();
-  
-  // 監聽視頻播放器加載事件
-  document.addEventListener('load', checkForVideoPlayer, true);
-  
-  // 立即檢查視頻播放器是否已存在
-  checkForVideoPlayer();
   
   // 設置字幕容器觀察器
   setupSubtitleObserver();
@@ -157,66 +141,29 @@ function scanForSubtitles() {
 }
 
 /**
- * 開始觀察 DOM 變化
+ * 開始觀察 DOM 變化 - 已禁用全局掃描
+ * 目前僅依賴字幕容器專用觀察器，不再進行全局 DOM 掃描
  */
 function startObserving() {
-  // 如果已經在觀察，則先停止
-  if (observer) {
-    observer.disconnect();
-  }
-  
-  // 獲取視頻播放器元素
-  const videoPlayer = document.querySelector('.watch-video');
-  
-  if (videoPlayer) {
-    // 觀察整個視頻播放器區域
-    observer.observe(videoPlayer, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      attributes: true
-    });
-    
-    debugLog('開始觀察視頻播放器區域');
-  } else {
-    // 如果找不到視頻播放器，則觀察整個文檔
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
-    
-    debugLog('找不到視頻播放器，觀察整個文檔');
-    
-    // 定期檢查視頻播放器是否已加載
-    setTimeout(checkForVideoPlayer, 1000);
-  }
+  // 全局 DOM 掃描已禁用，僅保留函數結構以便未來擴展
+  debugLog('全局 DOM 掃描已禁用，僅使用字幕容器專用觀察器');
 }
 
 /**
- * 檢查視頻播放器是否已加載
+ * 檢查視頻播放器是否已加載 - 已禁用
  */
 function checkForVideoPlayer() {
-  const videoPlayer = document.querySelector('.watch-video');
-  
-  if (videoPlayer) {
-    debugLog('找到視頻播放器，重新配置觀察器');
-    startObserving();
-  }
+  // 全局 DOM 掃描已禁用，該功能不再使用
+  debugLog('檢查視頻播放器功能已禁用');
 }
 
 /**
- * 處理 DOM 變化
+ * 處理 DOM 變化 - 已禁用
  * @param {MutationRecord[]} mutations - 變化記錄
  */
 function handleDOMChanges(mutations) {
-  // 只有在影片未播放時才重新掃描字幕，以避免干擾輸入
-  if (!isPlaying) {
-    scanForSubtitles();
-  } else {
-    if (debugMode) {
-      debugLog('影片播放中，暫不掃描字幕以避免干擾');
-    }
-  }
+  // 全局 DOM 掃描已禁用，不再處理全局 DOM 變化
+  debugLog('全局 DOM 變化處理已禁用');
 }
 
 /**
