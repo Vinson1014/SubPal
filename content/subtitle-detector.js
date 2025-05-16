@@ -4,7 +4,7 @@
  * 這個模組負責偵測串流平台播放器上的字幕，並提取字幕文本和時間信息。
  */
 
-import { sendMessage, onMessage } from './messaging.js';
+import { sendMessage, onMessage, registerInternalEventHandler } from './messaging.js';
 
 // 事件回調函數
 let subtitleDetectedCallback = null;
@@ -84,12 +84,10 @@ function loadDebugMode() {
     console.error('載入調試模式設置時出錯:', error);
   });
   
-  // 註冊消息處理器來監聽設置變更
-  onMessage((message) => {
-    if (message.type === 'TOGGLE_DEBUG_MODE') {
-      debugMode = message.debugMode;
-      debugLog('調試模式設置已更新:', debugMode);
-    }
+  // 使用內部事件機制監聽設置變更
+  registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
+    debugMode = message.debugMode;
+    debugLog('調試模式設置已更新:', debugMode);
   });
 }
 
