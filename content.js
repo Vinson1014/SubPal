@@ -1,91 +1,127 @@
 // content.js
 // 內容腳本 - 作為 background 和 page context (content/index.js) 之間的消息橋樑
+// 使用 chrome.runtime.connect 建立長連接以提高穩定性
 
 (function() {
   // 檢查 chrome.runtime 是否可用
-  if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) {
+  if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.connect) {
     console.error('[Content Script] chrome.runtime is not available. Extension messaging will not work.');
     return;
   }
-  console.log('[Content Script] Initializing message bridge...');
+  console.log('[Content Script] Initializing message bridge with long-lived connection...');
 
   let initialDebugMode = false; // 預設值
+  let messageCounter = 0; // 用於生成唯一訊息 ID 的計數器
+  let backgroundPort = null; // 長連接 port
+
+  // 建立到 background script 的長連接
+  function connectToBackground() {
+    backgroundPort = chrome.runtime.connect({ name: "subtitle-assistant-channel" });
+    console.log('[Content Script] Connected to background script.');
+
+    // 監聽來自 background 的消息
+    backgroundPort.onMessage.addListener((message) => {
+      console.log('[Content Script] Received from background (port):', message.type, message);
+
+      // 將 background 的回應轉發回 page context (messaging.js)
+      // 使用 CustomEvent 傳遞消息和 messageId
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: { messageId: message.messageId, response: message.response }
+      }));
+
+      // 處理特定的 background 請求，例如更新 debug 模式
+      if (message.type === 'TOGGLE_DEBUG_MODE') {
+        initialDebugMode = message.debugMode;
+        // 將 debug 狀態同步給 page context
+        console.log('[Content Script] Syncing debug mode to page context:', initialDebugMode);
+        window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+          detail: { message: { type: 'SET_DEBUG_MODE', debugMode: initialDebugMode } }
+        }));
+      }
+    });
+
+    // 監聽連接斷開事件
+    backgroundPort.onDisconnect.addListener(() => {
+      console.warn('[Content Script] Disconnected from background script. Attempting to reconnect...');
+      backgroundPort = null;
+      // 在一段時間後嘗試重新連接
+      setTimeout(connectToBackground, 1000); // 1秒後重試
+    });
+
+    // 獲取初始 debugMode 並注入腳本 (通過新連接發送消息)
+    // 使用一個臨時的 messageId 來處理這個單次請求的響應
+    const initialDebugMessageId = generateUniqueMessageId('GET_DEBUG_MODE_INITIAL');
+    // 監聽這個特定 messageId 的響應
+    const initialDebugListener = (event) => {
+      if (event.detail.messageId === initialDebugMessageId) {
+        window.removeEventListener('responseFromContentScript', initialDebugListener);
+        const res = event.detail.response;
+        if (res && res.success && typeof res.debugMode === 'boolean') {
+          initialDebugMode = res.debugMode;
+          console.log('[Content Script] Initial debug mode:', initialDebugMode);
+        } else {
+           console.warn('[Content Script] Failed to get initial settings via port:', res?.error);
+        }
+
+        // 將初始 debug 狀態發送給 page context
+        window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+          detail: { message: { type: 'SET_DEBUG_MODE', debugMode: initialDebugMode } }
+        }));
+
+        // 動態插入模組化入口腳本 (content/index.js)
+        // 這個腳本將運行在 page context，可以訪問 messaging.js
+        try {
+          const script = document.createElement('script');
+          script.type = 'module';
+          script.src = chrome.runtime.getURL('content/index.js');
+          script.onload = () => console.log('[Content Script] Page context script (content/index.js) loaded.');
+          script.onerror = (err) => console.error('[Content Script] Failed to load page context script (content/index.js):', err);
+          (document.head || document.documentElement).appendChild(script);
+          console.log('[Content Script] Injected page context script.');
+        } catch (e) {
+          console.error('[Content Script] Error injecting page context script:', e);
+        }
+      }
+    };
+    window.addEventListener('responseFromContentScript', initialDebugListener);
+
+    // 通過 port 發送獲取 debug mode 的請求
+    backgroundPort.postMessage({ messageId: initialDebugMessageId, message: { type: 'GET_SETTINGS', keys: ['debugMode'] } });
+  }
 
   // 1. 監聽來自 page context (messaging.js) 的消息事件
   window.addEventListener('messageToContentScript', (event) => {
     const { messageId, message } = event.detail;
     console.log('[Content Script] Received from page:', messageId, message);
 
-    // 將消息轉發到 background script
-    chrome.runtime.sendMessage(message, (response) => {
-      if (chrome.runtime.lastError) {
-        console.error('[Content Script] Error sending message to background:', chrome.runtime.lastError.message, 'Original message:', message);
-        // 將錯誤回傳給 page context
-        window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-          detail: { messageId, response: { error: chrome.runtime.lastError.message } }
-        }));
-      } else {
-        console.log('[Content Script] Received response from background:', response);
-        // 將 background 的回應轉發回 page context
-        window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-          detail: { messageId, response }
-        }));
-      }
-    });
-  });
+    // 生成唯一的訊息 ID，如果未提供
+    const uniqueMessageId = messageId || generateUniqueMessageId(message.type);
 
-  // 2. 監聽來自 background script 的消息
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    console.log('[Content Script] Received from background:', message, sender);
-
-    // 將消息轉發到 page context (messaging.js)
-    // 注意：這裡無法直接獲取 page context 的回應，因為 CustomEvent 是單向的
-    // 如果 background 需要 page context 的回應，應透過 content script 發起請求
-    const detail = { message, sender: { id: sender.id, url: sender.url, tab: sender.tab } }; // 簡化 sender 信息
-    window.dispatchEvent(new CustomEvent('messageFromContentScript', { detail }));
-
-    // 處理特定的 background 請求，例如更新 debug 模式
-    if (message.type === 'TOGGLE_DEBUG_MODE') {
-       initialDebugMode = message.debugMode;
-       // 將 debug 狀態同步給 page context
-       window.dispatchEvent(new CustomEvent('messageFromContentScript', {
-         detail: { message: { type: 'SET_DEBUG_MODE', debugMode: initialDebugMode } }
-       }));
-    }
-
-    // Content script 通常不需要同步回應 background，除非有特殊需求
-    // sendResponse({ received: true });
-    return false; // 表示不會異步回應
-  });
-
-  // 3. 獲取初始 debugMode 並注入腳本
-  chrome.runtime.sendMessage({ type: 'GET_SETTINGS', keys: ['debugMode'] }, (res) => {
-    if (chrome.runtime.lastError) {
-      console.warn('[Content Script] Failed to get initial settings:', chrome.runtime.lastError.message);
-    } else if (res && res.success && typeof res.debugMode === 'boolean') {
-      initialDebugMode = res.debugMode;
-      console.log('[Content Script] Initial debug mode:', initialDebugMode);
-    }
-
-    // 將初始 debug 狀態發送給 page context
-    window.dispatchEvent(new CustomEvent('messageFromContentScript', {
-      detail: { message: { type: 'SET_DEBUG_MODE', debugMode: initialDebugMode } }
-    }));
-
-    // 動態插入模組化入口腳本 (content/index.js)
-    // 這個腳本將運行在 page context，可以訪問 messaging.js
-    try {
-      const script = document.createElement('script');
-      script.type = 'module';
-      script.src = chrome.runtime.getURL('content/index.js');
-      script.onload = () => console.log('[Content Script] Page context script (content/index.js) loaded.');
-      script.onerror = (err) => console.error('[Content Script] Failed to load page context script (content/index.js):', err);
-      (document.head || document.documentElement).appendChild(script);
-      console.log('[Content Script] Injected page context script.');
-    } catch (e) {
-      console.error('[Content Script] Error injecting page context script:', e);
+    if (backgroundPort && backgroundPort.postMessage) {
+      console.log('[Content Script] Forwarding message to background (port):', uniqueMessageId, message.type);
+      // 通過 port 發送消息，包含 messageId
+      backgroundPort.postMessage({ messageId: uniqueMessageId, message: message });
+      // 注意：這裡不再需要設置超時，因為 messaging.js 已經處理了超時
+    } else {
+      console.error('[Content Script] Background port is not connected. Cannot send message:', uniqueMessageId, message.type);
+      // 如果 port 未連接，立即向 page context 發送錯誤響應
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: { messageId: uniqueMessageId, response: { error: 'Background service is unavailable.' } }
+      }));
     }
   });
+
+  // 移除舊的 chrome.runtime.onMessage 監聽器，因為我們現在使用 port
+  // chrome.runtime.onMessage.addListener(...) // 這部分將被移除
+
+  // 生成唯一訊息 ID 的輔助函數
+  function generateUniqueMessageId(messageType) {
+    messageCounter++;
+    return `content_msg_${Date.now()}_${messageCounter}_${messageType}`;
+  }
+
+  // 建立初始連接
+  connectToBackground();
 
   console.log('[Content Script] Message bridge initialized.');
 })();

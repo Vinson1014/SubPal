@@ -259,39 +259,47 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // 初始化時從 background 獲取最新狀態
-    chrome.runtime.sendMessage({ type: 'GET_SETTINGS', keys: ['isEnabled', 'debugMode', 'isTestModeEnabled', 'currentVideoId', 'replacementCount'] }, (response) => {
-        if (chrome.runtime.lastError) {
-            console.error('無法從 background 獲取初始設置:', chrome.runtime.lastError.message);
-            // 使用本地存儲作為備用
-            chrome.storage.local.get(['isEnabled', 'debugMode', 'isTestModeEnabled', 'currentVideoId', 'replacementCount'], (localResult) => {
-                isEnabled = localResult.isEnabled !== undefined ? localResult.isEnabled : true;
-                debugMode = localResult.debugMode || false;
-                isTestModeEnabled = localResult.isTestModeEnabled || false;
-                currentVideoId = localResult.currentVideoId || '';
-                replaceCount = localResult.replacementCount || 0;
-                updateUI();
-            });
-        } else if (response && response.success) {
-            console.log('從 background 獲取初始設置:', response);
-            isEnabled = response.isEnabled !== undefined ? response.isEnabled : true; // 預設啟用
-            debugMode = response.debugMode || false;
-            isTestModeEnabled = response.isTestModeEnabled || false;
-            currentVideoId = response.currentVideoId || '';
-            replaceCount = response.replacementCount || 0;
-            updateUI(); // 使用從 background 獲取的最新狀態更新 UI
-        } else {
-            console.warn('從 background 獲取初始設置失敗:', response?.error);
-            // 處理失敗情況，例如使用預設值或本地存儲
-            chrome.storage.local.get(['isEnabled', 'debugMode', 'isTestModeEnabled', 'currentVideoId', 'replacementCount'], (localResult) => {
-                isEnabled = localResult.isEnabled !== undefined ? localResult.isEnabled : true;
-                debugMode = localResult.debugMode || false;
-                isTestModeEnabled = localResult.isTestModeEnabled || false;
-                currentVideoId = localResult.currentVideoId || '';
-                replaceCount = localResult.replacementCount || 0;
-                updateUI();
-            });
-        }
-    });
+    function getInitialSettings() {
+        chrome.runtime.sendMessage({ type: 'GET_SETTINGS', keys: ['isEnabled', 'debugMode', 'isTestModeEnabled', 'currentVideoId', 'replacementCount'] }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.error('無法從 background 獲取初始設置:', chrome.runtime.lastError.message);
+                // 添加重試邏輯
+                setTimeout(getInitialSettings, 500); // 500ms後重試
+                return;
+            }
+
+            // 處理中間響應
+            if (response && response.processing === true) {
+                console.log('設置正在處理中，等待最終響應...');
+                return; // 不進行後續處理，等待最終響應
+            }
+
+            // 處理最終響應
+            if (response && response.success) {
+                console.log('從 background 獲取初始設置:', response);
+                isEnabled = response.isEnabled !== undefined ? response.isEnabled : true; // 預設啟用
+                debugMode = response.debugMode || false;
+                isTestModeEnabled = response.isTestModeEnabled || false;
+                currentVideoId = response.currentVideoId || '';
+                replaceCount = response.replacementCount || 0;
+                updateUI(); // 使用從 background 獲取的最新狀態更新 UI
+            } else {
+                console.warn('從 background 獲取初始設置失敗:', response?.error);
+                // 處理失敗情況，例如使用預設值或本地存儲
+                chrome.storage.local.get(['isEnabled', 'debugMode', 'isTestModeEnabled', 'currentVideoId', 'replacementCount'], (localResult) => {
+                    isEnabled = localResult.isEnabled !== undefined ? localResult.isEnabled : true;
+                    debugMode = localResult.debugMode || false;
+                    isTestModeEnabled = localResult.isTestModeEnabled || false;
+                    currentVideoId = localResult.currentVideoId || '';
+                    replaceCount = localResult.replacementCount || 0;
+                    updateUI();
+                });
+            }
+        });
+    }
+
+    // 首次調用獲取設置
+    getInitialSettings();
 
     // 監聽來自 background 的狀態更新消息 (可選，如果需要即時同步)
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
