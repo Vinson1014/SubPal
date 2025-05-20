@@ -4,7 +4,7 @@
  * 這個模組負責處理字幕替換的邏輯，包括查詢替換規則和生成替換後的字幕內容。
  */
 
-import { sendMessage, onMessage } from './messaging.js';
+import { sendMessage, onMessage, registerInternalEventHandler } from './messaging.js';
 
 let debugMode = false;
 let isEnabled = true; // 擴充功能是否啟用
@@ -102,17 +102,6 @@ function loadInitialSettings() {
 function setupMessageListeners() {
   onMessage((msg) => {
     switch (msg.type) {
-      case 'TOGGLE_DEBUG_MODE':
-        debugMode = msg.debugMode;
-        debugLog('調試模式切換:', debugMode);
-        break;
-      case 'TOGGLE_EXTENSION':
-        isEnabled = msg.isEnabled;
-        debugLog(`擴充功能已${isEnabled ? '啟用' : '停用'}`);
-        if (!isEnabled) {
-          clearCache(); // 禁用時清除緩存
-        }
-        break;
       case 'SETTINGS_CHANGED': // 監聽來自 popup 的設置變更
         if (msg.changes.isTestModeEnabled !== undefined) {
           isTestModeEnabled = msg.changes.isTestModeEnabled;
@@ -131,11 +120,26 @@ function setupMessageListeners() {
             }
         }
         break;
-      case 'PLAYER_STATE_UPDATE':
-        debugLog(`收到播放器狀態更新: ${msg.state} at ${msg.timestamp}`);
-        handlePlayerStateUpdate(msg.state, msg.timestamp);
-        break;
     }
+  });
+
+  // 註冊內部事件處理器
+  registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
+    debugMode = message.debugMode;
+    debugLog('調試模式切換:', debugMode);
+  });
+
+  registerInternalEventHandler('TOGGLE_EXTENSION', (message) => {
+    isEnabled = message.isEnabled;
+    debugLog(`擴充功能已${isEnabled ? '啟用' : '停用'}`);
+    if (!isEnabled) {
+      clearCache(); // 禁用時清除緩存
+    }
+  });
+
+  registerInternalEventHandler('PLAYER_STATE_CHANGED', (message) => {
+    debugLog(`收到播放器狀態更新: ${message.state} at ${message.timestamp}`);
+    handlePlayerStateUpdate(message.state, message.timestamp);
   });
 }
 
