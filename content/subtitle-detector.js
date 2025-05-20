@@ -13,6 +13,9 @@ let subtitleDetectedCallback = null;
 let lastSubtitleText = '';
 let lastSubtitlePosition = null;
 
+// 用於儲存當前 MutationObserver 實例的模組級變數
+let currentSubtitleObserver = null;
+
 
 // 字幕元素選擇器
 const SUBTITLE_SELECTORS = [
@@ -47,6 +50,15 @@ export function initSubtitleDetector() {
   
   // 設置字幕容器觀察器
   setupSubtitleObserver();
+  
+  // 註冊內部事件處理器來監聽影片切換事件
+  registerInternalEventHandler('VIDEO_ID_CHANGED', (message) => {
+    debugLog('收到內部事件 VIDEO_ID_CHANGED，重新設置字幕觀察器');
+    // 斷開舊的觀察器並設置新的
+    setupSubtitleObserver();
+    // 立即掃描一次以獲取新影片的第一個字幕
+    scanForSubtitles();
+  });
 }
 
 /**
@@ -61,7 +73,6 @@ function loadDebugMode() {
   .then(result => {
     if (result && result.debugMode !== undefined) {
       debugMode = result.debugMode;
-      debugLog('載入調試模式設置:', debugMode);
     }
   })
   .catch(error => {
@@ -79,6 +90,13 @@ function loadDebugMode() {
  * 設置字幕容器觀察器
  */
 function setupSubtitleObserver() {
+  // 如果存在舊的觀察器，先斷開它
+  if (currentSubtitleObserver) {
+    debugLog('斷開舊的字幕容器觀察器');
+    currentSubtitleObserver.disconnect();
+    currentSubtitleObserver = null; // 清空引用
+  }
+  
   // 尋找字幕容器
   const subtitleContainer = document.querySelector('.player-timedtext');
   if (subtitleContainer) {
@@ -98,6 +116,9 @@ function setupSubtitleObserver() {
       subtree: true,
       characterData: true
     });
+    
+    // 儲存新的觀察器實例
+    currentSubtitleObserver = subtitleObserver;
     
     debugLog('已設置字幕容器觀察器');
   } else {
@@ -140,51 +161,6 @@ function scanForSubtitles() {
   }
 }
 
-/**
- * 開始觀察 DOM 變化 - 已禁用全局掃描
- * 目前僅依賴字幕容器專用觀察器，不再進行全局 DOM 掃描
- */
-function startObserving() {
-  // 全局 DOM 掃描已禁用，僅保留函數結構以便未來擴展
-  debugLog('全局 DOM 掃描已禁用，僅使用字幕容器專用觀察器');
-}
-
-/**
- * 檢查視頻播放器是否已加載 - 已禁用
- */
-function checkForVideoPlayer() {
-  // 全局 DOM 掃描已禁用，該功能不再使用
-  debugLog('檢查視頻播放器功能已禁用');
-}
-
-/**
- * 處理 DOM 變化 - 已禁用
- * @param {MutationRecord[]} mutations - 變化記錄
- */
-function handleDOMChanges(mutations) {
-  // 全局 DOM 掃描已禁用，不再處理全局 DOM 變化
-  debugLog('全局 DOM 變化處理已禁用');
-}
-
-/**
- * 檢查元素是否是字幕元素
- * @param {Element} element - 要檢查的元素
- * @returns {boolean} - 是否是字幕元素
- */
-function isSubtitleElement(element) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) {
-    return false;
-  }
-  
-  // 檢查元素是否匹配任一字幕選擇器
-  return SUBTITLE_SELECTORS.some(selector => {
-    try {
-      return element.matches(selector);
-    } catch (e) {
-      return false;
-    }
-  });
-}
 
 /**
  * 合併 container 內所有 span，並正確抓取分行與位置
