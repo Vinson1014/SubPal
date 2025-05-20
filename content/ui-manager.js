@@ -12,7 +12,7 @@ const Z_INDEX = {
   TOAST: 13000
 };
 
-import { sendMessage, onMessage } from './messaging.js';
+import { sendMessage, onMessage, registerInternalEventHandler } from './messaging.js';
 // 引入 vote-manager 的接口
 import { handleVote } from './vote-manager.js';
 // 引入 translation-manager 的接口
@@ -57,6 +57,12 @@ let currentSubtitle = null;
 
 // 字幕交互按鈕
 let interactionButtons = null;
+
+function debugLog(...args) {
+  if (debugMode) {
+    console.log('[UIManager]', ...args);
+  }
+}
 
 /**
  * 防抖函數，限制函數的執行頻率
@@ -108,16 +114,16 @@ function calculateTextWidth(text) {
  * 初始化 UI 管理模組
  */
 export function initUIManager() {
-  console.log('初始化 UI 管理模組...');
+  debugLog('初始化 UI 管理模組...');
+  
+  // 載入調試模式設置
+  loadDebugMode();
   
   // 創建自定義字幕容器
   createCustomSubtitleContainer();
   
   // 從存儲中載入字幕樣式設置
   loadSubtitleStyle();
-  
-  // 載入調試模式設置
-  loadDebugMode();
   
   // 監聽視窗大小變化，調整字幕位置和大小（使用防抖）
   window.addEventListener('resize', debounce(() => {
@@ -126,7 +132,7 @@ export function initUIManager() {
   }, 200));
   
   // 監聽滾動事件，確保字幕容器始終可見（使用防抖）
-  window.addEventListener('scroll', debounce(updateSubtitlePosition, 200));
+  window.addEventListener('scroll', debounce(updateSubtitlePosition, 100));
   
   // 監聽全螢幕模式變更事件
   ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach(event => {
@@ -134,19 +140,106 @@ export function initUIManager() {
   });
   
   // 隱藏原生字幕，確保偵測功能仍然有效
-  hideNativeSubtitles();
+  // hideNativeSubtitles();
+  
+  // 注入高優先級 CSS 規則以持續隱藏原生字幕
+  injectHideNativeSubtitleStyles();
   
   // 初始調整字幕大小
   updateSubtitleSize();
   
-  console.log('UI 管理模組初始化完成');
+  // 使用內部事件機制監聽 videoID 變動
+  registerInternalEventHandler('VIDEO_ID_CHANGED', (data) => {
+    debugLog('透過內部事件機制收到 videoID 變動消息，重新創建自訂字幕 UI');
+    recreateSubtitleUI();
+  });
+  
+  debugLog('UI 管理模組初始化完成');
+}
+
+/**
+ * 重新創建自訂字幕 UI
+ */
+function recreateSubtitleUI() {
+  debugLog('收到影片變更事件，重新創建自訂字幕 UI');
+  // 確保在頁面載入完畢後執行重新創建操作
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    performRecreateUI();
+  } else {
+    debugLog('頁面尚未完全載入，等待 DOMContentLoaded 事件');
+    document.addEventListener('DOMContentLoaded', performRecreateUI, { once: true });
+    // 設置最大延遲時間，例如 5 秒後強制執行，避免事件未觸發
+    setTimeout(() => {
+      debugLog('達到最大延遲時間，強制重新創建 UI');
+      performRecreateUI();
+    }, 5000);
+  }
+}
+
+/**
+ * 執行重新創建 UI 的操作
+ */
+function performRecreateUI() {
+  // 移除舊的 UI 元素
+  if (customSubtitleContainer) {
+    customSubtitleContainer.remove();
+    customSubtitleContainer = null;
+    debugLog('舊的自訂字幕容器已移除');
+  }
+  if (interactionButtons) {
+    interactionButtons.remove();
+    interactionButtons = null;
+    debugLog('舊的交互按鈕已移除');
+  }
+  // 檢查並移除任何殘留的提交頁面元素
+  const floatingWindow = document.getElementById('translation-floating-window');
+  if (floatingWindow) {
+    floatingWindow.remove();
+    debugLog('舊的浮動窗口已移除');
+  }
+  const overlay = document.getElementById('translation-overlay');
+  if (overlay) {
+    overlay.remove();
+    debugLog('舊的遮罩層已移除');
+  }
+  // 重新創建 UI
+  createCustomSubtitleContainer();
+  toggleDebugTimestamp(debugMode);
+  debugLog('自訂字幕 UI 已重新創建');
+}
+
+/**
+ * 注入高優先級 CSS 規則以持續隱藏原生字幕
+ */
+function injectHideNativeSubtitleStyles() {
+  // 檢查是否已經注入過樣式，避免重複注入
+  if (document.getElementById('subtitle-assistant-hide-native-styles')) {
+    debugLog('已注入隱藏原生字幕的 CSS 規則，無需重複注入');
+    return;
+  }
+  
+  // 創建 style 元素
+  const styleElement = document.createElement('style');
+  styleElement.id = 'subtitle-assistant-hide-native-styles';
+  
+  // 設置高優先級 CSS 規則
+  styleElement.textContent = `
+    .player-timedtext, .player-timedtext-text-container {
+      clip-path: polygon(0 0, 0 0, 0 0, 0 0) !important;
+      pointer-events: none !important;
+    }
+  `;
+  
+  // 將 style 元素添加到 head 中
+  document.head.appendChild(styleElement);
+  debugLog('已注入高優先級 CSS 規則以隱藏原生字幕');
 }
 
 /**
  * 處理全螢幕模式變更事件
  */
 function handleFullscreenChange() {
-  console.log('全螢幕模式變更，重新調整字幕位置和大小');
+  debugLog('全螢幕模式變更，重新調整字幕位置和大小');
   if (currentSubtitle) {
     updateSubtitlePosition(currentSubtitle.position);
     updateSubtitleSize();
@@ -159,7 +252,7 @@ function handleFullscreenChange() {
     // 定期檢查字幕容器是否正確顯示
     setTimeout(() => {
       if (currentSubtitle && customSubtitleContainer && customSubtitleContainer.style.display !== 'block') {
-        console.log('字幕容器在全螢幕模式下未正確顯示，強制設置為可見');
+        debugLog('字幕容器在全螢幕模式下未正確顯示，強制設置為可見');
         customSubtitleContainer.style.display = 'block';
         updateSubtitlePosition(currentSubtitle.position);
         updateSubtitleSize();
@@ -174,43 +267,44 @@ function handleFullscreenChange() {
  * 確保自訂 UI 元素附加到視頻播放器內部
  */
 function ensureTopLevelAttachment() {
+  debugLog('測試略過ensureTopLevelAttachment()')
   // 查找視頻播放器元素
-  const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
-  if (!videoPlayer) {
-    console.log('找不到視頻播放器元素，無法附加 UI 元素到播放器內部');
-    // 如果找不到播放器，考慮是否需要回退到 body 或其他處理
-    return;
-  }
+  // const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
+  // if (!videoPlayer) {
+  //   console.log('找不到視頻播放器元素，無法附加 UI 元素到播放器內部');
+  //   // 如果找不到播放器，考慮是否需要回退到 body 或其他處理
+  //   return;
+  // }
 
   // 附加自訂字幕容器
-  if (customSubtitleContainer && customSubtitleContainer.parentElement !== videoPlayer) {
-    console.log('自訂字幕容器不在播放器內部，重新附加到播放器');
-    videoPlayer.appendChild(customSubtitleContainer);
-  }
+  // if (customSubtitleContainer && customSubtitleContainer.parentElement !== videoPlayer) {
+  //   console.log('自訂字幕容器不在播放器內部，重新附加到播放器');
+  //   videoPlayer.appendChild(customSubtitleContainer);
+  // }
 
   // 附加互動按鈕
-  if (interactionButtons && interactionButtons.parentElement !== videoPlayer) {
-    console.log('互動按鈕不在播放器內部，重新附加到播放器');
-    videoPlayer.appendChild(interactionButtons);
-  }
+  // if (interactionButtons && interactionButtons.parentElement !== videoPlayer) {
+  //   console.log('互動按鈕不在播放器內部，重新附加到播放器');
+  //   videoPlayer.appendChild(interactionButtons);
+  // }
 
   // 附加提交頁面（如果存在）
-  const floatingWindow = document.getElementById('translation-floating-window');
-  const overlay = document.getElementById('translation-overlay');
-  if (floatingWindow && floatingWindow.parentElement !== videoPlayer) {
-    console.log('提交頁面浮動視窗不在播放器內部，重新附加到播放器');
-    videoPlayer.appendChild(floatingWindow);
-  }
-  if (overlay && overlay.parentElement !== videoPlayer) {
-    console.log('提交頁面 overlay 不在播放器內部，重新附加到播放器');
-    videoPlayer.appendChild(overlay);
-  }
+  // const floatingWindow = document.getElementById('translation-floating-window');
+  // const overlay = document.getElementById('translation-overlay');
+  // if (floatingWindow && floatingWindow.parentElement !== videoPlayer) {
+  //   console.log('提交頁面浮動視窗不在播放器內部，重新附加到播放器');
+  //   videoPlayer.appendChild(floatingWindow);
+  // }
+  // if (overlay && overlay.parentElement !== videoPlayer) {
+  //   console.log('提交頁面 overlay 不在播放器內部，重新附加到播放器');
+  //   videoPlayer.appendChild(overlay);
+  // }
 
   // 附加 debug timestamp 元素（如果存在）
-  if (debugTimestampElement && debugTimestampElement.parentElement !== videoPlayer) {
-    console.log('Debug timestamp 元素不在播放器內部，重新附加到播放器');
-    videoPlayer.appendChild(debugTimestampElement);
-  }
+  // if (debugTimestampElement && debugTimestampElement.parentElement !== videoPlayer) {
+  //   console.log('Debug timestamp 元素不在播放器內部，重新附加到播放器');
+  //   videoPlayer.appendChild(debugTimestampElement);
+  // }
 }
 
 /**
@@ -225,7 +319,7 @@ function loadDebugMode() {
 .then(result => {
     if (result && result.debugMode !== undefined) {
       debugMode = result.debugMode;
-      console.log('載入調試模式設置:', debugMode);
+      debugLog('載入調試模式設置:', debugMode);
       toggleDebugTimestamp(debugMode);
     }
   })
@@ -233,18 +327,24 @@ function loadDebugMode() {
     console.error('載入調試模式設置時出錯:', error);
   });
   
-  // 監聽設置變更
-  onMessage((message) => {
-    if (message.type === 'TOGGLE_DEBUG_MODE') {
-      debugMode = message.debugMode;
-      console.log('調試模式設置已更新:', debugMode);
-      toggleDebugTimestamp(debugMode);
-    }
+  // 使用內部事件機制監聽調試模式變更
+  registerInternalEventHandler('TOGGLE_DEBUG_MODE', (data) => {
+    debugMode = data.debugMode;
+    debugLog('透過內部事件機制更新調試模式:', debugMode);
+    toggleDebugTimestamp(debugMode);
   });
 }
 
 // 切換 debug timestamp 顯示與更新
 function toggleDebugTimestamp(enabled) {
+  debugLog('toggle debug timestamp 被觸發, DebugMode:', enabled);
+  // 檢查是否已經存在 debug timestamp 元素
+  if (debugTimestampElement) {
+    // 如果已經存在則移除重新附加
+    debugTimestampElement.remove();
+    debugLog('debugTimeStampElement 已存在, 移除重新附加')
+  }
+  
   // 查找視頻播放器元素
   const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
   if (!videoPlayer) {
@@ -253,23 +353,22 @@ function toggleDebugTimestamp(enabled) {
   }
 
   if (enabled) {
-    if (!debugTimestampElement) {
-      debugTimestampElement = document.createElement('div');
-      debugTimestampElement.id = 'debug-timestamp';
-      Object.assign(debugTimestampElement.style, {
-        position: 'absolute', // 改為 absolute 定位，相對於播放器
-        top: '10px',
-        right: '10px',
-        zIndex: Z_INDEX.BUTTONS.toString(),
-        color: '#00ff00',
-        backgroundColor: 'rgba(0, 0, 0, 0.5)',
-        padding: '4px 6px',
-        borderRadius: '4px',
-        fontSize: '14px'
-      });
-      // 附加到播放器內部
-      videoPlayer.appendChild(debugTimestampElement);
-    }
+    debugTimestampElement = document.createElement('div');
+    debugTimestampElement.id = 'debug-timestamp';
+    Object.assign(debugTimestampElement.style, {
+      position: 'absolute', // 改為 absolute 定位，相對於播放器
+      top: '10px',
+      right: '10px',
+      zIndex: Z_INDEX.BUTTONS.toString(),
+      color: '#00ff00',
+      backgroundColor: 'rgba(0, 0, 0, 0.5)',
+      padding: '4px 6px',
+      borderRadius: '4px',
+      fontSize: '14px'
+    });
+    // 附加到播放器內部
+    videoPlayer.appendChild(debugTimestampElement);
+    // 設定顯示更新
     debugTimestampElement.style.display = 'block';
     if (debugTimestampInterval) clearInterval(debugTimestampInterval);
     debugTimestampInterval = setInterval(() => {
@@ -298,7 +397,7 @@ function loadSubtitleStyle() {
   .then(result => {
     if (result && result.subtitleStyle) {
       subtitleStyle = { ...subtitleStyle, ...result.subtitleStyle };
-      console.log('載入字幕樣式設置:', subtitleStyle);
+      debugLog('載入字幕樣式設置:', subtitleStyle);
       
       // 如果已經創建了字幕元素，則更新其樣式
       if (customSubtitleElement) {
@@ -310,11 +409,11 @@ function loadSubtitleStyle() {
     console.error('載入字幕樣式設置時出錯:', error);
   });
   
-  // 監聽設置變更
-  onMessage((message) => {
-    if (message.type === 'SUBTITLE_STYLE_UPDATED' && message.subtitleStyle) {
-      subtitleStyle = { ...subtitleStyle, ...message.subtitleStyle };
-      console.log('字幕樣式設置已更新:', subtitleStyle);
+  // 使用內部事件機制監聽字幕樣式更新
+  registerInternalEventHandler('SUBTITLE_STYLE_UPDATED', (data) => {
+    if (data.subtitleStyle) {
+      subtitleStyle = { ...subtitleStyle, ...data.subtitleStyle };
+      debugLog('透過內部事件機制更新字幕樣式:', subtitleStyle);
       
       // 更新字幕元素樣式
       if (customSubtitleElement) {
@@ -328,7 +427,7 @@ function loadSubtitleStyle() {
  * 創建自定義 UI 元素並附加到視頻播放器內部
  */
 function createCustomSubtitleContainer() {
-  console.log('創建自定義 UI 元素...');
+  debugLog('創建自定義 UI 元素...');
 
   // 查找視頻播放器元素
   const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
@@ -339,7 +438,7 @@ function createCustomSubtitleContainer() {
 
   // 檢查是否已經存在
   if (customSubtitleContainer) {
-    console.log('UI 元素已存在，不需要重新創建');
+    debugLog('UI 元素已存在，不需要重新創建');
     // 確保它們附加到正確的位置（播放器內部）
     ensureTopLevelAttachment();
     return;
@@ -358,7 +457,7 @@ function createCustomSubtitleContainer() {
   customSubtitleContainer.style.bottom = '10%'; // 預設位置在底部
   customSubtitleContainer.style.left = '0'; // 預設位置在左側
 
-  console.log('字幕容器元素已創建');
+  debugLog('字幕容器元素已創建');
 
   // 只在調試模式下添加測試用邊框和背景
   if (debugMode) {
@@ -415,7 +514,7 @@ function createCustomSubtitleContainer() {
 
   customSubtitleContainer.style.minWidth = '100px';
 
-  console.log('創建自定義 UI 元素完成');
+  debugLog('創建自定義 UI 元素完成');
 }
 
 /**
@@ -480,29 +579,16 @@ export function hideSubtitle() {
   currentSubtitle = null;
 }
 
-/**
- * 隱藏原生字幕，確保偵測功能仍然有效
- */
-function hideNativeSubtitles() {
-  // 使用 visibility: hidden 隱藏原生字幕，保留 DOM 結構以便偵測
-  const nativeSubtitleElements = document.querySelectorAll('.player-timedtext, .player-timedtext-text-container');
-  nativeSubtitleElements.forEach(el => {
-    el.style.visibility = 'hidden';
-    // 或者使用 opacity: 0 作為備用方案
-    // el.style.opacity = '0';
-  });
-  console.log('原生字幕已隱藏，保留 DOM 結構以便偵測');
-}
 
 /**
  * 顯示替換後的字幕，統一使用自訂樣式，保留 HTML 結構以確保換行效果。
  * @param {Object} subtitleData - 字幕數據
  */
 export function showSubtitle(subtitleData) {
-  console.log('顯示字幕:', subtitleData);
+  debugLog('顯示字幕:', subtitleData);
 
   if (!customSubtitleContainer || !customSubtitleElement) {
-    console.log('字幕容器或字幕元素不存在，創建自定義字幕容器');
+    debugLog('字幕容器或字幕元素不存在，創建自定義字幕容器');
     createCustomSubtitleContainer();
   }
 
@@ -522,7 +608,7 @@ export function showSubtitle(subtitleData) {
     }
   }
 
-  // console.log('顯示字幕文本:', displayText);
+  // debugLog('顯示字幕文本:', displayText);
 
   // 如果有 HTML 內容，解析並移除內聯樣式後插入，保留換行和格式（原生或替換字幕都支援）
   if (subtitleData.htmlContent) {
@@ -548,9 +634,9 @@ export function showSubtitle(subtitleData) {
     const fontSizeMatch = subtitleData.htmlContent.match(/font-size:(\d+(\.\d+)?px)/i);
     if (fontSizeMatch && fontSizeMatch[1]) {
       subtitleStyle.fontSize = fontSizeMatch[1];
-      console.log('從原生字幕 HTML 解析字體大小:', subtitleStyle.fontSize);
+      debugLog('從原生字幕 HTML 解析字體大小:', subtitleStyle.fontSize);
     } else {
-      console.log('無法從 HTML 內容中解析 font-size，使用預設值:', subtitleStyle.fontSize);
+      debugLog('無法從 HTML 內容中解析 font-size，使用預設值:', subtitleStyle.fontSize);
     }
   }
 
@@ -558,7 +644,6 @@ export function showSubtitle(subtitleData) {
   applySubtitleStyle();
 
   // 更新字幕位置
-  // console.log('更新字幕位置...');
   updateSubtitlePosition(subtitleData.position);
 
   // 若 position 無效，延遲重試定位，避免初次出現在左上角
@@ -580,7 +665,7 @@ export function showSubtitle(subtitleData) {
   customSubtitleContainer.style.display = 'block';
 
   // 添加額外的可見性檢查，無論是否處於調試模式
-  console.log('字幕容器樣式:', {
+  debugLog('字幕容器樣式:', {
     display: customSubtitleContainer.style.display,
     position: customSubtitleContainer.style.position,
     top: customSubtitleContainer.style.top,
@@ -601,7 +686,7 @@ export function showSubtitle(subtitleData) {
 
   // 檢查字幕元素是否在DOM中
   if (document.body.contains(customSubtitleContainer)) {
-    console.log('字幕容器已在DOM中');
+    debugLog('字幕容器已在DOM中');
   } else {
     console.warn('字幕容器不在DOM中，重新添加');
     document.body.appendChild(customSubtitleContainer);
@@ -610,7 +695,7 @@ export function showSubtitle(subtitleData) {
   // 強制重繪（只執行一次）
   if (!customSubtitleContainer.dataset.initialized) {
     setTimeout(() => {
-      console.log('強制重繪字幕容器（僅首次）');
+      debugLog('強制重繪字幕容器（僅首次）');
       const originalPointerEvents = customSubtitleContainer.style.pointerEvents;
       customSubtitleContainer.style.display = 'none';
       // 強制瀏覽器重繪
@@ -623,6 +708,9 @@ export function showSubtitle(subtitleData) {
 
   // 更新字幕大小，確保與播放器尺寸一致
   updateSubtitleSize();
+  // 隱藏原生字幕
+  // hideNativeSubtitles();
+  
 }
 
 
@@ -633,12 +721,12 @@ function updateSubtitleSize() {
   // 獲取原生字幕容器元素
   const nativeSubtitle = document.querySelector('.player-timedtext-text-container');
   if (!nativeSubtitle) {
-    console.log('找不到原生字幕容器元素，無法調整字幕大小和位置');
+    debugLog('找不到原生字幕容器元素，無法調整字幕大小和位置');
     return;
   }
   // 獲取原生字幕容器的尺寸和位置
   const nativeRect = nativeSubtitle.getBoundingClientRect();
-  console.log('原生字幕容器尺寸和位置:', nativeRect);
+  debugLog('原生字幕容器尺寸和位置:', nativeRect);
   // 獲取播放器元素以計算最大寬度
   const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
   let maxWidth = 800; // 預設最大寬度
@@ -650,7 +738,7 @@ function updateSubtitleSize() {
   let textWidth = 0;
   if (currentSubtitle && customSubtitleElement) {
     textWidth = calculateTextWidth(customSubtitleElement.innerHTML);
-    console.log('字幕文本所需寬度:', textWidth);
+    debugLog('字幕文本所需寬度:', textWidth);
   }
   // 設置容器寬度為文本所需寬度與原生寬度的較大值，但不超過最大寬度
   const targetWidth = Math.min(maxWidth, Math.max(nativeRect.width, textWidth + 20)); // 加上一些 padding
@@ -663,7 +751,7 @@ function updateSubtitleSize() {
     const leftPosition = nativeRect.left + (nativeRect.width - targetWidth) / 2;
     customSubtitleContainer.style.left = `${leftPosition}px`;
     customSubtitleContainer.style.bottom = 'auto';
-    console.log('自訂字幕容器已更新以匹配原生字幕容器尺寸和位置，寬度調整為:', targetWidth);
+    debugLog('自訂字幕容器已更新以匹配原生字幕容器尺寸和位置，寬度調整為:', targetWidth);
   }
   // 如果字幕元素存在，確保應用當前樣式
   if (customSubtitleElement) {
@@ -676,7 +764,7 @@ function updateSubtitleSize() {
  * @param {Object} position - 位置信息（可選）
  */
 function updateSubtitlePosition(position) {
-  console.log('更新字幕位置，傳入位置:', position);
+  debugLog('更新字幕位置，傳入位置:', position);
   
   if (!customSubtitleContainer) {
     console.error('字幕容器不存在，無法更新位置');
@@ -685,19 +773,19 @@ function updateSubtitlePosition(position) {
   
   // 如果沒有當前字幕數據，不更新位置
   if (!currentSubtitle) {
-    console.log('沒有當前字幕數據，不更新位置');
+    debugLog('沒有當前字幕數據，不更新位置');
     return;
   }
   
   // 獲取原生字幕容器元素
   const nativeSubtitle = document.querySelector('.player-timedtext-text-container');
   if (!nativeSubtitle) {
-    console.log('找不到原生字幕容器元素，嘗試使用備用方法');
+    debugLog('找不到原生字幕容器元素，嘗試使用備用方法');
     
     // 獲取視頻播放器元素作為備用
     const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
     if (!videoPlayer) {
-      console.log('也找不到播放器元素，使用固定位置作為最後備案');
+      debugLog('也找不到播放器元素，使用固定位置作為最後備案');
       customSubtitleContainer.style.position = 'fixed';
       customSubtitleContainer.style.bottom = '10%';
       customSubtitleContainer.style.left = '0';
@@ -707,7 +795,7 @@ function updateSubtitlePosition(position) {
     }
     
     const playerRect = videoPlayer.getBoundingClientRect();
-    console.log('播放器位置和大小:', playerRect);
+    debugLog('播放器位置和大小:', playerRect);
     
     // 使用播放器底部的位置
     const containerTop = playerRect.top + playerRect.height - 150;
@@ -719,20 +807,20 @@ function updateSubtitlePosition(position) {
     customSubtitleContainer.style.bottom = 'auto'; // 清除底部定位
     customSubtitleContainer.style.textAlign = 'center';
     
-    console.log(`使用備用字幕位置: top=${containerTop}, left=${playerRect.left}, width=${playerRect.width}`);
+    debugLog(`使用備用字幕位置: top=${containerTop}, left=${playerRect.left}, width=${playerRect.width}`);
     return;
   }
   
   // 獲取原生字幕容器的位置和大小
   const nativeRect = nativeSubtitle.getBoundingClientRect();
-  console.log('原生字幕容器位置和大小:', nativeRect);
+  debugLog('原生字幕容器位置和大小:', nativeRect);
   
   // 檢查位置是否真正變化
   if (lastPosition && 
       Math.abs(lastPosition.top - nativeRect.top) < 5 && 
       Math.abs(lastPosition.left - nativeRect.left) < 5) {
     // 位置變化不大，不需要更新
-    console.log('字幕位置變化不大，不更新位置');
+    debugLog('字幕位置變化不大，不更新位置');
     return;
   }
   
@@ -748,7 +836,7 @@ function updateSubtitlePosition(position) {
   customSubtitleContainer.style.bottom = 'auto'; // 清除底部定位
   customSubtitleContainer.style.textAlign = 'center';
   
-  console.log('使用原生字幕容器位置和尺寸更新自訂字幕容器');
+  debugLog('使用原生字幕容器位置和尺寸更新自訂字幕容器');
   
   // 確保字幕容器可見
   customSubtitleContainer.style.display = 'block';
@@ -794,7 +882,7 @@ function showInteractionButtons() {
     }
 
     if (debugMode) {
-      console.log('顯示交互按鈕');
+      debugLog('顯示交互按鈕');
     }
   }
 }
@@ -807,7 +895,7 @@ function hideInteractionButtons() {
     if (!isHovering && interactionButtons) {
       interactionButtons.style.display = 'none';
       if (debugMode) {
-        console.log('隱藏交互按鈕');
+        debugLog('隱藏交互按鈕');
       }
     }
   }, 300); // 300ms 容錯，避免滑鼠移動過快導致 flicker
