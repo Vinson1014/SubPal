@@ -184,14 +184,14 @@ export async function processSubtitle(subtitleData, videoId, timestamp) {
   const originalText = subtitleData.text;
 
   // --- 1. 檢查測試模式 ---
-  if (isTestModeEnabled && testRules.length > 0) {
-    const testReplacement = checkTestRules(originalText);
-    if (testReplacement) {
-      return createReplacedSubtitle(subtitleData, testReplacement.replacement, testReplacement.translationID);
-    }
-  }
+  // if (isTestModeEnabled && testRules.length > 0) {
+  //   const testReplacement = checkTestRules(originalText);
+  //   if (testReplacement) {
+  //     return createReplacedSubtitle(subtitleData, testReplacement.replacement, testReplacement.translationID);
+  //   }
+  // }
 
-  // --- 2. 檢查 Video ID 是否變更 ---
+  // --- 1. 檢查 Video ID 是否變更 ---
   if (videoId !== currentVideoId) {
     debugLog(`視頻 ID 變更: ${currentVideoId} -> ${videoId}`);
     clearCache();  // 這將清除 requestedIntervals
@@ -201,22 +201,22 @@ export async function processSubtitle(subtitleData, videoId, timestamp) {
     return null; // 第一次請求，暫不替換
   }
 
-  // --- 3. 在緩存中查找匹配的替換字幕 ---
+  // --- 2. 在緩存中查找匹配的替換字幕 ---
   const cachedReplacement = findReplacementInCache(originalText, timestamp);
   if (cachedReplacement) {
     debugLog(`在緩存中找到匹配字幕 (Text: "${originalText}", TS: ${timestamp.toFixed(1)} -> Cached TS: ${cachedReplacement.timestamp.toFixed(2)}):`, cachedReplacement.suggestedSubtitle);
     // 檢查是否需要預加載
     checkAndTriggerPrefetch(timestamp);
-    return createReplacedSubtitle(subtitleData, cachedReplacement.suggestedSubtitle, cachedReplacement.translationID);
+    return createReplacedSubtitle(subtitleData, cachedReplacement);
   } else {
     debugLog(`在緩存中未找到時間戳 ${timestamp.toFixed(1)} 的匹配字幕`);
   }
 
-  // --- 4. 檢查是否需要觸發新的獲取 (如果緩存為空或時間戳超出範圍) ---
+  // --- 3. 檢查是否需要觸發新的獲取 (如果緩存為空或時間戳超出範圍) ---
   checkAndTriggerPrefetch(timestamp);
 
 
-  // --- 5. 如果沒有找到替換規則，返回 null ---
+  // --- 4. 如果沒有找到替換規則，返回 null ---
   return null;
 }
 
@@ -442,21 +442,42 @@ function limitCacheSize() {
 /**
  * 創建替換後的字幕數據
  * @param {Object} originalSubtitle - 原始字幕數據
- * @param {string} replacementText - 替換文本
- * @param {string} [translationID] - (可選) 替換字幕的 ID，用於投票等
+ * @param {Object} replacementData - 替換資料物件
+ * @property {string} replacementData.suggestedSubtitle - 替換文本
+ * @property {string} [replacementData.translationID] - (可選) 替換字幕的 ID
+ * @property {string} [replacementData.contributorUserID] - (可選) 貢獻字幕的用戶 ID
  * @returns {Object} - 替換後的字幕數據
  */
-function createReplacedSubtitle(originalSubtitle, replacementText, translationID = null) {
-  // 處理換行符號，轉換成 <br>
-  const replacementHtml = replacementText.replace(/\n/g, '<br>');
+function createReplacedSubtitle(originalSubtitle, replacementData) {
+  // 從替換資料物件提取必要資訊
+  const {
+    suggestedSubtitle = '',
+    translationID = null,
+    contributorUserID = null,
+  } = replacementData;
   
-  // 創建新的字幕數據對象，保留原始字幕的位置和樣式，並更新 text 和 htmlContent
-  return {
+  // 處理換行符號，轉換成 <br>
+  const replacementHtml = suggestedSubtitle.replace(/\n/g, '<br>');
+
+  // 
+  debugLog('建立替換字幕物件,回傳值:',{
     ...originalSubtitle,
-    text: replacementText, // 更新純文本
+    text: suggestedSubtitle, // 更新純文本
     htmlContent: `<span>${replacementHtml}</span>`, // 更新 HTML 內容，保留換行
     original: originalSubtitle.text, // 保留原始文本
     isReplaced: true,
-    translationID: translationID // 添加 translationID
+    translationID: translationID, // 添加 translationID
+    contributorUserID: contributorUserID, // 添加 contributorUserID
+  })
+
+  // 創建新的字幕數據對象，保留原始字幕的位置和樣式，並更新 text 和 htmlContent
+  return {
+    ...originalSubtitle,
+    text: suggestedSubtitle, // 更新純文本
+    htmlContent: `<span>${replacementHtml}</span>`, // 更新 HTML 內容，保留換行
+    original: originalSubtitle.text, // 保留原始文本
+    isReplaced: true,
+    translationID: translationID, // 添加 translationID
+    contributorUserID: contributorUserID, // 添加 contributorUserID
   };
 }
