@@ -1,6 +1,8 @@
 // background/sync.js
 // 負責處理資料同步相關操作的模組
 
+import * as apiModule from './api.js';
+
 let isDebugModeEnabled = false;
 let isSyncingVotes = false;
 let isSyncingTranslations = false;
@@ -205,22 +207,30 @@ async function syncPendingItems(queueKey, isSyncingFlag, apiCallFunction, dataTy
  * @param {object} voteData - 包含 userID 的完整投票數據
  */
 async function sendVoteToAPI(voteData) {
-  if (isDebugModeEnabled) console.log('[Sync Module] Sending vote to API via api.js:', voteData);
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ type: 'PROCESS_VOTE', payload: voteData }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.error('[Sync Module] Error sending vote to API:', chrome.runtime.lastError.message);
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        if (isDebugModeEnabled) console.log('[Sync Module] Vote sent to API:', response);
-        if (response.success) {
-          resolve(response.result || response);
-        } else {
-          reject(new Error(response.error || 'Failed to send vote to API'));
-        }
+  if (isDebugModeEnabled) console.log('[Sync Module] Sending vote to API via direct apiModule call:', voteData);
+  try {
+    // 模擬一個 sendResponse 函數，因為 apiModule.handleProcessVote 期望這個參數
+    // 這裡我們不需要實際的 portSendResponse，因為 sync 模組是直接呼叫
+    // 我們只需要確保 apiModule.handleProcessVote 內部邏輯能正常執行並返回結果
+    const dummySendResponse = (response) => {
+      if (isDebugModeEnabled) console.log('[Sync Module] Dummy sendResponse received for vote:', response);
+      // 這裡可以根據 response 判斷成功或失敗，並拋出錯誤
+      if (!response.success) {
+        throw new Error(response.error || 'Failed to process vote via API module');
       }
-    });
-  });
+    };
+
+    // 直接呼叫 apiModule.handleProcessVote
+    // 構造一個符合 apiModule.handleProcessVote 期望的 request 對象
+    const request = { type: 'PROCESS_VOTE', payload: voteData };
+    // sender 參數可以為空對象或 null，因為是內部呼叫
+    await apiModule.handleMessage(request, {}, dummySendResponse);
+    if (isDebugModeEnabled) console.log('[Sync Module] Vote processed successfully by apiModule.');
+    return { success: true }; // 假設成功處理
+  } catch (error) {
+    console.error('[Sync Module] Error processing vote via apiModule:', error);
+    throw error; // 重新拋出錯誤，讓 syncPendingItems 捕獲
+  }
 }
 
 /**
@@ -228,9 +238,18 @@ async function sendVoteToAPI(voteData) {
  * @param {object} translationData - 包含 userID 的完整翻譯數據
  */
 async function sendTranslationToAPI(translationData) {
-  if (isDebugModeEnabled) console.log('[Sync Module] Sending translation to API via api.js:', translationData);
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({
+  if (isDebugModeEnabled) console.log('[Sync Module] Sending translation to API via direct apiModule call:', translationData);
+  try {
+    const dummySendResponse = (response) => {
+      if (isDebugModeEnabled) console.log('[Sync Module] Dummy sendResponse received for translation:', response);
+      if (!response.success) {
+        throw new Error(response.error || 'Failed to submit translation via API module');
+      }
+    };
+
+    // 直接呼叫 apiModule.handleSubmitTranslation
+    // 構造一個符合 apiModule.handleSubmitTranslation 期望的 request 對象
+    const request = {
       type: 'SUBMIT_TRANSLATION',
       videoId: translationData.videoId,
       timestamp: translationData.timestamp,
@@ -238,20 +257,117 @@ async function sendTranslationToAPI(translationData) {
       translation: translationData.translation,
       submissionReason: translationData.submissionReason,
       languageCode: translationData.languageCode
-    }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.error('[Sync Module] Error sending translation to API:', chrome.runtime.lastError.message);
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        if (isDebugModeEnabled) console.log('[Sync Module] Translation sent to API:', response);
-        if (response.success) {
-          resolve(response.result || response);
-        } else {
-          reject(new Error(response.error || 'Failed to send translation to API'));
-        }
-      }
+    };
+    // sender 參數可以為空對象或 null
+    await apiModule.handleMessage(request, {}, dummySendResponse);
+    if (isDebugModeEnabled) console.log('[Sync Module] Translation submitted successfully by apiModule.');
+    return { success: true }; // 假設成功處理
+  } catch (error) {
+    console.error('[Sync Module] Error submitting translation via apiModule:', error);
+    throw error; // 重新拋出錯誤，讓 syncPendingItems 捕獲
+  }
+}
+
+/**
+ * 發送替換事件到後端 API
+ * @param {Array} events - 替換事件陣列
+ * @returns {Promise<Object>} - API 回應結果
+ */
+async function sendReplacementEventsToAPI(events) {
+  // 從 chrome.storage.sync 載入 API Base URL
+  const apiConfig = await chrome.storage.sync.get({ apiBaseUrl: 'http://localhost:3000' });
+  const API_BASE_URL = apiConfig.apiBaseUrl;
+  
+  const url = `${API_BASE_URL}/replacement-events`;
+  const body = { events };
+
+  if (isDebugModeEnabled) console.log('[Sync Module] Sending replacement events to API:', url, body);
+
+  // 添加超時控制
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超時
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal // 綁定 AbortSignal
     });
-  });
+
+    clearTimeout(timeoutId); // 清除超時計時器
+
+    if (!res.ok) {
+      let errorMsg = `API request failed with status ${res.status}`;
+      try {
+        const err = await res.json();
+        errorMsg = err.error || errorMsg;
+      } catch (e) {
+        if (isDebugModeEnabled) console.log('[Sync Module] Failed to parse API error response as JSON.');
+      }
+      console.error('[Sync Module] API Error:', errorMsg);
+      throw new Error(errorMsg);
+    }
+
+    try {
+      const jsonResponse = await res.json();
+      if (isDebugModeEnabled) console.log('[Sync Module] API Success Response:', jsonResponse);
+      return jsonResponse;
+    } catch (e) {
+      console.error('[Sync Module] Error parsing successful API response as JSON:', e);
+      return { success: true, message: 'Response received but could not be parsed as JSON.' };
+    }
+  } catch (error) {
+    clearTimeout(timeoutId); // 確保在錯誤發生時也清除計時器
+    if (error.name === 'AbortError') {
+      console.error('[Sync Module] Send replacement events API request timed out:', url);
+      throw new Error('發送替換事件 API 請求超時');
+    } else {
+      console.error('[Sync Module] Error during send replacement events API request:', error);
+      throw error; // 重新拋出其他錯誤
+    }
+  }
+}
+
+/**
+ * 同步待處理的替換事件列表
+ */
+async function syncPendingReplacementEvents() {
+  if (isDebugModeEnabled) console.log('[Sync Module] Starting replacement events sync...');
+  
+  try {
+    const { replacementEvents = [] } = await chrome.storage.local.get(['replacementEvents']);
+    if (replacementEvents.length === 0) {
+      if (isDebugModeEnabled) console.log('[Sync Module] Replacement events queue is empty.');
+      return;
+    }
+
+    if (isDebugModeEnabled) console.log(`[Sync Module] Syncing ${replacementEvents.length} pending replacement events...`);
+    
+    try {
+      // 嘗試發送所有事件到 API
+      const result = await sendReplacementEventsToAPI(replacementEvents);
+      
+      // 成功發送後清空本地存儲的事件
+      await chrome.storage.local.set({ replacementEvents: [] });
+      console.log(`[Sync Module] Successfully synced ${replacementEvents.length} replacement events and cleared local storage.`);
+      
+    } catch (error) {
+      console.warn('[Sync Module] Failed to sync replacement events, keeping in storage:', error.message);
+      // 失敗時保留事件，等待下次同步
+    }
+
+  } catch (error) {
+    console.error('[Sync Module] Error during replacement events sync:', error);
+  }
+}
+
+/**
+ * 觸發替換事件同步
+ */
+function triggerReplacementEventsSync() {
+  if (isDebugModeEnabled) console.log('[Sync Module] Triggering replacement events sync');
+  syncPendingReplacementEvents(); // 異步執行
 }
 
 /**
@@ -263,9 +379,10 @@ export function setDebugMode(debugMode) {
 }
 
 // 定期觸發同步 (例如每 5 分鐘)
-// 創建兩個獨立的 alarm
+// 創建三個獨立的 alarm
 chrome.alarms.create('syncVotesAlarm', { periodInMinutes: 5 });
 chrome.alarms.create('syncTranslationsAlarm', { periodInMinutes: 5 });
+chrome.alarms.create('syncReplacementEventsAlarm', { periodInMinutes: 15 }); // 每15分鐘同步替換事件
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'syncVotesAlarm') {
@@ -274,6 +391,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   } else if (alarm.name === 'syncTranslationsAlarm') {
     if (isDebugModeEnabled) console.log('[Sync Module] Periodic translation sync triggered by alarm.');
     triggerTranslationSync();
+  } else if (alarm.name === 'syncReplacementEventsAlarm') {
+    if (isDebugModeEnabled) console.log('[Sync Module] Periodic replacement events sync triggered by alarm.');
+    triggerReplacementEventsSync();
   }
 });
 
@@ -282,4 +402,5 @@ chrome.runtime.onStartup.addListener(() => {
   if (isDebugModeEnabled) console.log('[Sync Module] Extension startup, triggering all syncs.');
   triggerVoteSync();
   triggerTranslationSync();
+  triggerReplacementEventsSync();
 });
