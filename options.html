@@ -8,8 +8,34 @@
   <h1>字幕助手 設定</h1>
   <div id="settings-container">
     <div>
-      <label for="featureXCheckbox">Enable Feature X:</label>
-      <input type="checkbox" id="featureXCheckbox">
+      <label for="debugModeCheckbox">啟用 Debug Mode:</label>
+      <input type="checkbox" id="debugModeCheckbox">
+    </div>
+    <div>
+      <label for="apiBaseUrlInput">API Base URL:</label>
+      <input type="text" id="apiBaseUrlInput" style="width: 300px;">
+      <span style="color: red; margin-left: 10px;">除非您清楚知道自己在改什麼，否則這項設定不應該被更動</span>
+    </div>
+    <div style="margin-top: 20px;">
+      <h2>資料備份與恢復</h2>
+      <div>
+        <button id="backupDataButton">備份資料</button>
+        <span style="margin-left: 10px;">將 userID 和設定匯出為檔案</span>
+      </div>
+      <div style="margin-top: 10px;">
+        <label for="restoreDataInput">恢復資料:</label>
+        <input type="file" id="restoreDataInput" accept=".json">
+        <button id="restoreDataButton">恢復</button>
+        <span style="margin-left: 10px;">從備份檔案匯入 userID 和設定</span>
+      </div>
+    </div>
+    <div style="margin-top: 20px;">
+      <h2>待同步數據</h2>
+      <div id="pending-data-container">
+        <p>投票隊列: <span id="voteQueueCount">0</span> 個待同步項目 <button id="clearVoteQueueButton">清空</button></p>
+        <p>翻譯隊列: <span id="translationQueueCount">0</span> 個待同步項目 <button id="clearTranslationQueueButton">清空</button></p>
+        <p>替換事件隊列: <span id="replacementEventsQueueCount">0</span> 個待同步項目 <button id="clearReplacementEventsQueueButton">清空</button></p>
+      </div>
     </div>
   </div>
   <script src="options.js"></script>
