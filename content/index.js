@@ -33,9 +33,17 @@ function debugLog(...args) {
 /**
  * 初始化擴充功能
  */
-function initExtension() {
+async function initExtension() {
   console.log('字幕助手擴充功能初始化中...');
-  
+
+  // 從存儲中載入設置
+  await loadSettings();
+
+  if(!isEnabled) {
+    console.log('擴充功能已禁用');
+    return;
+  }
+
   // 初始化所有模組
   initMessaging();
   debugLog('消息傳遞模組已就緒');
@@ -56,9 +64,6 @@ function initExtension() {
   console.log('設置事件監聽器...');
   setupEventListeners();
   console.log('事件監聽器設置完成');
-  
-  // 從存儲中載入設置
-  loadSettings();
   
   console.log('字幕助手擴充功能初始化完成');
 }
@@ -108,37 +113,76 @@ function setupEventListeners() {
     const videoId = getVideoId();
     const timestamp = getCurrentTimestamp();
 
-    // console.log(`偵測到字幕: "${subtitleData.text}" (videoId: ${videoId}, timestamp: ${timestamp})`);
-
     // 處理字幕替換
-    // console.log('開始處理字幕替換...');
     processSubtitle(subtitleData, videoId, timestamp)
       .then(replacedSubtitle => {
         if (replacedSubtitle) {
-          console.log(`字幕替換成功: "${subtitleData.text}" -> "${replacedSubtitle.text}"`);
+          // 創建替換後的字幕數據對象，添加必要的屬性
+          const replacedSubtitleData = {
+            ...replacedSubtitle,
+            videoId: videoId,
+            timestamp: timestamp,
+          };
+
+
+          console.log(`字幕替換成功: "${subtitleData.text}" -> "${replacedSubtitleData.text}"`);
 
           // 顯示替換後的字幕
-          // console.log('顯示替換後的字幕...');
           // 內容比對，只有變化才顯示
           if (
-            replacedSubtitle.text !== lastSubtitleCache.text ||
-            replacedSubtitle.htmlContent !== lastSubtitleCache.htmlContent ||
-            JSON.stringify(replacedSubtitle.position) !== JSON.stringify(lastSubtitleCache.position)
+            replacedSubtitleData.text !== lastSubtitleCache.text ||
+            replacedSubtitleData.htmlContent !== lastSubtitleCache.htmlContent ||
+            JSON.stringify(replacedSubtitleData.position) !== JSON.stringify(lastSubtitleCache.position)
           ) {
-            showSubtitle(replacedSubtitle);
-            lastSubtitleCache.text = replacedSubtitle.text;
-            lastSubtitleCache.htmlContent = replacedSubtitle.htmlContent;
-            lastSubtitleCache.position = replacedSubtitle.position ? { ...replacedSubtitle.position } : null;
+            showSubtitle(replacedSubtitleData);
+            lastSubtitleCache.text = replacedSubtitleData.text;
+            lastSubtitleCache.htmlContent = replacedSubtitleData.htmlContent;
+            lastSubtitleCache.position = replacedSubtitleData.position ? { ...replacedSubtitleData.position } : null;
           }
 
           // 更新替換計數
           replacementCount++;
 
-          // 發送統計信息更新
+          // 記錄替換事件
+          const now = new Date().toISOString();
           sendMessage({
-            type: 'UPDATE_STATS',
-            videoId,
-            replacementCount
+            type: 'GET_USER_ID'
+          }).then(response => {
+            const userID = response.userID || 'unknown';
+            const replacementEvent = {
+              occurredAt: now,
+              translationID: replacedSubtitleData.translationID || 'unknown', // 從 API 回傳值中提取
+              contributorUserID: replacedSubtitleData.contributorUserID || 'unknown', // 從 API 回傳值中提取
+              beneficiaryUserID: userID // 使用當前用戶的 ID
+            };
+
+            // 將事件發送到背景腳本進行處理
+            sendMessage({
+              type: 'REPORT_REPLACEMENT_EVENTS',
+              events: [replacementEvent]
+            }).then(() => {
+              console.log('替換事件已發送到背景腳本:', replacementEvent);
+            }).catch(error => {
+              console.error('發送替換事件到背景腳本時出錯:', error);
+            });
+          }).catch(error => {
+            console.error('獲取用戶 ID 時出錯:', error);
+            const replacementEvent = {
+              occurredAt: now,
+              translationID: replacedSubtitleData.translationID || 'unknown', // 從 API 回傳值中提取
+              contributorUserID: replacedSubtitleData.contributorUserID || 'unknown', // 從 API 回傳值中提取
+              beneficiaryUserID: 'unknown' // 無法獲取用戶 ID 時使用預設值
+            };
+
+            // 將事件發送到背景腳本進行處理
+            sendMessage({
+              type: 'REPORT_REPLACEMENT_EVENTS',
+              events: [replacementEvent]
+            }).then(() => {
+              console.log('替換事件已發送到背景腳本:', replacementEvent);
+            }).catch(error => {
+              console.error('發送替換事件到背景腳本時出錯:', error);
+            });
           });
         } else {
           console.log(`沒有找到替換規則，使用原始字幕: "${subtitleData.text}"`);
@@ -152,7 +196,6 @@ function setupEventListeners() {
           };
 
           // 顯示原始字幕
-          // console.log('顯示原始字幕...');
           // 內容比對，只有變化才顯示
           if (
             originalSubtitleData.text !== lastSubtitleCache.text ||
@@ -200,26 +243,31 @@ function setupEventListeners() {
 /**
  * 從存儲中載入設置
  */
-function loadSettings() {
-  // 使用 sendMessage 而不是直接訪問 chrome.storage
-  sendMessage({
-    type: 'GET_SETTINGS',
-    keys: ['isEnabled', 'debugMode']
-  })
-  .then(result => {
-    if (result && result.isEnabled !== undefined) {
-      isEnabled = result.isEnabled;
-    }
-    
-    if (result && result.debugMode !== undefined) {
-      debugMode = result.debugMode;
-    }
-    
-    console.log(`載入設置: isEnabled=${isEnabled}, debugMode=${debugMode}`);
-  })
-  .catch(error => {
-    console.error('載入設置時出錯:', error);
+async function loadSettings() {
+  return new Promise((resolve, reject) => {
+    // 使用 sendMessage 而不是直接訪問 chrome.storage
+    sendMessage({
+      type: 'GET_SETTINGS',
+      keys: ['isEnabled', 'debugMode']
+    })
+    .then(result => {
+      if (result && result.isEnabled !== undefined) {
+        isEnabled = result.isEnabled;
+      }
+      
+      if (result && result.debugMode !== undefined) {
+        debugMode = result.debugMode;
+      }
+      
+      console.log(`載入設置: isEnabled=${isEnabled}, debugMode=${debugMode}`);
+      resolve(); // 設置載入完成，解析 Promise
+    })
+    .catch(error => {
+      console.error('載入設置時出錯:', error);
+      reject(error); // 載入設置出錯，拒絕 Promise
+    });
   });
+  // 注意：定時回報機制已在背景腳本中實現，此處不再設置定時器
 }
 
 // 當頁面加載完成後初始化擴充功能
