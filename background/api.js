@@ -1,11 +1,15 @@
 // background/api.js
 // 負責處理與後端 API 相關的操作的模組
 
-// 從 config.js中導入 API Base URL
-import { API_BASE_URL } from '../content/config.js'; // 從 config.js 中導入 API Base URL
-
-// const API_BASE_URL = 'http://localhost:3000'; // 暫時硬編碼
+// API Base URL，初始值將從 chrome.storage.sync 中載入
+let API_BASE_URL = 'http://localhost:3000'; // 初始預設值
 let isDebugModeEnabled = false;
+
+// 從 chrome.storage.sync 載入初始 API Base URL
+chrome.storage.sync.get({ apiBaseUrl: 'http://localhost:3000' }, (items) => {
+  API_BASE_URL = items.apiBaseUrl;
+  if (isDebugModeEnabled) console.log('[API Module] Initial API Base URL loaded:', API_BASE_URL);
+});
 
 /**
  * 處理 API 相關的訊息 (通過 port)
@@ -112,6 +116,7 @@ async function handleCheckSubtitle(request, portSendResponse) {
   }
 }
 
+
 /**
  * 從後端 API 獲取字幕數據
  * @param {string} videoId
@@ -159,10 +164,12 @@ async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
         const subtitles = jsonResponse.subtitles;
         if (isDebugModeEnabled) console.log(`[API Module] API returned ${subtitles.length} subtitles.`);
         return subtitles.map(sub => ({
+          videoID: sub.videoID,
           timestamp: sub.timestamp,
+          translationID: sub.translationID,
           originalSubtitle: sub.originalSubtitle,
           suggestedSubtitle: sub.suggestedSubtitle,
-          translationID: sub.translationID
+          contributorUserID: sub.contributorUserID
         }));
       } else {
         console.error('[API Module] API response indicates failure or invalid format:', jsonResponse);
@@ -214,12 +221,20 @@ async function handleGenericSubmitRequest(data, portSendResponse, apiCallFunctio
       // 使用 portSendResponse 發送成功響應
       portSendResponse({ success: true, result });
     } catch (apiError) {
-      console.warn(`[API Module] Failed to send ${dataTypeLabel} directly, adding to queue (port):`, apiError.message, fullData);
-      await addToQueueFunction(fullData);
-      // 使用 portSendResponse 發送排隊響應
-      portSendResponse({ success: true, queued: true, message: `${dataTypeLabel}已暫存，將在網路恢復後提交` });
-      // 觸發一次同步嘗試 (非阻塞)
-      triggerSyncFunction();
+      // 檢查是否為 409 衝突錯誤
+      if (apiError.status === 409) {
+        console.warn(`[API Module] ${dataTypeLabel} already exists (409 Conflict), treating as success:`, apiError.message, fullData);
+        // 視為成功，不添加到隊列，直接返回成功響應
+        portSendResponse({ success: true, message: `${dataTypeLabel}已存在，無需重複提交` });
+      } else {
+        // 其他錯誤，添加到隊列
+        console.warn(`[API Module] Failed to send ${dataTypeLabel} directly, adding to queue (port):`, apiError.message, fullData);
+        await addToQueueFunction(fullData);
+        // 使用 portSendResponse 發送排隊響應
+        portSendResponse({ success: true, queued: true, message: `${dataTypeLabel}已暫存，將在網路恢復後提交` });
+        // 觸發一次同步嘗試 (非阻塞)
+        triggerSyncFunction();
+      }
     }
   } catch (error) {
     console.error(`[API Module] Error processing ${dataTypeLabel} request (port):`, error);
@@ -349,7 +364,9 @@ async function sendToAPI(url, body) {
         if (isDebugModeEnabled) console.log('[API Module] Failed to parse API error response as JSON.');
       }
       console.error('[API Module] API Error:', errorMsg);
-      throw new Error(errorMsg);
+      const error = new Error(errorMsg);
+      error.status = res.status; // 添加 status 屬性
+      throw error;
     }
 
     try {
@@ -408,4 +425,13 @@ function triggerTranslationSync() {
  */
 export function setDebugMode(debugMode) {
   isDebugModeEnabled = debugMode;
+}
+
+/**
+ * 設置 API Base URL
+ * @param {string} url - 新的 API Base URL
+ */
+export function setApiBaseUrl(url) {
+  API_BASE_URL = url;
+  if (isDebugModeEnabled) console.log('[API Module] API Base URL updated:', API_BASE_URL);
 }
