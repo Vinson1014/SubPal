@@ -65,75 +65,82 @@ const contentScriptPorts = new Map();
 // 監聽來自 content script 的長連接
 chrome.runtime.onConnect.addListener((port) => {
   console.log(`[Background] Content script connected. Port name: ${port.name}`);
-  if (port.name !== "subtitle-assistant-channel") {
-    console.warn('[Background] Unknown connection name:', port.name);
-    return;
-  }
-
-  // 獲取發送者的 tabId
-  const tabId = port.sender?.tab?.id;
-  if (!tabId) {
-    console.error('[Background] Received connection from unknown sender (no tabId).');
-    port.disconnect(); // 斷開連接
-    return;
-  }
-
-  console.log(`[Background] Storing port for tabId: ${tabId}`);
-  contentScriptPorts.set(tabId, port);
-
-  // 監聽來自 content script 的消息 (通過 port)
-  port.onMessage.addListener((messageData) => {
-    // 在 onMessage (port) 中打印當前實例 ID
-    console.log(`[Background] Message [${messageData.message?.type}] received by SW Instance ID: ${serviceWorkerInstanceId} via port from Tab ${tabId}`, messageData);
-
-    const { messageId, message } = messageData;
-
-    if (!message || !message.type) {
-      console.error('[Background] Invalid message format received via port:', messageData);
-      // 通過 port 發送錯誤響應
-      port.postMessage({ messageId, response: { success: false, error: '無效的消息格式' } });
+  // 根據 port.name 區分連接來源
+  if (port.name === "subtitle-assistant-channel") {
+    // 來自 content script 的連接
+    const tabId = port.sender?.tab?.id;
+    if (!tabId) {
+      console.error('[Background] Received content script connection from unknown sender (no tabId).');
+      port.disconnect();
       return;
     }
+    console.log(`[Background] Storing content script port for tabId: ${tabId}`);
+    contentScriptPorts.set(tabId, port);
 
-    // 定義需要背景腳本處理的核心訊息類型清單 (通過 port)
-    const handledCoreMessageTypes = [
-      'CONTENT_SCRIPT_LOADED',
-      'TOGGLE_EXTENSION',
-      'TOGGLE_DEBUG_MODE',
-      'VIDEO_ID_CHANGED'
-    ];
+    port.onMessage.addListener((messageData) => {
+      console.log(`[Background] Message [${messageData.message?.type}] received by SW Instance ID: ${serviceWorkerInstanceId} via content script port from Tab ${tabId}`, messageData);
+      const { messageId, message } = messageData;
+      if (!message || !message.type) {
+        console.error('[Background] Invalid message format received via content script port:', messageData);
+        port.postMessage({ messageId, response: { success: false, error: '無效的消息格式' } });
+        return;
+      }
+      const handledCoreMessageTypes = [
+        'CONTENT_SCRIPT_LOADED', 'TOGGLE_EXTENSION', 'TOGGLE_DEBUG_MODE', 'VIDEO_ID_CHANGED', 'UPDATE_STATS'
+      ];
+      if (handledCoreMessageTypes.includes(message.type)) {
+        handleCoreMessagePort(messageId, message, port);
+      } else {
+        routeMessageToModulePort(messageId, message, port);
+      }
+    });
 
-    // 訊息路由邏輯 (通過 port)
-    console.log('[Background] Processing message type via port:', message.type);
-    if (handledCoreMessageTypes.includes(message.type)) {
-      console.log('[Background] Routing to core message handler (port):', message.type);
-      // 調用核心處理函數，傳遞 port 和 messageId
-      handleCoreMessagePort(messageId, message, port);
-    } else {
-      console.log('[Background] Routing to module handler (port):', message.type);
-      // 調用模組路由函數，傳遞 port 和 messageId
+    port.onDisconnect.addListener(() => {
+      console.log(`[Background] Content script port disconnected for tabId: ${tabId}`);
+      contentScriptPorts.delete(tabId);
+    });
+
+    port.postMessage({ messageId: 'initial-debug-mode', response: { type: 'SET_DEBUG_MODE', debugMode: isDebugModeEnabled } });
+
+  } else if (port.name === "options-page-channel") {
+    // 來自 options 頁面的連接
+    console.log('[Background] Options page connected.');
+    // options 頁面不需要 tabId，因為它不是針對特定 tab 的
+    // 可以將 options 頁面的 port 存儲在一個單獨的變量中，如果需要向其主動發送消息
+    // 例如：optionsPagePort = port;
+
+    port.onMessage.addListener((messageData) => {
+      console.log(`[Background] Message [${messageData.message?.type}] received by SW Instance ID: ${serviceWorkerInstanceId} via options page port`, messageData);
+      const { messageId, message } = messageData;
+      if (!message || !message.type) {
+        console.error('[Background] Invalid message format received via options page port:', messageData);
+        port.postMessage({ messageId, response: { success: false, error: '無效的消息格式' } });
+        return;
+      }
+      // 處理來自 options 頁面的消息，直接路由到模組
       routeMessageToModulePort(messageId, message, port);
-    }
-  });
+    });
 
-  // 監聽 port 斷開事件
-  port.onDisconnect.addListener(() => {
-    console.log(`[Background] Port disconnected for tabId: ${tabId}`);
-    contentScriptPorts.delete(tabId); // 移除 port 引用
-  });
+    port.onDisconnect.addListener(() => {
+      console.log('[Background] Options page port disconnected.');
+      // optionsPagePort = null;
+    });
 
-  // 可以在連接建立時發送一些初始消息給 content script
-  // 例如：發送當前的 debugMode 狀態
-  port.postMessage({ messageId: 'initial-debug-mode', response: { type: 'SET_DEBUG_MODE', debugMode: isDebugModeEnabled } });
+  } else {
+    console.warn('[Background] Unknown connection name:', port.name);
+    port.disconnect();
+  }
 });
 
 
-// 監聽來自 popup 的消息 (content script 消息現在通過 port 處理)
+/**
+ * 監聽來自 popup 或選項頁面的消息 (content script 消息現在通過 port 處理)
+ */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // 在 onMessage 中打印當前實例 ID
-  console.log(`[Background] Message [${request.type}] received by SW Instance ID: ${serviceWorkerInstanceId}`, request, 'from:', sender.tab ? `Tab ${sender.tab.id}` : 'Popup/Other');
+  console.log(`[Background] Message [${request.type}] received by SW Instance ID: ${serviceWorkerInstanceId}`, request, 'from:', sender.tab ? `Tab ${sender.tab.id}` : 'Popup/Options/Other');
 
-  // 只處理來自 popup 的消息 (sender.tab 為 undefined)
+  // 只處理來自 popup 或選項頁面的消息 (sender.tab 為 undefined)
   if (sender.tab) {
     // 來自 content script 的消息應該通過 port 處理
     console.warn('[Background] Received message from content script via onMessage, expected via port:', request.type);
@@ -152,7 +159,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   const handledPopupMessageTypes = [
     'TOGGLE_EXTENSION', // Popup 可以切換擴充功能狀態
     'TOGGLE_DEBUG_MODE', // Popup 可以切換調試模式
-    'GET_SETTINGS' // Popup 獲取設置
+    'GET_SETTINGS', // Popup 獲取設置
+    // 'DEBUG_MODE_CHANGED', // 來自選項頁面的調試模式變更 - 現在通過 port 處理
+    // 'API_BASE_URL_CHANGED' // 來自選項頁面的 API Base URL 變更 - 現在通過 port 處理
     // 其他 popup 相關消息
   ];
 
@@ -182,15 +191,18 @@ function handlePopupMessage(request, sender, sendResponse) {
     const moduleMapping = {
         'GET_SETTINGS': 'storage',
         'TOGGLE_EXTENSION': 'core', // 核心處理
-        'TOGGLE_DEBUG_MODE': 'core' // 核心處理
+        'TOGGLE_DEBUG_MODE': 'core', // 核心處理
+        // 'DEBUG_MODE_CHANGED': 'core', // 來自選項頁面的調試模式變更 - 現在通過 port 處理
+        // 'API_BASE_URL_CHANGED': 'core', // 來自選項頁面的 API Base URL 變更 - 現在通過 port 處理
+        // 'CLEAR_QUEUE': 'storage' // 來自選項頁面的清除隊列 - 現在通過 port 處理
         // 其他 popup 相關消息
     };
 
     const moduleName = moduleMapping[request.type];
     if (moduleName === 'storage') {
-        // 路由到 storage 模組，使用原有的 sendResponse
-        // 注意：這裡 storageModule.handleMessage 仍然需要接受 sendResponse
-        storageModule.handleMessage(request, sender, sendResponse);
+      // 路由到 storage 模組，使用原有的 sendResponse
+      // 注意：這裡 storageModule.handleMessage 仍然需要接受 sendResponse
+      storageModule.handleMessage(request, sender, sendResponse);
     } else if (moduleName === 'core') {
         // 處理核心消息 (與 handleCoreMessage 類似，但使用 sendResponse)
         switch (request.type) {
@@ -205,7 +217,7 @@ function handlePopupMessage(request, sender, sendResponse) {
             case 'TOGGLE_DEBUG_MODE':
                 isDebugModeEnabled = request.debugMode; // 更新快取狀態
                 if (isDebugModeEnabled) console.log(`[Background] Toggling debug mode (from popup): ${isDebugModeEnabled}`);
-                 // 轉發消息到所有相關的 content scripts (通過 port)
+                // 轉發消息到所有相關的 content scripts (通過 port)
                 contentScriptPorts.forEach(port => {
                     port.postMessage({ type: 'TOGGLE_DEBUG_MODE', debugMode: isDebugModeEnabled });
                 });
@@ -215,9 +227,11 @@ function handlePopupMessage(request, sender, sendResponse) {
                 syncModule.setDebugMode(isDebugModeEnabled);
                 sendResponse({ success: true }); // 回應 popup
                 break;
+            // case 'DEBUG_MODE_CHANGED': // 現在通過 port 處理
+            // case 'API_BASE_URL_CHANGED': // 現在通過 port 處理
             default:
-                 sendResponse({ success: false, error: `Unhandled core popup message type ${request.type}` });
-                 break;
+                sendResponse({ success: false, error: `Unhandled core popup message type ${request.type}` });
+                break;
         }
     } else {
         sendResponse({ success: false, error: `Unhandled popup message type ${request.type}` });
@@ -262,6 +276,21 @@ function handleCoreMessagePort(messageId, request, port) {
       port.postMessage({ messageId, response: { success: true } }); // 發送響應
       break;
 
+    case 'UPDATE_STATS':
+      if (isDebugModeEnabled) console.log('[Background] Received UPDATE_STATS message (port)');
+      // 將統計數據轉發到 popup
+      chrome.runtime.sendMessage({
+        type: 'UPDATE_STATS',
+        replacementCount: request.replacementCount,
+        videoId: request.videoId
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error('[Background] Error forwarding UPDATE_STATS to popup:', chrome.runtime.lastError.message);
+        }
+      });
+      port.postMessage({ messageId, response: { success: true } }); // 發送響應
+      break;
+
     default:
       console.warn('[Background] 未處理的核心消息類型 (port):', request.type); // 警告總是顯示
       port.postMessage({ messageId, response: { success: false, error: `Unhandled core message type (port) ${request.type}` } });
@@ -292,7 +321,9 @@ function routeMessageToModulePort(messageId, request, port) {
     'SYNC_DATA': 'sync',
     'GET_SYNC_STATUS': 'sync',
     'TRIGGER_VOTE_SYNC': 'sync',
-    'TRIGGER_TRANSLATION_SYNC': 'sync'
+    'TRIGGER_TRANSLATION_SYNC': 'sync',
+    'REPORT_REPLACEMENT_EVENTS': 'storage',
+    'CLEAR_QUEUE': 'storage' // 新增 CLEAR_QUEUE 消息類型
   };
 
   const moduleName = moduleMapping[request.type];
