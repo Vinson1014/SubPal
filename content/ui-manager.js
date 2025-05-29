@@ -344,15 +344,14 @@ function toggleDebugTimestamp(enabled) {
     debugTimestampElement.remove();
     debugLog('debugTimeStampElement 已存在, 移除重新附加')
   }
-  
-  // 查找視頻播放器元素
-  const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
-  if (!videoPlayer) {
-    console.error('找不到視頻播放器元素，無法顯示 debug timestamp');
-    return;
-  }
 
   if (enabled) {
+    // 查找視頻播放器元素
+    const videoPlayer = document.querySelector('.watch-video, .NFPlayer, video, .VideoContainer, .nf-player-container, [data-uia="video-player"]');
+    if (!videoPlayer) {
+      console.error('找不到視頻播放器元素，無法顯示 debug timestamp');
+      return;
+    }
     debugTimestampElement = document.createElement('div');
     debugTimestampElement.id = 'debug-timestamp';
     Object.assign(debugTimestampElement.style, {
