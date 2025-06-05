@@ -129,65 +129,28 @@ async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
 
   if (isDebugModeEnabled) console.log('[API Module] Fetching subtitles from API:', url);
 
-  // 添加超時控制
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超時
-
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json'
-      },
-      signal: controller.signal // 綁定 AbortSignal
-    });
+    // 改用 sendToAPI 函數發送 GET 請求
+    const jsonResponse = await sendToAPI(url, null, 'GET');
 
-    clearTimeout(timeoutId); // 清除超時計時器
-
-    if (!res.ok) {
-      let errorMsg = `API request failed with status ${res.status}`;
-      try {
-        const err = await res.json();
-        errorMsg = err.error || errorMsg;
-      } catch (e) {
-        // 忽略 JSON 解析錯誤
-      }
-      console.error('[API Module] API Error fetching subtitles:', errorMsg);
-      throw new Error(errorMsg);
-    }
-
-    try {
-      const jsonResponse = await res.json();
-      if (isDebugModeEnabled) console.log('[API Module] API Subtitles Raw Response:', jsonResponse);
-
-      if (jsonResponse && jsonResponse.success === true && Array.isArray(jsonResponse.subtitles)) {
-        const subtitles = jsonResponse.subtitles;
-        if (isDebugModeEnabled) console.log(`[API Module] API returned ${subtitles.length} subtitles.`);
-        return subtitles.map(sub => ({
-          videoID: sub.videoID,
-          timestamp: sub.timestamp,
-          translationID: sub.translationID,
-          originalSubtitle: sub.originalSubtitle,
-          suggestedSubtitle: sub.suggestedSubtitle,
-          contributorUserID: sub.contributorUserID
-        }));
-      } else {
-        console.error('[API Module] API response indicates failure or invalid format:', jsonResponse);
-        throw new Error(jsonResponse.error || 'API 回傳失敗或字幕數據格式不正確');
-      }
-    } catch (e) {
-      console.error('[API Module] Error parsing subtitles API response as JSON:', e);
-      throw new Error('解析字幕 API 回應失敗');
+    if (jsonResponse && jsonResponse.success === true && Array.isArray(jsonResponse.subtitles)) {
+      const subtitles = jsonResponse.subtitles;
+      if (isDebugModeEnabled) console.log(`[API Module] API returned ${subtitles.length} subtitles.`);
+      return subtitles.map(sub => ({
+        videoID: sub.videoID,
+        timestamp: sub.timestamp,
+        translationID: sub.translationID,
+        originalSubtitle: sub.originalSubtitle,
+        suggestedSubtitle: sub.suggestedSubtitle,
+        contributorUserID: sub.contributorUserID
+      }));
+    } else {
+      console.error('[API Module] API response indicates failure or invalid format:', jsonResponse);
+      throw new Error(jsonResponse.error || 'API 回傳失敗或字幕數據格式不正確');
     }
   } catch (error) {
-    clearTimeout(timeoutId); // 確保在錯誤發生時也清除計時器
-    if (error.name === 'AbortError') {
-      console.error('[API Module] Fetch subtitles request timed out:', url);
-      throw new Error('獲取字幕請求超時');
-    } else {
-      console.error('[API Module] Error during fetch subtitles:', error);
-      throw error; // 重新拋出其他錯誤
-    }
+    console.error('[API Module] Error during fetch subtitles:', error);
+    throw error;
   }
 }
 
@@ -203,24 +166,32 @@ async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
 async function handleGenericSubmitRequest(data, portSendResponse, apiCallFunction, addToQueueFunction, triggerSyncFunction, dataTypeLabel) {
   if (isDebugModeEnabled) console.log(`[API Module] Entering handleGenericSubmitRequest for ${dataTypeLabel} (port)`);
   try {
-    const { userID } = await chrome.storage.local.get(['userID']);
-    if (!userID) {
-      console.error(`[API Module] Error in handleGenericSubmitRequest (port): Cannot get userID for ${dataTypeLabel}`);
-      // 使用 portSendResponse 發送錯誤
-      portSendResponse({ success: false, error: '無法獲取 userID' });
-      return; // 提前返回
-    }
+    // 不再從 chrome.storage.local 獲取 userID，因為 JWT 會處理身份驗證
+    // const { userID } = await chrome.storage.local.get(['userID']);
+    // if (!userID) {
+    //   console.error(`[API Module] Error in handleGenericSubmitRequest (port): Cannot get userID for ${dataTypeLabel}`);
+    //   portSendResponse({ success: false, error: '無法獲取 userID' });
+    //   return;
+    // }
 
-    const fullData = { ...data, userID };
+    // fullData 不再包含 userID，因為後端會從 JWT 中獲取
+    const fullData = { ...data }; // 移除 userID
 
-    if (isDebugModeEnabled) console.log(`[API Module] Handling ${dataTypeLabel} submission with userID (port):`, fullData);
+    if (isDebugModeEnabled) console.log(`[API Module] Handling ${dataTypeLabel} submission (port):`, fullData);
     try {
-      if (isDebugModeEnabled) console.log(`[API Module] Attempting to send ${dataTypeLabel} directly to API with userID (port):`, fullData);
+      if (isDebugModeEnabled) console.log(`[API Module] Attempting to send ${dataTypeLabel} directly to API (port):`, fullData);
       const result = await apiCallFunction(fullData);
       if (isDebugModeEnabled) console.log(`[API Module] ${dataTypeLabel} sent directly to API (port):`, result);
       // 使用 portSendResponse 發送成功響應
       portSendResponse({ success: true, result });
     } catch (apiError) {
+      // 檢查是否為 401 Unauthorized 錯誤
+      if (apiError.status === 401) {
+        console.error(`[API Module] ${dataTypeLabel} submission failed due to Unauthorized (401). JWT might be invalid or expired.`, apiError.message);
+        portSendResponse({ success: false, error: '認證失敗，請重新登錄或檢查擴展權限。' });
+        // TODO: 觸發 JWT 刷新或重新註冊流程
+        return;
+      }
       // 檢查是否為 409 衝突錯誤
       if (apiError.status === 409) {
         console.warn(`[API Module] ${dataTypeLabel} already exists (409 Conflict), treating as success:`, apiError.message, fullData);
@@ -286,14 +257,14 @@ async function addToQueue(data, queueKey, dataTypeLabel) {
  * @param {object} voteData - 包含 userID 的完整投票數據
  */
 async function sendVoteToAPI(voteData) {
-  const { translationID, videoID, originalSubtitle, timestamp, userID, voteType } = voteData;
+  const { translationID, videoID, originalSubtitle, timestamp, voteType } = voteData; // 移除 userID
 
-  if (!userID || !videoID || typeof timestamp !== 'number' || !['upvote', 'downvote'].includes(voteType)) {
+  if (!videoID || typeof timestamp !== 'number' || !['upvote', 'downvote'].includes(voteType)) {
     throw new Error('Missing or invalid parameters for API call');
   }
 
   let url;
-  let body = { userID, videoID, timestamp, voteType };
+  let body = { videoID, timestamp, voteType }; // 移除 userID
   if (originalSubtitle) body.originalSubtitle = originalSubtitle;
 
   if (translationID) {
@@ -314,15 +285,15 @@ async function sendVoteToAPI(voteData) {
  * @param {object} translationData - 包含 userID 的完整翻譯數據
  */
 async function sendTranslationToAPI(translationData) {
-  const { videoId, timestamp, original, translation, submissionReason, languageCode, userID } = translationData;
+  const { videoId, timestamp, original, translation, submissionReason, languageCode } = translationData; // 移除 userID
 
-  if (!userID || !videoId || typeof timestamp !== 'number' || !original || !translation || !languageCode) {
+  if (!videoId || typeof timestamp !== 'number' || !original || !translation || !languageCode) {
     throw new Error('Missing or invalid parameters for translation API call');
   }
 
   const url = `${API_BASE_URL}/translations`;
   const body = {
-    contributorUserID: userID,
+    // contributorUserID 將由後端從 JWT 中獲取
     videoID: videoId,
     timestamp: timestamp,
     originalSubtitle: original,
@@ -340,32 +311,54 @@ async function sendTranslationToAPI(translationData) {
  * @param {string} url
  * @param {object} body
  */
-async function sendToAPI(url, body) {
+async function sendToAPI(url, body, method = 'POST') { // 允許指定方法，預設為 POST
   // 添加超時控制
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超時
 
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json' // 確保接收 JSON 響應
+    };
+
+    // 從 chrome.storage.local 中獲取 JWT
+    const { jwt } = await chrome.storage.local.get('jwt');
+    if (jwt) {
+      headers['Authorization'] = `Bearer ${jwt}`;
+      if (isDebugModeEnabled) console.log('[API Module] Attaching JWT to request headers.');
+    } else {
+      if (isDebugModeEnabled) console.log('[API Module] No JWT found in storage for this request.');
+    }
+
+    const fetchOptions = {
+      method: method,
+      headers: headers,
       signal: controller.signal // 綁定 AbortSignal
-    });
+    };
+
+    if (body) { // 只有 POST/PUT 請求才需要 body
+      fetchOptions.body = JSON.stringify(body);
+    }
+
+    const res = await fetch(url, fetchOptions);
 
     clearTimeout(timeoutId); // 清除超時計時器
 
     if (!res.ok) {
       let errorMsg = `API request failed with status ${res.status}`;
+      let errorDetails = {};
       try {
-        const err = await res.json();
-        errorMsg = err.error || errorMsg;
+        const errJson = await res.json();
+        errorMsg = errJson.error || errorMsg;
+        errorDetails = errJson;
       } catch (e) {
         if (isDebugModeEnabled) console.log('[API Module] Failed to parse API error response as JSON.');
       }
-      console.error('[API Module] API Error:', errorMsg);
+      console.error('[API Module] API Error:', errorMsg, errorDetails);
       const error = new Error(errorMsg);
       error.status = res.status; // 添加 status 屬性
+      error.details = errorDetails; // 添加詳細錯誤信息
       throw error;
     }
 
@@ -434,4 +427,34 @@ export function setDebugMode(debugMode) {
 export function setApiBaseUrl(url) {
   API_BASE_URL = url;
   if (isDebugModeEnabled) console.log('[API Module] API Base URL updated:', API_BASE_URL);
+}
+
+/**
+ * 註冊用戶並獲取 JWT
+ * @param {string} userID - 用戶 ID
+ * @returns {Promise<Object>} - 包含 success 和 token 的響應
+ */
+export async function registerUser(userID) {
+  const url = `${API_BASE_URL}/users`;
+  return await sendToAPI(url, { userID }, 'POST');
+}
+
+/**
+ * 獲取用戶統計數據
+ * @param {string} userID - 用戶 ID
+ * @returns {Promise<Object>} - 包含用戶統計數據的響應
+ */
+export async function fetchUserStats(userID) {
+  const url = `${API_BASE_URL}/users/${userID}`;
+  return await sendToAPI(url, null, 'GET');
+}
+
+/**
+ * 提交替換事件到後端 API
+ * @param {Array} events - 替換事件陣列
+ * @returns {Promise<Object>} - API 回應結果
+ */
+export async function submitReplacementEvents(events) {
+  const url = `${API_BASE_URL}/replacement-events`;
+  return await sendToAPI(url, { events }, 'POST');
 }
