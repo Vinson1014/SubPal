@@ -274,59 +274,8 @@ async function sendTranslationToAPI(translationData) {
  * @returns {Promise<Object>} - API 回應結果
  */
 async function sendReplacementEventsToAPI(events) {
-  // 從 chrome.storage.sync 載入 API Base URL
-  const apiConfig = await chrome.storage.sync.get({ apiBaseUrl: 'http://localhost:3000' });
-  const API_BASE_URL = apiConfig.apiBaseUrl;
-  
-  const url = `${API_BASE_URL}/replacement-events`;
-  const body = { events };
-
-  if (isDebugModeEnabled) console.log('[Sync Module] Sending replacement events to API:', url, body);
-
-  // 添加超時控制
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超時
-
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal // 綁定 AbortSignal
-    });
-
-    clearTimeout(timeoutId); // 清除超時計時器
-
-    if (!res.ok) {
-      let errorMsg = `API request failed with status ${res.status}`;
-      try {
-        const err = await res.json();
-        errorMsg = err.error || errorMsg;
-      } catch (e) {
-        if (isDebugModeEnabled) console.log('[Sync Module] Failed to parse API error response as JSON.');
-      }
-      console.error('[Sync Module] API Error:', errorMsg);
-      throw new Error(errorMsg);
-    }
-
-    try {
-      const jsonResponse = await res.json();
-      if (isDebugModeEnabled) console.log('[Sync Module] API Success Response:', jsonResponse);
-      return jsonResponse;
-    } catch (e) {
-      console.error('[Sync Module] Error parsing successful API response as JSON:', e);
-      return { success: true, message: 'Response received but could not be parsed as JSON.' };
-    }
-  } catch (error) {
-    clearTimeout(timeoutId); // 確保在錯誤發生時也清除計時器
-    if (error.name === 'AbortError') {
-      console.error('[Sync Module] Send replacement events API request timed out:', url);
-      throw new Error('發送替換事件 API 請求超時');
-    } else {
-      console.error('[Sync Module] Error during send replacement events API request:', error);
-      throw error; // 重新拋出其他錯誤
-    }
-  }
+  // 使用 apiModule.submitReplacementEvents 函數發送請求
+  return await apiModule.submitReplacementEvents(events);
 }
 
 /**
