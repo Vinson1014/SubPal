@@ -28,15 +28,16 @@ async function getUserId() {
             if (result.userID) {
                 resolve(result.userID);
             } else {
-                const newId = crypto.randomUUID();
-                chrome.storage.local.set({ userID: newId }, () => resolve(newId));
+                // 如果沒有 userID，則表示這是新用戶或 userID 尚未由 background.js 生成
+                // 這裡不生成新的，而是等待 background.js 處理
+                // 為了確保 popup.js 能夠正常啟動，這裡可以返回一個臨時的空值或觸發 background.js 立即生成
+                // 但由於 updateUserData 會調用 registerUser，而 registerUser 會觸發 background.js 生成 userID
+                // 所以這裡直接返回 undefined，讓後續邏輯處理
+                resolve(undefined); 
             }
         });
     });
 }
-
-// API 基礎 URL，應與 content/config.js 一致
-const API_BASE_URL = 'http://localhost:3000';
 
 /**
  * 註冊/初始化用戶到後端並獲取統計數據
@@ -45,22 +46,24 @@ const API_BASE_URL = 'http://localhost:3000';
  * @returns {Promise<Object>} 回傳用戶數據
  */
 async function registerUser(userID, nickname) {
-    try {
-        const res = await fetch(`${API_BASE_URL}/users`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userID, nickname })
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({
+            type: 'POPUP_API_REQUEST',
+            api: 'registerUser',
+            params: { userID, nickname }
+        }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.error('Error sending message:', chrome.runtime.lastError.message);
+                reject(new Error('無法連接到背景服務'));
+                return;
+            }
+            if (response.success) {
+                resolve(response.data);
+            } else {
+                reject(new Error(response.error || '註冊失敗'));
+            }
         });
-        if (!res.ok) {
-            const err = await res.json();
-            throw new Error(err.error || '註冊失敗');
-        }
-        const data = await res.json();
-        return data;
-    } catch (e) {
-        showToast('用戶註冊失敗: ' + e.message);
-        throw e;
-    }
+    });
 }
 
 /**
@@ -69,18 +72,24 @@ async function registerUser(userID, nickname) {
  * @returns {Promise<Object>} 回傳用戶數據
  */
 async function fetchUserStats(userID) {
-    try {
-        const res = await fetch(`${API_BASE_URL}/users/${userID}`);
-        if (!res.ok) {
-            const err = await res.json();
-            throw new Error(err.error || '獲取統計數據失敗');
-        }
-        const data = await res.json();
-        return data;
-    } catch (e) {
-        showToast('獲取統計數據失敗: ' + e.message);
-        throw e;
-    }
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({
+            type: 'POPUP_API_REQUEST',
+            api: 'fetchUserStats',
+            params: { userID }
+        }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.error('Error sending message:', chrome.runtime.lastError.message);
+                reject(new Error('無法連接到背景服務'));
+                return;
+            }
+            if (response.success) {
+                resolve(response.data);
+            } else {
+                reject(new Error(response.error || '獲取統計數據失敗'));
+            }
+        });
+    });
 }
 
 // 遮蔽 userID 顯示（前4+****+後4）
