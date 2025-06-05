@@ -31,32 +31,113 @@ import * as syncModule from './background/sync.js';
 let isDebugModeEnabled = false; // 快取 Debug 模式狀態
 
 // 擴充功能安裝/更新事件
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async () => {
   const installedInstanceId = serviceWorkerInstanceId; // 捕獲當前腳本執行上下文的實例 ID
   console.log(`[Background] onInstalled event. Instance ID: ${installedInstanceId}. 字幕助手擴充功能已安裝或更新`);
-  chrome.storage.local.set({ onInstalledSWInstanceId: installedInstanceId });
+  await chrome.storage.local.set({ onInstalledSWInstanceId: installedInstanceId });
+  
   // 設置初始值並更新快取
-  chrome.storage.local.get(['debugMode'], (result) => {
-    if (result.debugMode === undefined) {
-      chrome.storage.local.set({ debugMode: false });
-      isDebugModeEnabled = false;
-    } else {
-      isDebugModeEnabled = result.debugMode;
-    }
-    if (isDebugModeEnabled) console.log('[Background] Debug mode is initially enabled.');
-    // 設置各模組的調試模式
-    storageModule.setDebugMode(isDebugModeEnabled);
-    apiModule.setDebugMode(isDebugModeEnabled);
-    syncModule.setDebugMode(isDebugModeEnabled);
-  });
+  const result = await chrome.storage.local.get(['debugMode']);
+  if (result.debugMode === undefined) {
+    await chrome.storage.local.set({ debugMode: false });
+    isDebugModeEnabled = false;
+  } else {
+    isDebugModeEnabled = result.debugMode;
+  }
+  if (isDebugModeEnabled) console.log('[Background] Debug mode is initially enabled.');
+  // 設置各模組的調試模式
+  storageModule.setDebugMode(isDebugModeEnabled);
+  apiModule.setDebugMode(isDebugModeEnabled);
+  syncModule.setDebugMode(isDebugModeEnabled);
+
+  // 執行用戶註冊/JWT獲取邏輯
+  await ensureUserRegisteredAndJwtPresent();
 });
 
 // 擴充功能啟動事件
-chrome.runtime.onStartup.addListener(() => {
+chrome.runtime.onStartup.addListener(async () => {
   const startupInstanceId = serviceWorkerInstanceId; // 捕獲當前腳本執行上下文的實例 ID
   console.log(`[Background] onStartup event. Instance ID: ${startupInstanceId}. Extension startup, triggering initialization.`);
-  chrome.storage.local.set({ onStartupSWInstanceId: startupInstanceId });
-  // 此處可以添加初始化邏輯，如果需要
+  await chrome.storage.local.set({ onStartupSWInstanceId: startupInstanceId });
+  
+  // 執行用戶註冊/JWT獲取邏輯
+  await ensureUserRegisteredAndJwtPresent();
+  // 設置 JWT 刷新警報
+  setupJwtRefreshAlarm();
+});
+
+/**
+ * 確保用戶已註冊並存在 JWT
+ */
+async function ensureUserRegisteredAndJwtPresent() {
+  console.log('[Background] Checking user registration and JWT presence...');
+  try {
+    let { userID, jwt } = await chrome.storage.local.get(['userID', 'jwt']);
+
+    if (!userID) {
+      // 如果沒有 userID，生成一個新的
+      userID = crypto.randomUUID();
+      await chrome.storage.local.set({ userID });
+      console.log('[Background] Generated new userID:', userID);
+    }
+
+    if (!jwt) {
+      console.log('[Background] No JWT found, attempting to register user and get JWT...');
+      // 調用後端 /users API 進行註冊並獲取 JWT
+      const response = await apiModule.registerUser(userID); // 使用 apiModule.registerUser
+      
+      if (response.token) {
+        await chrome.storage.local.set({ jwt: response.token });
+        console.log('[Background] Successfully registered user and obtained JWT.');
+      } else {
+        // 處理 API 返回的明確錯誤
+        const errorMessage = response.error || '未知錯誤';
+        console.error('[Background] Failed to register user or obtain JWT:', errorMessage, response);
+      }
+    } else {
+      console.log('[Background] UserID and JWT already present.');
+      // 可以選擇在這裡驗證 JWT 有效性，但通常由後續 API 請求的 401 響應觸發刷新
+    }
+  } catch (error) {
+    let errorMsg = error.message;
+    let errorDetails = error.details || {};
+    let errorStatus = error.status || 'N/A';
+
+    if (error.name === 'AbortError') {
+      errorMsg = 'API請求超時';
+    } else if (error.message.includes('Failed to fetch')) {
+      errorMsg = '無法連接後端服務，請檢查後端是否運行或網路連接';
+    }
+
+    console.error(
+      `[Background] Error in ensureUserRegisteredAndJwtPresent:`,
+      `類型: ${error.name || '未知'}`,
+      `訊息: ${errorMsg}`,
+      `狀態碼: ${errorStatus}`,
+      `詳細: ${JSON.stringify(errorDetails)}`,
+      error // 打印原始錯誤對象以獲取完整堆棧
+    );
+  }
+}
+
+/**
+ * 設置 JWT 刷新警報
+ */
+function setupJwtRefreshAlarm() {
+  chrome.alarms.clear('jwtRefresh'); // 清除舊的警報
+  // 設置警報，例如每 24 小時檢查一次 (1440 分鐘)
+  chrome.alarms.create('jwtRefresh', { periodInMinutes: 1440 });
+  console.log('[Background] JWT refresh alarm set.');
+}
+
+// 監聽警報事件
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'jwtRefresh') {
+    console.log('[Background] JWT refresh alarm triggered, checking JWT validity...');
+    // 在這裡可以添加 JWT 有效期檢查邏輯
+    // 簡單起見，直接嘗試重新註冊/獲取 JWT
+    await ensureUserRegisteredAndJwtPresent();
+  }
 });
 
 // 儲存 content script 的 port，以 tabId 為鍵
@@ -160,6 +241,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     'TOGGLE_EXTENSION', // Popup 可以切換擴充功能狀態
     'TOGGLE_DEBUG_MODE', // Popup 可以切換調試模式
     'GET_SETTINGS', // Popup 獲取設置
+    'POPUP_API_REQUEST' // 新增：來自 Popup 的 API 請求
     // 'DEBUG_MODE_CHANGED', // 來自選項頁面的調試模式變更 - 現在通過 port 處理
     // 'API_BASE_URL_CHANGED' // 來自選項頁面的 API Base URL 變更 - 現在通過 port 處理
     // 其他 popup 相關消息
@@ -192,6 +274,7 @@ function handlePopupMessage(request, sender, sendResponse) {
         'GET_SETTINGS': 'storage',
         'TOGGLE_EXTENSION': 'core', // 核心處理
         'TOGGLE_DEBUG_MODE': 'core', // 核心處理
+        'POPUP_API_REQUEST': 'api_proxy' // 新增：路由到 API 代理處理
         // 'DEBUG_MODE_CHANGED': 'core', // 來自選項頁面的調試模式變更 - 現在通過 port 處理
         // 'API_BASE_URL_CHANGED': 'core', // 來自選項頁面的 API Base URL 變更 - 現在通過 port 處理
         // 'CLEAR_QUEUE': 'storage' // 來自選項頁面的清除隊列 - 現在通過 port 處理
@@ -223,7 +306,7 @@ function handlePopupMessage(request, sender, sendResponse) {
                 });
                 // 更新各模組的調試模式狀態
                 storageModule.setDebugMode(isDebugModeEnabled);
-                apiModule.setDebugMode(isDebugModeEnabled);
+                apiModule.setDebugMode(isDebugModeEnabled); // 保持 apiModule.setDebugMode
                 syncModule.setDebugMode(isDebugModeEnabled);
                 sendResponse({ success: true }); // 回應 popup
                 break;
@@ -233,8 +316,38 @@ function handlePopupMessage(request, sender, sendResponse) {
                 sendResponse({ success: false, error: `Unhandled core popup message type ${request.type}` });
                 break;
         }
+    } else if (moduleName === 'api_proxy') { // 新增 API 代理處理
+        handlePopupApiRequest(request, sendResponse);
     } else {
         sendResponse({ success: false, error: `Unhandled popup message type ${request.type}` });
+    }
+}
+
+/**
+ * 處理來自 Popup 的 API 請求，並轉發給 apiModule
+ * @param {object} request - 請求對象，包含 api 和 params
+ * @param {function} sendResponse - 回應函數
+ */
+async function handlePopupApiRequest(request, sendResponse) {
+    const { api, params } = request;
+    if (isDebugModeEnabled) console.log(`[Background] Handling POPUP_API_REQUEST for API: ${api} with params:`, params);
+
+    try {
+        let result;
+        switch (api) {
+            case 'registerUser':
+                result = await apiModule.registerUser(params.userID);
+                break;
+            case 'fetchUserStats':
+                result = await apiModule.fetchUserStats(params.userID);
+                break;
+            default:
+                throw new Error(`Unknown API request: ${api}`);
+        }
+        sendResponse({ success: true, data: result });
+    } catch (error) {
+        console.error(`[Background] Error handling POPUP_API_REQUEST for ${api}:`, error);
+        sendResponse({ success: false, error: error.message });
     }
 }
 
