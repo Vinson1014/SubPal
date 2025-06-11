@@ -403,6 +403,12 @@ function handleCoreMessagePort(messageId, request, port) {
       });
       port.postMessage({ messageId, response: { success: true } }); // 發送響應
       break;
+      
+    case 'API_BASE_URL_CHANGED':
+      if (isDebugModeEnabled) console.log('[Background] API Base URL changed to:', request.url);
+      apiModule.setApiBaseUrl(request.url);
+      port.postMessage({ messageId, response: { success: true } });
+      break;
 
     default:
       console.warn('[Background] 未處理的核心消息類型 (port):', request.type); // 警告總是顯示
@@ -436,7 +442,8 @@ function routeMessageToModulePort(messageId, request, port) {
     'TRIGGER_VOTE_SYNC': 'sync',
     'TRIGGER_TRANSLATION_SYNC': 'sync',
     'REPORT_REPLACEMENT_EVENTS': 'storage',
-    'CLEAR_QUEUE': 'storage' // 新增 CLEAR_QUEUE 消息類型
+    'CLEAR_QUEUE': 'storage', // 新增 CLEAR_QUEUE 消息類型
+    'API_BASE_URL_CHANGED': 'core' // 添加 API_BASE_URL_CHANGED 消息路由
   };
 
   const moduleName = moduleMapping[request.type];
