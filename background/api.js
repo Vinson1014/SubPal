@@ -5,8 +5,8 @@
 let API_BASE_URL = 'http://localhost:3000'; // 初始預設值
 let isDebugModeEnabled = false;
 
-// 從 chrome.storage.sync 載入初始 API Base URL
-chrome.storage.sync.get({ apiBaseUrl: 'http://localhost:3000' }, (items) => {
+// 從 chrome.storage.local 載入初始 API Base URL
+chrome.storage.local.get({ apiBaseUrl: 'http://localhost:3000' }, (items) => {
   API_BASE_URL = items.apiBaseUrl;
   if (isDebugModeEnabled) console.log('[API Module] Initial API Base URL loaded:', API_BASE_URL);
 });
@@ -315,6 +315,11 @@ async function sendToAPI(url, body, method = 'POST') { // 允許指定方法，�
   // 添加超時控制
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超時
+  
+  // debug message
+  if (isDebugModeEnabled) console.log(`[API Module] Sending request to URL:`, url);
+  if (isDebugModeEnabled) console.log(`[API Module] Request body:`, body);
+  if (isDebugModeEnabled) console.log(`[API Module] Request method:`, method);
 
   try {
     const headers = {
