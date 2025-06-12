@@ -1,0 +1,247 @@
+:root {
+  --color-dark: #18181B;
+  --color-gray: #A1A1AA;
+  --color-green: #14B8A6;
+  --color-red: #EF4444;
+  --color-card-bg: #27272a;
+}
+
+body {
+  background-color: var(--color-dark);
+  color: var(--color-gray);
+  font-family: sans-serif;
+  margin: 0;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+h1 {
+  color: var(--color-green);
+  margin-bottom: 30px;
+}
+
+#settings-container {
+  width: 100%;
+  max-width: 800px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.card {
+  background-color: var(--color-card-bg);
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.card h2 {
+  color: var(--color-green);
+  margin-top: 0;
+  margin-bottom: 15px;
+  border-bottom: 1px solid var(--color-gray);
+  padding-bottom: 10px;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+/* Debug Mode group for horizontal layout */
+.debug-mode-group {
+    display: flex;
+    align-items: center; /* Vertically align items */
+}
+
+label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--color-gray);
+}
+
+input[type="text"],
+input[type="file"],
+button {
+  padding: 10px;
+  border-radius: 4px;
+  border: 1px solid var(--color-gray);
+  background-color: var(--color-dark);
+  color: var(--color-gray);
+}
+
+input[type="text"] {
+  width: calc(100% - 22px); /* Adjust for padding and border */
+}
+
+button {
+  background-color: var(--color-green);
+  color: var(--color-dark);
+  cursor: pointer;
+  border: none;
+  transition: background-color 0.3s ease;
+}
+
+button:hover {
+  background-color: #109a8a; /* Darker green */
+}
+
+.warning {
+  color: var(--color-red);
+  margin-left: 10px;
+  font-size: 0.9em;
+  display: inline-block; /* Ensure it sits next to input */
+  vertical-align: middle;
+  }
+
+/* Debug Mode Switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 60px;
+  height: 34px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: var(--color-gray);
+  transition: .4s;
+  border-radius: 34px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 26px;
+  width: 26px;
+  left: 4px;
+  bottom: 4px;
+  background-color: var(--color-dark);
+  transition: .4s;
+  border-radius: 50%;
+}
+
+input:checked + .slider {
+  background-color: var(--color-green);
+}
+
+input:checked + .slider:before {
+  transform: translateX(26px);
+}
+
+.switch-label {
+  margin-left: 10px;
+  /* vertical-align: super; Remove or adjust as needed with flexbox */
+}
+
+
+/* Specific section styles */
+.card h2 {
+    display: flex;
+    align-items: center;
+}
+
+.card h2::before {
+    content: ''; /* Placeholder for icon */
+    margin-right: 10px;
+    /* Add icon styles later */
+}
+
+/* API Base URL section */
+#apiBaseUrlInput {
+    width: calc(100% - 150px); /* Adjust width to make space for warning */
+    margin-right: 10px;
+}
+
+/* Data Backup/Restore section */
+.card h2:nth-of-type(2)::before {
+    content: '💾'; /* Simple icon for backup/restore */
+}
+
+.form-group button {
+    margin-right: 10px;
+}
+
+/* Pending Data section */
+.card h2:nth-of-type(3)::before {
+    content: '📊'; /* Simple icon for pending data */
+}
+
+#pending-data-container p {
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed var(--color-card-bg);
+}
+
+#pending-data-container p:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+#pending-data-container button {
+    margin-left: 10px;
+    padding: 5px 10px;
+    font-size: 0.9em;
+}
+
+/* Font size adjustments */
+body {
+  font-size: 1.1rem; /* Increase base font size */
+}
+
+.card h2 {
+  font-size: 1.3rem; /* Increase card title */
+}
+
+.form-group {
+  font-size: 1.1rem; /* Increase card content */
+}
+
+/* Keep warning text relative size */
+.warning {
+  font-size: 0.9em;
+}
+
+
+/* Responsive adjustments */
+@media (max-width: 600px) {
+  #settings-container {
+    padding: 0 10px;
+  }
+
+  input[type="text"] {
+    width: calc(100% - 22px);
+    margin-right: 0;
+    margin-bottom: 10px;
+  }
+
+  .warning {
+    margin-left: 0;
+    display: block;
+  }
+
+  .form-group button {
+    margin-right: 0;
+    margin-bottom: 10px;
+    width: 100%;
+  }
+
+  #pending-data-container button {
+    margin-left: 0;
+    margin-top: 5px;
+    width: auto;
+  }
+}

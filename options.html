@@ -3,33 +3,46 @@
 <head>
   <meta charset="UTF-8">
   <title>字幕助手 設定</title>
+  <link rel="stylesheet" href="options.css">
 </head>
 <body>
   <h1>字幕助手 設定</h1>
   <div id="settings-container">
-    <div>
-      <label for="debugModeCheckbox">啟用 Debug Mode:</label>
-      <input type="checkbox" id="debugModeCheckbox">
-    </div>
-    <div>
-      <label for="apiBaseUrlInput">API Base URL:</label>
-      <input type="text" id="apiBaseUrlInput" style="width: 300px;">
-      <span style="color: red; margin-left: 10px;">除非您清楚知道自己在改什麼，否則這項設定不應該被更動</span>
-    </div>
-    <div style="margin-top: 20px;">
-      <h2>資料備份與恢復</h2>
-      <div>
-        <button id="backupDataButton">備份資料</button>
-        <span style="margin-left: 10px;">將 userID 和設定匯出為檔案</span>
+    <div class="card">
+      <h2>Debug Mode</h2>
+      <div class="form-group debug-mode-group">
+        <label class="switch">
+          <input type="checkbox" id="debugModeCheckbox">
+          <span class="slider round"></span>
+        </label>
+        <label for="debugModeCheckbox" class="switch-label">啟用 Debug Mode</label>
       </div>
-      <div style="margin-top: 10px;">
+    </div>
+
+    <div class="card">
+      <h2>API Base URL</h2>
+      <div class="form-group">
+        <label for="apiBaseUrlInput">API Base URL:</label>
+        <input type="text" id="apiBaseUrlInput">
+        <span class="warning">除非您清楚知道自己在改什麼，否則這項設定不應該被更動</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>資料備份與恢復</h2>
+      <div class="form-group">
+        <button id="backupDataButton">備份資料</button>
+        <span>將 userID 和設定匯出為檔案</span>
+      </div>
+      <div class="form-group">
         <label for="restoreDataInput">恢復資料:</label>
         <input type="file" id="restoreDataInput" accept=".json">
         <button id="restoreDataButton">恢復</button>
-        <span style="margin-left: 10px;">從備份檔案匯入 userID 和設定</span>
+        <span>從備份檔案匯入 userID 和設定</span>
       </div>
     </div>
-    <div style="margin-top: 20px;">
+
+    <div class="card">
       <h2>待同步數據</h2>
       <div id="pending-data-container">
         <p>投票隊列: <span id="voteQueueCount">0</span> 個待同步項目 <button id="clearVoteQueueButton">清空</button></p>
