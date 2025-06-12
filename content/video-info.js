@@ -68,7 +68,7 @@ function loadDebugMode() {
 .then(result => {
     if (result && result.debugMode !== undefined) {
       debugMode = result.debugMode;
-      console.log('載入調試模式設置:', debugMode);
+      debugLog('載入調試模式設置:', debugMode);
     }
   })
   .catch(error => {
@@ -79,7 +79,7 @@ function loadDebugMode() {
   onMessage((message) => {
     if (message.type === 'TOGGLE_DEBUG_MODE') {
       debugMode = message.debugMode;
-      console.log('調試模式設置已更新:', debugMode);
+      debugLog('調試模式設置已更新:', debugMode);
     }
   });
 }
@@ -286,7 +286,7 @@ function handleVideoPlay() {
   } catch (error) {
     console.error('發送播放狀態內部事件失敗:', error);
   }
-  console.log('視頻播放，通知其他模組');
+  debugLog('視頻播放，通知其他模組');
 }
 
 // 新增：處理視頻暫停事件
@@ -303,7 +303,7 @@ function handleVideoPause() {
   } catch (error) {
     console.error('發送暫停狀態內部事件失敗:', error);
   }
-  console.log('視頻暫停，通知其他模組');
+  debugLog('視頻暫停，通知其他模組');
   // 檢查是否為非觀看頁面，如果是則重新啟動偵測流程，但延遲較長時間
   const isViewingPage = location.href.match(/netflix\.com\/watch\/\d+/);
   if (!isViewingPage) {
@@ -318,7 +318,7 @@ function handleVideoSeeked() {
   // 更新當前有效的 videoElement
   videoElement = this;
   // 當用戶跳轉視頻時，可能需要更新時間戳
-  console.log('視頻跳轉，當前時間:', getCurrentTimestamp());
+  debugLog('視頻跳轉，當前時間:', getCurrentTimestamp());
   try {
     dispatchInternalEvent({
       type: 'PLAYER_STATE_CHANGED',
@@ -401,13 +401,13 @@ function extractVideoTitle() {
   
   if (titleElement) {
     currentVideoTitle = titleElement.textContent.trim();
-    console.log('視頻標題:', currentVideoTitle);
+    debugLog('視頻標題:', currentVideoTitle);
   } else {
     // 如果找不到標題元素，嘗試其他選擇器
     const altTitleElement = document.querySelector('.title-title');
     if (altTitleElement) {
       currentVideoTitle = altTitleElement.textContent.trim();
-      console.log('視頻標題 (alt):', currentVideoTitle);
+      debugLog('視頻標題 (alt):', currentVideoTitle);
     } else {
       currentVideoTitle = 'Unknown Title';
     }
@@ -426,7 +426,7 @@ function extractVideoLanguage() {
     const selectedLanguage = languageSelector.textContent.trim();
     if (selectedLanguage) {
       currentVideoLanguage = selectedLanguage;
-      console.log('視頻語言:', currentVideoLanguage);
+      debugLog('視頻語言:', currentVideoLanguage);
     }
   }
   

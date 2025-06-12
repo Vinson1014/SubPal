@@ -46,7 +46,7 @@ async function initExtension() {
 
   // 初始化所有模組
   initMessaging();
-  debugLog('消息傳遞模組已就緒');
+  console.log('消息傳遞模組已就緒');
   
   initVideoInfo();
   console.log('視頻信息模組初始化完成');
@@ -72,7 +72,7 @@ async function initExtension() {
  * 設置事件監聽器
  */
 function setupEventListeners() {
-  console.log('設置字幕偵測回調...');
+  debugLog('設置字幕偵測回調...');
 
   // 去重：只處理不同內容/位置的字幕
   let lastDetectedSubtitle = {
@@ -90,22 +90,22 @@ function setupEventListeners() {
       Math.abs(lastDetectedSubtitle.position.top - subtitleData.position.top) < 5 &&
       Math.abs(lastDetectedSubtitle.position.left - subtitleData.position.left) < 5
     ) {
-      // console.log('跳過重複字幕:', subtitleData.text, subtitleData.position);
+      // debugLog('跳過重複字幕:', subtitleData.text, subtitleData.position);
       return;
     }
     lastDetectedSubtitle.text = subtitleData.text;
     lastDetectedSubtitle.position = subtitleData.position ? { ...subtitleData.position } : null;
 
-    console.log('字幕偵測回調被觸發:', subtitleData);
+    debugLog('字幕偵測回調被觸發:', subtitleData);
 
     if (!isEnabled) {
-      console.log('擴充功能已停用，不處理字幕');
+      debugLog('擴充功能已停用，不處理字幕');
       return;
     }
 
     // 如果是空字幕，則隱藏自訂字幕
     if (!subtitleData.text || subtitleData.isEmpty) {
-      console.log('偵測到空字幕，隱藏自訂字幕');
+      debugLog('偵測到空字幕，隱藏自訂字幕');
       hideSubtitle();
       return;
     }
@@ -125,7 +125,7 @@ function setupEventListeners() {
           };
 
 
-          console.log(`字幕替換成功: "${subtitleData.text}" -> "${replacedSubtitleData.text}"`);
+          debugLog(`字幕替換成功: "${subtitleData.text}" -> "${replacedSubtitleData.text}"`);
 
           // 顯示替換後的字幕
           // 內容比對，只有變化才顯示
@@ -161,7 +161,7 @@ function setupEventListeners() {
               type: 'REPORT_REPLACEMENT_EVENTS',
               events: [replacementEvent]
             }).then(() => {
-              console.log('替換事件已發送到背景腳本:', replacementEvent);
+              debugLog('替換事件已發送到背景腳本:', replacementEvent);
             }).catch(error => {
               console.error('發送替換事件到背景腳本時出錯:', error);
             });
@@ -179,13 +179,13 @@ function setupEventListeners() {
               type: 'REPORT_REPLACEMENT_EVENTS',
               events: [replacementEvent]
             }).then(() => {
-              console.log('替換事件已發送到背景腳本:', replacementEvent);
+              debugLog('替換事件已發送到背景腳本:', replacementEvent);
             }).catch(error => {
               console.error('發送替換事件到背景腳本時出錯:', error);
             });
           });
         } else {
-          console.log(`沒有找到替換規則，使用原始字幕: "${subtitleData.text}"`);
+          debugLog(`沒有找到替換規則，使用原始字幕: "${subtitleData.text}"`);
 
           // 創建原始字幕數據對象，添加必要的屬性
           const originalSubtitleData = {
@@ -218,7 +218,7 @@ function setupEventListeners() {
   onMessage((message) => {
     if (message.type === 'TOGGLE_EXTENSION') {
       isEnabled = message.isEnabled;
-      console.log(`擴充功能已${isEnabled ? '啟用' : '停用'}`);
+      debugLog(`擴充功能已${isEnabled ? '啟用' : '停用'}`);
       
       // 如果停用，隱藏所有自定義字幕
       if (!isEnabled) {
@@ -229,7 +229,7 @@ function setupEventListeners() {
       }
     } else if (message.type === 'TOGGLE_DEBUG_MODE') {
       debugMode = message.debugMode;
-      console.log(`調試模式已${debugMode ? '啟用' : '停用'}`);
+      debugLog(`調試模式已${debugMode ? '啟用' : '停用'}`);
     } else if (message.type === 'GET_VIDEO_INFO') {
       // 回應視頻信息請求
       return {
@@ -259,7 +259,7 @@ async function loadSettings() {
         debugMode = result.debugMode;
       }
       
-      console.log(`載入設置: isEnabled=${isEnabled}, debugMode=${debugMode}`);
+      debugLog(`載入設置: isEnabled=${isEnabled}, debugMode=${debugMode}`);
       resolve(); // 設置載入完成，解析 Promise
     })
     .catch(error => {
