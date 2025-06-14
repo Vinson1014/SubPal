@@ -2,11 +2,11 @@
 // 負責處理與後端 API 相關的操作的模組
 
 // API Base URL，初始值將從 chrome.storage.sync 中載入
-let API_BASE_URL = 'http://localhost:3000'; // 初始預設值
+let API_BASE_URL = 'https://subnfbackend.zeabur.app'; // 初始預設值
 let isDebugModeEnabled = false;
 
 // 從 chrome.storage.local 載入初始 API Base URL
-chrome.storage.local.get({ apiBaseUrl: 'http://localhost:3000' }, (items) => {
+chrome.storage.local.get({ apiBaseUrl: 'https://subnfbackend.zeabur.app' }, (items) => {
   API_BASE_URL = items.apiBaseUrl;
   if (isDebugModeEnabled) console.log('[API Module] Initial API Base URL loaded:', API_BASE_URL);
 });
