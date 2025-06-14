@@ -111,9 +111,12 @@ function resetUserId() {
     if (!confirm('確定要重設 userID？此操作無法還原。')) return;
     const newId = crypto.randomUUID();
     chrome.storage.local.set({ userID: newId }, () => {
-        userId = newId;
-        updateUserIdUI();
-        showToast('userID 已重設');
+        // 清除舊的 JWT
+        chrome.storage.local.remove('jwt', () => {
+            userId = newId;
+            updateUserIdUI();
+            showToast('userID 已重設，請重啟瀏覽器以應用更改。');
+        });
     });
 }
 
