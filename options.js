@@ -17,7 +17,7 @@ function saveOptions(options) {
 function loadOptions(callback) {
   const defaultOptions = {
     debugMode: false, // Default value for debug mode
-    apiBaseUrl: 'http://localhost:3000' // Default API Base URL for first-time users
+    apiBaseUrl: 'https://subnfbackend.zeabur.app' // Default API Base URL for first-time users
   };
   chrome.storage.local.get(defaultOptions, (items) => {
     if (chrome.runtime.lastError) {
@@ -275,11 +275,20 @@ function restoreData(file) {
       chrome.storage.local.set({ userID: backupData.userID }, () => {
         if (chrome.runtime.lastError) {
           console.error('Error restoring userID:', chrome.runtime.lastError);
-          alert('恢復 userID 失敗');
-          return;
+        alert('恢復 userID 失敗');
+        return;
+        }
+      });
+
+      // 清除舊的 JWT
+      chrome.storage.local.remove('jwt', () => {
+        if (chrome.runtime.lastError) {
+          console.error('清除 JWT 失敗:', chrome.runtime.lastError);
+        } else if (isDebugModeEnabled) {
+          console.log('成功清除舊的 JWT');
         }
         
-        // Restore settings to chrome.storage.local
+        // 恢復設置
         chrome.storage.local.set(backupData.settings, () => {
           if (chrome.runtime.lastError) {
             console.error('Error restoring settings:', chrome.runtime.lastError);
