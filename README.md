@@ -13,9 +13,16 @@ SubPal 是一個由公眾貢獻驅動的 Chrome 擴充功能，旨在改善 Netf
 - **進階設定選項**：提供資料備份、同步管理等功能
 - **積分系統**（未來功能）：計劃用於鼓勵用戶貢獻
 
+<!-- 效果圖 -->
+![效果圖](/src/screenshots/SubPal_宣傳圖1.png)
+
 ## ⚙️ 安裝指南
 ### 從 Chrome 瀏覽器商店安裝
-> 尚未上架
+1. 使用Chrome 瀏覽器點擊此連結：
+[Chrome Web Store](https://chrome.google.com/webstore/detail/lemfjeiageplncmmlgmffjiapooboghh)
+2. 點擊「加到 Chrome」
+3. 完成 !
+
 
 ### 手動安裝
 1. 下載專案：`git clone https://github.com/Vinson1014/SubPal.git`
@@ -25,30 +32,29 @@ SubPal 是一個由公眾貢獻驅動的 Chrome 擴充功能，旨在改善 Netf
 
 ## 🖥 使用說明
 ### 彈出視窗功能
-點擊擴充功能圖標開啟彈出視窗：
-- **用戶 ID**：顯示唯一識別碼，可點擊重設按鈕更新
-- **貢獻統計**：
-  - 已貢獻字幕數量
-  - 自動替換字幕次數
-  - 貢獻被顯示次數
-  - 獲得讚數
+
+![popup](/src/screenshots/popup.png)
+
+- **擴充功能開關**：打開或關閉擴充功能
 - **積分狀態**：目前尚未啟用（開發中功能）
 
-### 設定頁面
-在擴充功能管理頁面點擊 SubPal 的「選項」：
-- **Debug 模式**：啟用/停用除錯功能
-- **API 設定**：進階選項（不建議修改）
-- **資料備份與恢復**：
-  - 備份：將 userID 和設定匯出為 JSON 檔案
-  - 恢復：從備份檔案匯入設定
-- **待同步數據管理**：
-  - 查看各類隊列待同步項目數量
-  - 手動清空投票、翻譯、替換事件隊列
 
 ## 🤝 貢獻方式
 1. **提交翻譯**：觀看影片時，若發現翻譯不佳，可提交更好的翻譯建議
+![submit_translation](/src/screenshots/submit%20translations.png)
+
 2. **投票機制**：對他人提交的翻譯進行投票，幫助選出最佳翻譯
+![vote](/src/screenshots/interaction%20buttons.png)
+
+
 3. **積分系統**（未來功能）：貢獻翻譯可獲得積分，用於解鎖更多功能
+
+## 💬 加入討論
+- [Discord](https://discord.gg/Z5KPr2yPfq)：加入我們的 Discord 伺服器，討論開發細節及分享想法
+![Discord Banner 2](https://discord.com/api/guilds/1385161094921977938/widget.png?style=banner2)
+
+- [GitHub Issues](https://github.com/Vinson1014/SubPal/issues)：提出問題或建議
+
 
 ## 🧠 技術架構
 - 使用 Manifest V3 開發 Chrome 擴充功能
