@@ -40,7 +40,7 @@ SubPal 是一個由公眾貢獻驅動的 Chrome 擴充功能，旨在改善 Netf
 ### 彈出視窗功能
 
 <p align="center">
-  <img src="src/screenshots/popup.png" width=80%>
+  <img src="src/screenshots/popup.png" width=40%>
 </p>
 
 <!-- ![popup](/src/screenshots/popup.png) -->
@@ -53,7 +53,7 @@ SubPal 是一個由公眾貢獻驅動的 Chrome 擴充功能，旨在改善 Netf
 1. **提交翻譯**：觀看影片時，若發現翻譯不佳，可提交更好的翻譯建議
 
   <p align="center">
-    <img src="src/screenshots/submit%20translations.png" width=80%>
+    <img src="src/screenshots/submit%20translations.png" width=40%>
   </p>
 
   <!-- ![submit_translation](/src/screenshots/submit%20translations.png) -->
@@ -61,7 +61,7 @@ SubPal 是一個由公眾貢獻驅動的 Chrome 擴充功能，旨在改善 Netf
 2. **投票機制**：對他人提交的翻譯進行投票，幫助選出最佳翻譯
 
   <p align="center">
-  <img src="src/screenshots/interaction%20buttons.png" width=60%>
+  <img src="src/screenshots/interaction%20buttons.png" width=40%>
   </p>
 
   <!-- ![vote](/src/screenshots/interaction%20buttons.png) -->
@@ -71,10 +71,11 @@ SubPal 是一個由公眾貢獻驅動的 Chrome 擴充功能，旨在改善 Netf
 
 ## 💬 加入討論
 - 加入我們的 Discord 社群討論吧！
-<a href="https://discord.gg/Z5KPr2yPfq">
-    <!-- Discord Banner 圖片 -->
-    <img src="https://discord.com/api/guilds/1385161094921977938/widget.png?style=banner2" alt="Discord Banner">
-</a>
+
+  <a href="https://discord.gg/Z5KPr2yPfq">
+      <!-- Discord Banner 圖片 -->
+      <img src="https://discord.com/api/guilds/1385161094921977938/widget.png?style=banner2" alt="Discord Banner">
+  </a>
   
 
 - [GitHub Issues](https://github.com/Vinson1014/SubPal/issues)：提出問題或建議
