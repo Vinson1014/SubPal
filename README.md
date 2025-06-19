@@ -41,17 +41,20 @@ SubPal 是一個由公眾貢獻驅動的 Chrome 擴充功能，旨在改善 Netf
 
 ## 🤝 貢獻方式
 1. **提交翻譯**：觀看影片時，若發現翻譯不佳，可提交更好的翻譯建議
-![submit_translation](/src/screenshots/submit%20translations.png)
+
+  ![submit_translation](/src/screenshots/submit%20translations.png)
 
 2. **投票機制**：對他人提交的翻譯進行投票，幫助選出最佳翻譯
-![vote](/src/screenshots/interaction%20buttons.png)
+
+  ![vote](/src/screenshots/interaction%20buttons.png)
 
 
 3. **積分系統**（未來功能）：貢獻翻譯可獲得積分，用於解鎖更多功能
 
 ## 💬 加入討論
 - [Discord](https://discord.gg/Z5KPr2yPfq)：加入我們的 Discord 伺服器，討論開發細節及分享想法
-![Discord Banner 2](https://discord.com/api/guilds/1385161094921977938/widget.png?style=banner2)
+
+  ![Discord Banner 2](https://discord.com/api/guilds/1385161094921977938/widget.png?style=banner2)
 
 - [GitHub Issues](https://github.com/Vinson1014/SubPal/issues)：提出問題或建議
 
