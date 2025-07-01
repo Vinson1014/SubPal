@@ -31,7 +31,7 @@ import * as syncModule from './background/sync.js';
 let isDebugModeEnabled = false; // 快取 Debug 模式狀態
 
 // 擴充功能安裝/更新事件
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   const installedInstanceId = serviceWorkerInstanceId; // 捕獲當前腳本執行上下文的實例 ID
   console.log(`[Background] onInstalled event. Instance ID: ${installedInstanceId}. 字幕助手擴充功能已安裝或更新`);
   await chrome.storage.local.set({ onInstalledSWInstanceId: installedInstanceId });
@@ -52,7 +52,35 @@ chrome.runtime.onInstalled.addListener(async () => {
 
   // 執行用戶註冊/JWT獲取邏輯
   await ensureUserRegisteredAndJwtPresent();
+  
+  // 檢查是否需要顯示教學頁面
+  if (details.reason === 'install') {
+    await showTutorialIfNeeded();
+  }
 });
+
+/**
+ * 檢查是否需要顯示教學頁面，如果是首次安裝且未完成教學則顯示
+ */
+async function showTutorialIfNeeded() {
+  try {
+    const result = await chrome.storage.local.get(['tutorialCompleted']);
+    if (!result.tutorialCompleted) {
+      // 首次安裝且未完成教學，打開教學頁面
+      console.log('[Background] Opening tutorial page for new installation');
+      const tutorialUrl = chrome.runtime.getURL('tutorial.html');
+      await chrome.tabs.create({
+        url: tutorialUrl,
+        active: true
+      });
+      console.log('[Background] Tutorial page opened successfully');
+    } else {
+      console.log('[Background] Tutorial already completed, skipping');
+    }
+  } catch (error) {
+    console.error('[Background] Error checking tutorial status or opening tutorial page:', error);
+  }
+}
 
 // 擴充功能啟動事件
 chrome.runtime.onStartup.addListener(async () => {
