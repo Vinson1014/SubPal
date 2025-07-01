@@ -133,8 +133,8 @@ async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
     // 改用 sendToAPI 函數發送 GET 請求
     const jsonResponse = await sendToAPI(url, null, 'GET');
 
-    if (jsonResponse && jsonResponse.success === true && Array.isArray(jsonResponse.subtitles)) {
-      const subtitles = jsonResponse.subtitles;
+    if (jsonResponse && jsonResponse.success === true && Array.isArray(jsonResponse.data?.translations)) {
+      const subtitles = jsonResponse.data.translations;
       if (isDebugModeEnabled) console.log(`[API Module] API returned ${subtitles.length} subtitles.`);
       return subtitles.map(sub => ({
         videoID: sub.videoID,
@@ -166,14 +166,6 @@ async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
 async function handleGenericSubmitRequest(data, portSendResponse, apiCallFunction, addToQueueFunction, triggerSyncFunction, dataTypeLabel) {
   if (isDebugModeEnabled) console.log(`[API Module] Entering handleGenericSubmitRequest for ${dataTypeLabel} (port)`);
   try {
-    // 不再從 chrome.storage.local 獲取 userID，因為 JWT 會處理身份驗證
-    // const { userID } = await chrome.storage.local.get(['userID']);
-    // if (!userID) {
-    //   console.error(`[API Module] Error in handleGenericSubmitRequest (port): Cannot get userID for ${dataTypeLabel}`);
-    //   portSendResponse({ success: false, error: '無法獲取 userID' });
-    //   return;
-    // }
-
     // fullData 不再包含 userID，因為後端會從 JWT 中獲取
     const fullData = { ...data }; // 移除 userID
 
@@ -194,12 +186,16 @@ async function handleGenericSubmitRequest(data, portSendResponse, apiCallFunctio
       }
       // 檢查是否為 409 衝突錯誤
       if (apiError.status === 409) {
-        console.warn(`[API Module] ${dataTypeLabel} already exists (409 Conflict), treating as success:`, apiError.message, fullData);
+        console.warn(`[API Module] ${dataTypeLabel} already exists (409 Conflict), treating as success:`, apiError.details.error.message, fullData);
         // 視為成功，不添加到隊列，直接返回成功響應
         portSendResponse({ success: true, message: `${dataTypeLabel}已存在，無需重複提交` });
+      } else if (isPermanentError(apiError)) {
+        // 檢查是否為永久失敗錯誤（不應重試）
+        console.warn(`[API Module] ${dataTypeLabel} submission permanently failed:`, apiError.details.error.message, fullData);
+        portSendResponse({ success: false, error: apiError.details.error.message });
       } else {
         // 其他錯誤，添加到隊列
-        console.warn(`[API Module] Failed to send ${dataTypeLabel} directly, adding to queue (port):`, apiError.message, fullData);
+        console.warn(`[API Module] Failed to send ${dataTypeLabel} directly, adding to queue (port):`, apiError.details.error.message, fullData);
         await addToQueueFunction(fullData);
         // 使用 portSendResponse 發送排隊響應
         portSendResponse({ success: true, queued: true, message: `${dataTypeLabel}已暫存，將在網路恢復後提交` });
@@ -212,6 +208,61 @@ async function handleGenericSubmitRequest(data, portSendResponse, apiCallFunctio
     // 使用 portSendResponse 發送錯誤響應
     portSendResponse({ success: false, error: error.message });
   }
+}
+
+/**
+ * 檢查是否為永久失敗錯誤（不應重試的錯誤）
+ * @param {Error} error - API 錯誤對象
+ * @returns {boolean} - 是否為永久失敗錯誤
+ */
+function isPermanentError(error) {
+  // 優先使用 error code 判斷
+  if (error.code) {
+    const permanentErrorCodes = [
+      'VALIDATION_ERROR',    // 參數驗證失敗
+      'INVALID_FORMAT',      // ID格式錯誤
+      'NOT_FOUND',          // 資源不存在
+      'FORBIDDEN',          // 禁止操作（如投票自己的翻譯）
+      'BUSINESS_RULE_VIOLATION' // 業務規則違反
+    ];
+    
+    if (permanentErrorCodes.includes(error.code)) {
+      return true;
+    }
+  }
+  
+  // 備用：檢查錯誤訊息（包含特定的業務邏輯錯誤）
+  const permanentErrorMessages = [
+    'Cannot vote on your own translation',
+    'User not authorized to perform this action',
+    'Invalid translation ID format',
+    'Translation does not exist',
+    'Invalid vote type'
+  ];
+  
+  if (error.message) {
+    for (const permanentMsg of permanentErrorMessages) {
+      if (error.message.includes(permanentMsg)) {
+        return true;
+      }
+    }
+  }
+  
+  // 檢查錯誤詳情中的訊息
+  if (error.details && error.details.error && error.details.error.message) {
+    for (const permanentMsg of permanentErrorMessages) {
+      if (error.details.error.message.includes(permanentMsg)) {
+        return true;
+      }
+    }
+  }
+  
+  // 400 Bad Request 通常也是永久錯誤（格式錯誤等）
+  if (error.status === 400) {
+    return true;
+  }
+  
+  return false;
 }
 
 /**
@@ -277,7 +328,10 @@ async function sendVoteToAPI(voteData) {
   }
 
   if (isDebugModeEnabled) console.log('[API Module] Sending vote to API:', url, body);
-  return await sendToAPI(url, body);
+  const response = await sendToAPI(url, body);
+  
+  // 使用新格式：從 response.data 中提取投票結果
+  return response.data || response;
 }
 
 /**
@@ -303,8 +357,12 @@ async function sendTranslationToAPI(translationData) {
   };
 
   if (isDebugModeEnabled) console.log('[API Module] Sending translation to API:', url, body);
-  return await sendToAPI(url, body);
+  const response = await sendToAPI(url, body);
+  
+  // 使用新格式：從 response.data 中提取 translationID
+  return response.data || response;
 }
+
 
 /**
  * 通用發送 API 請求函數
@@ -364,6 +422,10 @@ async function sendToAPI(url, body, method = 'POST') { // 允許指定方法，�
       const error = new Error(errorMsg);
       error.status = res.status; // 添加 status 屬性
       error.details = errorDetails; // 添加詳細錯誤信息
+      // 如果有統一錯誤格式，提取 error code
+      if (errorDetails.error && errorDetails.error.code) {
+        error.code = errorDetails.error.code;
+      }
       throw error;
     }
 
@@ -381,7 +443,7 @@ async function sendToAPI(url, body, method = 'POST') { // 允許指定方法，�
       console.error('[API Module] Send API request timed out:', url);
       throw new Error('發送 API 請求超時');
     } else {
-      console.error('[API Module] Error during send API request:', error);
+      console.error('[API Module] Error during send API request:', error.details);
       throw error; // 重新拋出其他錯誤
     }
   }
