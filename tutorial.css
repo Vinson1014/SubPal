@@ -1,0 +1,1220 @@
+/* 基本變量設定 */
+:root {
+    --color-dark: #18181B;
+    --color-gray: #A1A1AA;
+    --color-green: #14B8A6;
+    --color-card-bg: #27272a;
+    --netflix-red: #E50914;
+    --netflix-dark: #141414;
+    --netflix-hover: #333;
+    --tutorial-primary: #14B8A6;
+    --tutorial-secondary: #22C55E;
+    --highlight-color: #F59E0B;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: var(--netflix-dark);
+    color: white;
+    line-height: 1.6;
+    overflow-x: hidden;
+}
+
+/* 主要內容區域 */
+.tutorial-main {
+    position: relative;
+    min-height: 100vh;
+}
+
+/* 歡迎頁面樣式 */
+.welcome-page {
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--tutorial-primary), var(--tutorial-secondary));
+}
+
+.welcome-content {
+    text-align: center;
+    color: white;
+    max-width: 600px;
+    padding: 2rem;
+}
+
+.welcome-icon {
+    width: 128px;
+    height: 128px;
+    margin-bottom: 2rem;
+    animation: bounce 2s infinite;
+}
+
+.welcome-content h1 {
+    font-size: 3rem;
+    margin-bottom: 1rem;
+    font-weight: 700;
+}
+
+.welcome-subtitle {
+    font-size: 1.3rem;
+    margin-bottom: 3rem;
+    opacity: 0.9;
+}
+
+.feature-list {
+    margin-bottom: 3rem;
+}
+
+.feature-item {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    margin-bottom: 1rem;
+    font-size: 1.1rem;
+}
+
+.feature-icon {
+    font-size: 1.5rem;
+}
+
+.welcome-footer p {
+    font-size: 1rem;
+    opacity: 0.8;
+}
+
+/* 教學步驟 */
+.tutorial-step {
+    display: none;
+    min-height: 100vh;
+    animation: fadeIn 0.5s ease-in-out;
+}
+
+.tutorial-step.active {
+    display: block;
+}
+
+.tutorial-instruction {
+    text-align: center;
+    padding: 2rem 1rem;
+    background: var(--color-dark);
+}
+
+.tutorial-instruction h2 {
+    font-size: 2rem;
+    margin-bottom: 1rem;
+    color: var(--tutorial-primary);
+}
+
+.tutorial-instruction p {
+    font-size: 1.1rem;
+    margin-bottom: 2rem;
+    color: var(--color-gray);
+}
+
+/* 模擬 Netflix 播放器 */
+.mock-netflix-player {
+    background: #000;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    margin: 2rem auto;
+    max-width: 800px;
+    position: relative;
+}
+
+.player-container {
+    aspect-ratio: 16/9;
+    position: relative;
+    background: linear-gradient(45deg, #1a1a1a, #2a2a2a);
+    display: flex;
+    flex-direction: column;
+}
+
+.player-top-bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent);
+    padding: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    z-index: 2;
+}
+
+.player-back-btn {
+    background: rgba(0,0,0,0.5);
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.player-back-btn:hover {
+    background: rgba(255,255,255,0.2);
+}
+
+.player-title {
+    font-size: 1.2rem;
+    font-weight: 600;
+}
+
+.player-center {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.play-button {
+    width: 80px;
+    height: 80px;
+    background: rgba(255,255,255,0.9);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    color: black;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    animation: pulse 2s infinite;
+}
+
+.play-button:hover {
+    transform: scale(1.1);
+}
+
+/* 字幕容器和互動按鈕（基於真實 UI Manager 邏輯） */
+.subtitle-container {
+    text-align: center;
+    z-index: 3;
+}
+
+#subtitle-assistant-container {
+    position: absolute;
+    bottom: 10%;
+    left: 50%;
+    transform: translateX(-50%);
+    display: block;
+    pointer-events: auto;
+}
+
+#subtitle-assistant-buttons {
+    display: none;
+    position: absolute;
+}
+
+.subtitle-text {
+    background: rgba(0, 0, 0, 0.75);
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    font-size: 1.1rem;
+    display: inline-block;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+/* 互動按鈕 */
+.interaction-buttons {
+    background: rgba(0, 0, 0, 0.5);
+    padding: 5px 8px;
+    border-radius: 8px;
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    z-index: 4;
+}
+
+.interaction-btn {
+    background: transparent;
+    border: none;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: all 0.3s ease;
+}
+
+.interaction-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+    transform: scale(1.1);
+}
+
+/* 播放器底部控制欄 */
+.player-bottom-bar {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+    padding: 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 2;
+}
+
+.player-controls {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.control-btn {
+    background: none;
+    border: none;
+    color: white;
+    font-size: 1.2rem;
+    cursor: pointer;
+    padding: 0.5rem;
+    border-radius: 4px;
+    transition: all 0.3s ease;
+}
+
+.control-btn:hover {
+    background: rgba(255,255,255,0.2);
+}
+
+.time-display {
+    color: var(--color-gray);
+    font-size: 0.9rem;
+}
+
+.player-right-controls {
+    display: flex;
+    gap: 0.5rem;
+}
+
+/* 引導箭頭 */
+.guide-arrow {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    color: var(--highlight-color);
+    font-weight: bold;
+    animation: bounce 1.5s infinite;
+    z-index: 5;
+}
+
+.arrow-text {
+    background: var(--highlight-color);
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+    font-size: 0.9rem;
+    white-space: nowrap;
+}
+
+.arrow-pointer {
+    font-size: 2rem;
+}
+
+#hover-guide {
+    bottom: 25%;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+/* 瀏覽器演示 */
+.browser-demo {
+    max-width: 900px;
+    margin: 2rem auto;
+    background: #f3f3f3;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    position: relative;
+    min-height: 100px; /* 減少高度，只顯示瀏覽器頂部 */
+}
+
+.browser-top-bar {
+    background: #e8e8e8;
+    border-bottom: 1px solid #ddd;
+}
+
+.browser-tabs {
+    padding: 0.5rem 1rem 0;
+    background: #f3f3f3;
+}
+
+.browser-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: white;
+    padding: 0.5rem 1rem;
+    border-radius: 8px 8px 0 0;
+    border: 1px solid #ddd;
+    border-bottom: none;
+    color: #333;
+}
+
+.tab-icon {
+    background: var(--netflix-red);
+    color: white;
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: bold;
+}
+
+.browser-toolbar {
+    display: flex;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    gap: 1rem;
+}
+
+.address-bar {
+    flex: 1;
+    background: white;
+    padding: 0.5rem 1rem;
+    border: 1px solid #ddd;
+    border-radius: 20px;
+    color: #333;
+    font-size: 0.9rem;
+}
+
+.browser-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.browser-extension-btn,
+.browser-menu-btn {
+    background: transparent;
+    border: none;
+    padding: 0.5rem;
+    border-radius: 6px;
+    cursor: default;
+    font-size: 1.2rem;
+    color: #5f6368;
+    transition: all 0.2s ease;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none; /* 禁用點擊 */
+}
+
+/* 移除hover效果，因為按鈕純為視覺展示 */
+
+.browser-extension-btn {
+    position: relative;
+}
+
+/* 為擴充功能按鈕添加小紅點提示 */
+.browser-extension-btn::after {
+    content: '';
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 6px;
+    height: 6px;
+    background: #dc2626;
+    border-radius: 50%;
+    opacity: 0.8;
+}
+
+/* 第三頁恭喜訊息樣式 */
+.step3-congratulation {
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(20px);
+    transition: all 0.5s ease;
+    margin-top: 2rem;
+    text-align: center;
+    padding: 2rem;
+}
+
+.step3-congratulation.show {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.congratulation-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    background: linear-gradient(135deg, var(--tutorial-primary), var(--tutorial-secondary));
+    padding: 2rem;
+    border-radius: 16px;
+    color: white;
+    box-shadow: 0 8px 32px rgba(20, 184, 166, 0.3);
+    max-width: 400px;
+    margin: 0 auto;
+}
+
+.congratulation-icon {
+    font-size: 3rem;
+    animation: celebrationBounce 1s ease-in-out infinite alternate;
+}
+
+.congratulation-text h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.5rem;
+    font-weight: 600;
+}
+
+.congratulation-text p {
+    margin: 0;
+    font-size: 1rem;
+    opacity: 0.9;
+    line-height: 1.4;
+}
+
+@keyframes celebrationBounce {
+    0% { transform: scale(1); }
+    100% { transform: scale(1.1); }
+}
+
+.browser-buttons {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.browser-btn {
+    background: #f0f0f0;
+    border: 1px solid #ddd;
+    padding: 0.5rem 0.7rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 1.2rem;
+    transition: all 0.3s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.browser-btn:hover {
+    background: #e8e8e8;
+    border-color: #bbb;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+.browser-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+/* 瀏覽器內容區域 */
+.browser-content {
+    background: white;
+    min-height: 400px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.netflix-page-demo {
+    text-align: center;
+    color: #333;
+    width: 100%;
+    padding: 2rem;
+}
+
+.netflix-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid #eee;
+}
+
+.netflix-logo-demo {
+    width: 32px;
+    height: 32px;
+}
+
+.netflix-title {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: #333;
+}
+
+.netflix-video-placeholder {
+    background: linear-gradient(45deg, #f8f9fa, #e9ecef);
+    border: 2px dashed #dee2e6;
+    border-radius: 12px;
+    padding: 3rem 2rem;
+    margin: 2rem auto;
+    max-width: 500px;
+    position: relative;
+}
+
+.video-title {
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: #333;
+    margin-bottom: 0.5rem;
+}
+
+.video-subtitle {
+    font-size: 1rem;
+    color: var(--tutorial-primary);
+    font-weight: 500;
+}
+
+.netflix-video-placeholder::before {
+    content: '▶';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -60%);
+    font-size: 3rem;
+    color: rgba(0, 0, 0, 0.1);
+    pointer-events: none;
+}
+
+/* 擴充功能下拉選單 */
+.extensions-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 1rem;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    min-width: 200px;
+    z-index: 10;
+    overflow: hidden;
+}
+
+.extension-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    color: #333;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.extension-item:hover {
+    background: #f0f0f0;
+}
+
+.extension-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+}
+
+.extension-icon.other {
+    background: #666;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+}
+
+.step3-guide {
+    top: 60px;
+    right: 3rem;
+    z-index: 100;
+}
+
+/* Popup 預覽 */
+.popup-preview {
+    position: absolute;
+    background: var(--color-dark);
+    border: 1px solid var(--color-card-bg);
+    border-radius: 8px;
+    width: 320px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: all 0.3s ease;
+    z-index: 15;
+}
+
+.popup-preview.show {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+#popup-preview-step3 {
+    top: 100px;
+    right: 1rem;
+    z-index: 20;
+}
+
+.popup-header {
+    padding: 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--color-card-bg);
+}
+
+.popup-title {
+    color: var(--tutorial-primary);
+    font-weight: bold;
+    font-size: 1.2rem;
+}
+
+.popup-switch {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 20px;
+}
+
+.popup-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.popup-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: var(--tutorial-primary);
+    transition: .4s;
+    border-radius: 20px;
+}
+
+.popup-slider:before {
+    position: absolute;
+    content: "";
+    height: 16px;
+    width: 16px;
+    left: 22px;
+    bottom: 2px;
+    background-color: white;
+    transition: .4s;
+    border-radius: 50%;
+}
+
+.popup-content {
+    padding: 1rem;
+}
+
+.popup-stats {
+    color: var(--color-gray);
+    line-height: 1.6;
+}
+
+.popup-stats strong {
+    color: var(--tutorial-primary);
+}
+
+/* 完成頁面 */
+.completion-page {
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, var(--tutorial-primary), var(--tutorial-secondary));
+}
+
+.completion-content {
+    text-align: center;
+    color: white;
+    max-width: 600px;
+    padding: 2rem;
+}
+
+.completion-icon {
+    font-size: 4rem;
+    margin-bottom: 1rem;
+}
+
+.completion-content h2 {
+    font-size: 2.5rem;
+    margin-bottom: 1rem;
+    font-weight: 700;
+}
+
+.completion-subtitle {
+    font-size: 1.2rem;
+    margin-bottom: 3rem;
+    opacity: 0.9;
+}
+
+.completion-summary {
+    margin-bottom: 3rem;
+}
+
+.summary-item {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    margin-bottom: 1rem;
+    font-size: 1rem;
+}
+
+.summary-icon {
+    font-size: 1.2rem;
+}
+
+.completion-actions {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.completion-btn {
+    padding: 1rem 2rem;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.completion-btn.primary {
+    background: white;
+    color: var(--tutorial-primary);
+}
+
+.completion-btn.primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 20px rgba(255, 255, 255, 0.3);
+}
+
+.completion-btn.secondary {
+    background: transparent;
+    color: white;
+    border: 2px solid white;
+}
+
+.completion-btn.secondary:hover {
+    background: white;
+    color: var(--tutorial-primary);
+}
+
+/* 導航區域 */
+.navigation-area {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 1rem 2rem 2rem;
+    z-index: 999;
+}
+
+/* 跳過按鈕（左下角，不明顯） */
+.skip-btn {
+    position: absolute;
+    bottom: 1rem;
+    left: 1rem;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    opacity: 0.7;
+}
+
+.skip-btn:hover {
+    opacity: 1;
+    color: rgba(255, 255, 255, 0.8);
+    border-color: rgba(255, 255, 255, 0.5);
+}
+
+/* 導航按鈕 */
+.tutorial-navigation {
+    position: absolute;
+    bottom: 1rem;
+    right: 1rem;
+    display: flex;
+    gap: 1rem;
+}
+
+.nav-btn {
+    background: var(--color-card-bg);
+    color: white;
+    border: 2px solid var(--tutorial-primary);
+    padding: 0.8rem 2rem;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.nav-btn:hover:not(:disabled) {
+    background: var(--tutorial-primary);
+    transform: translateY(-2px);
+}
+
+.nav-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.finish-btn {
+    background: var(--tutorial-secondary);
+    border-color: var(--tutorial-secondary);
+}
+
+.finish-btn:hover {
+    background: #16A34A;
+    border-color: #16A34A;
+}
+
+/* 步驟指示器（移至底部） */
+.step-indicator {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 0.8rem;
+    z-index: 1000;
+}
+
+.step {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.3);
+    transition: all 0.3s ease;
+    cursor: pointer;
+}
+
+.step.active {
+    background: var(--tutorial-primary);
+    transform: scale(1.3);
+}
+
+.step.completed {
+    background: var(--tutorial-secondary);
+}
+
+.hidden {
+    display: none;
+}
+
+/* 高亮效果 */
+.highlight-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 1000;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.highlight-overlay.active {
+    opacity: 1;
+}
+
+.highlight-tooltip {
+    position: fixed;
+    background: var(--highlight-color);
+    color: white;
+    padding: 1rem;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 500;
+    z-index: 1001;
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: all 0.3s ease;
+    pointer-events: none;
+    max-width: 300px;
+}
+
+.highlight-tooltip.active {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* 動畫 */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+}
+
+@keyframes bounce {
+    0%, 20%, 50%, 80%, 100% { transform: translateY(0); }
+    40% { transform: translateY(-10px); }
+    60% { transform: translateY(-5px); }
+}
+
+/* 模擬提交頁面樣式（與實際UI一致） */
+.tutorial-submit-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 12000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    visibility: hidden;
+    transition: all 0.3s ease;
+}
+
+.tutorial-submit-overlay.show {
+    opacity: 1;
+    visibility: visible;
+}
+
+.tutorial-submit-window {
+    background: white;
+    padding: 24px;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+    width: 450px;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-sizing: border-box;
+    transform: translateY(-20px);
+    transition: transform 0.3s ease;
+}
+
+.tutorial-submit-overlay.show .tutorial-submit-window {
+    transform: translateY(0);
+}
+
+.tutorial-submit-window h3 {
+    margin-top: 0;
+    margin-bottom: 18px;
+    color: #222;
+    font-size: 22px;
+    font-weight: 600;
+}
+
+.submit-form-group {
+    margin-bottom: 14px;
+}
+
+.submit-form-group label {
+    display: block;
+    margin-bottom: 6px;
+    color: #444;
+    font-size: 15px;
+}
+
+.submit-form-group input[readonly] {
+    width: 100%;
+    box-sizing: border-box;
+    background: #f3f4f6;
+    color: #222;
+    border: 1px solid #e0e0e0;
+    border-radius: 5px;
+    padding: 8px 10px;
+    font-size: 15px;
+}
+
+.submit-form-group select,
+.submit-form-group textarea,
+.submit-form-group input:not([readonly]) {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    border: 1.5px solid #bfc7d1;
+    border-radius: 5px;
+    font-size: 15px;
+    color: #222;
+    background: #fff;
+}
+
+.submit-form-group textarea {
+    resize: vertical;
+    min-height: 50px;
+}
+
+.submit-form-group textarea#tutorial-translation-input {
+    height: 70px;
+}
+
+.submit-form-buttons {
+    text-align: right;
+    margin-top: 18px;
+}
+
+.tutorial-cancel-btn {
+    padding: 8px 18px;
+    margin-right: 10px;
+    background-color: #f5f5f5;
+    color: #888;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 15px;
+    transition: all 0.3s ease;
+}
+
+.tutorial-cancel-btn:hover {
+    background-color: #e8e8e8;
+}
+
+.tutorial-submit-btn {
+    padding: 8px 18px;
+    background-color: #1976d2;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 15px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.tutorial-submit-btn:hover {
+    background-color: #1565c0;
+    transform: translateY(-1px);
+}
+
+/* 響應式設計 */
+@media (max-width: 768px) {
+    .welcome-content h1 {
+        font-size: 2rem;
+    }
+    
+    .welcome-subtitle {
+        font-size: 1rem;
+    }
+    
+    .mock-netflix-player {
+        margin: 1rem 0;
+    }
+    
+    .player-top-bar, .player-bottom-bar {
+        padding: 0.5rem;
+    }
+    
+    .tutorial-navigation {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+    
+    .nav-btn {
+        padding: 0.6rem 1.5rem;
+        font-size: 0.9rem;
+    }
+    
+    .popup-preview {
+        width: 280px;
+    }
+    
+    .browser-demo {
+        margin: 1rem;
+    }
+    
+    .completion-actions {
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    .completion-btn {
+        width: 200px;
+    }
+    
+    .tutorial-submit-window {
+        width: 90%;
+        max-width: 400px;
+        padding: 20px;
+        margin: 0 20px;
+    }
+    
+    .tutorial-submit-window h3 {
+        font-size: 20px;
+    }
+    
+    .submit-form-group label,
+    .submit-form-group input,
+    .submit-form-group select,
+    .submit-form-group textarea {
+        font-size: 14px;
+    }
+    
+    .submit-form-buttons {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .tutorial-cancel-btn,
+    .tutorial-submit-btn {
+        width: 100%;
+        margin: 0;
+    }
+    
+    /* 第三頁恭喜訊息響應式 */
+    .step3-congratulation {
+        margin-top: 1rem;
+        padding: 1rem;
+    }
+    
+    .congratulation-content {
+        padding: 1.5rem;
+        max-width: 90%;
+    }
+    
+    .congratulation-icon {
+        font-size: 2.5rem;
+    }
+    
+    .congratulation-text h3 {
+        font-size: 1.3rem;
+    }
+    
+    .congratulation-text p {
+        font-size: 0.9rem;
+    }
+    
+    /* 完成確認頁面的X按鈕在手機上的調整 */
+    .completion-close-x {
+        font-size: 1.5rem !important;
+        width: 32px !important;
+        height: 32px !important;
+        top: 0.5rem !important;
+        right: 0.5rem !important;
+    }
+}

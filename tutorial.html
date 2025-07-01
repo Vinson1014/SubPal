@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>字幕助手教學 - SubPal Tutorial</title>
+    <link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+    <!-- 主要教學內容 -->
+    <main class="tutorial-main">
+
+        <!-- 步驟 1: 歡迎頁面 -->
+        <section class="tutorial-step active" id="step-1">
+            <div class="welcome-page">
+                <div class="welcome-content">
+                    <img src="icons/SubPal_rc.png" alt="SubPal Icon" class="welcome-icon">
+                    <h1>歡迎使用字幕助手</h1>
+                    <p class="welcome-subtitle">由公眾貢獻驅動的 Netflix 字幕改進工具</p>
+                    <div class="feature-list">
+                        <div class="feature-item">
+                            <span class="feature-icon">🔄</span>
+                            <span class="feature-text">自動替換不佳翻譯</span>
+                        </div>
+                        <div class="feature-item">
+                            <span class="feature-icon">✏️</span>
+                            <span class="feature-text">提交更好的翻譯</span>
+                        </div>
+                        <div class="feature-item">
+                            <span class="feature-icon">👥</span>
+                            <span class="feature-text">社群協作改進</span>
+                        </div>
+                    </div>
+                    <div class="welcome-footer">
+                        <p>讓我們開始 30 秒的快速教學</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 步驟 2: Netflix 播放器模擬 -->
+        <section class="tutorial-step" id="step-2">
+            <div class="tutorial-instruction">
+                <h2>在 Netflix 觀看時的使用方式</h2>
+                <p>將滑鼠移動到字幕上方，會出現互動按鈕</p>
+            </div>
+            
+            <!-- 模擬 Netflix 播放器 -->
+            <div class="mock-netflix-player">
+                <div class="player-container" id="player-container">
+                    <!-- 播放器頂部控制欄 -->
+                    <div class="player-top-bar">
+                        <div class="player-back-btn">←</div>
+                        <div class="player-title">模擬影片播放</div>
+                    </div>
+                    
+                    <!-- 播放器中央 -->
+                    <div class="player-center">
+                        <div class="play-button">▶</div>
+                    </div>
+                    
+                    <!-- 字幕區域（使用真實的字幕容器結構） -->
+                    <div id="subtitle-assistant-container" class="subtitle-container">
+                        <div id="subtitle-assistant-text" class="subtitle-text">
+                            這是需要改進的字幕翻譯
+                        </div>
+                    </div>
+                    
+                    <!-- 互動按鈕（初始隱藏） -->
+                    <div id="subtitle-assistant-buttons" class="interaction-buttons">
+                        <button class="interaction-btn submit-btn" data-tooltip="提交更好的翻譯">
+                            ✏️
+                        </button>
+                        <button class="interaction-btn vote-btn upvote" data-tooltip="這個翻譯很好">
+                            👍
+                        </button>
+                        <button class="interaction-btn vote-btn downvote" data-tooltip="這個翻譯不好">
+                            👎
+                        </button>
+                    </div>
+                    
+                    <!-- 播放器底部控制欄 -->
+                    <div class="player-bottom-bar">
+                        <div class="player-controls">
+                            <button class="control-btn">⏸</button>
+                            <button class="control-btn">⏭</button>
+                            <span class="time-display">05:23 / 1:42:15</span>
+                        </div>
+                        <div class="player-right-controls">
+                            <button class="control-btn">CC</button>
+                            <button class="control-btn">⚙</button>
+                            <button class="control-btn">⛶</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 引導箭頭和提示 -->
+                <div class="guide-arrow" id="hover-guide">
+                    <div class="arrow-text">將滑鼠移到字幕上</div>
+                    <div class="arrow-pointer">↑</div>
+                </div>
+            </div>
+            
+        </section>
+
+        <!-- 步驟 3: 擴充功能面板指導 -->
+        <section class="tutorial-step" id="step-3">
+            <div class="tutorial-instruction">
+                <h2>使用擴充功能面板</h2>
+                <p>點擊右上角的拼圖圖示，然後選擇「字幕助手」</p>
+            </div>
+            
+            <div class="browser-demo">
+                <!-- 模擬瀏覽器頂部（僅顯示圖示，無互動功能） -->
+                <div class="browser-top-bar">
+                    <div class="browser-tabs">
+                        <div class="browser-tab active">
+                            <span class="tab-icon">N</span>
+                            <span class="tab-title">Netflix</span>
+                        </div>
+                    </div>
+                    <div class="browser-toolbar">
+                        <div class="address-bar">https://www.netflix.com/watch/123456</div>
+                        <div class="browser-controls">
+                            <button class="browser-extension-btn" id="mock-extension-btn" title="擴充功能">
+                                🧩
+                            </button>
+                            <button class="browser-menu-btn" title="選單">
+                                ⋮
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 恭喜訊息區域 -->
+                <div class="step3-congratulation" id="step3-congratulation">
+                    <div class="congratulation-content">
+                        <div class="congratulation-icon">🎉</div>
+                        <div class="congratulation-text">
+                            <h3>太棒了！</h3>
+                            <p>您已經成功開啟擴充功能面板</p>
+                            <p>現在您可以查看字幕助手的使用統計</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 步驟 4: 完成教學 -->
+        <section class="tutorial-step" id="step-4">
+            <div class="completion-page">
+                <div class="completion-content">
+                    <div class="completion-icon">🎉</div>
+                    <h2>教學完成！</h2>
+                    <p class="completion-subtitle">您已經學會如何使用字幕助手了</p>
+                    
+                    <div class="completion-summary">
+                        <div class="summary-item">
+                            <span class="summary-icon">🎯</span>
+                            <span class="summary-text">滑鼠移到字幕上查看按鈕</span>
+                        </div>
+                        <div class="summary-item">
+                            <span class="summary-icon">✏️</span>
+                            <span class="summary-text">提交更好的翻譯建議</span>
+                        </div>
+                        <div class="summary-item">
+                            <span class="summary-icon">👍</span>
+                            <span class="summary-text">為翻譯投票選出最佳版本</span>
+                        </div>
+                        <div class="summary-item">
+                            <span class="summary-icon">🧩</span>
+                            <span class="summary-text">透過擴充功能面板查看統計</span>
+                        </div>
+                    </div>
+                    
+                    <div class="completion-actions">
+                        <button id="step4-netflix-btn" class="completion-btn primary">前往 Netflix</button>
+                        <button id="step4-close-btn" class="completion-btn secondary">關閉教學</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 導航按鈕區域 -->
+        <div class="navigation-area">
+            <!-- 跳過按鈕（左下角，不明顯） -->
+            <button class="skip-btn" id="skip-btn">跳過教學</button>
+            
+            <!-- 導航按鈕 -->
+            <div class="tutorial-navigation">
+                <button class="nav-btn prev-btn" id="prev-btn" disabled>上一步</button>
+                <button class="nav-btn next-btn" id="next-btn">下一步</button>
+                <button class="nav-btn finish-btn hidden" id="finish-btn">開始使用</button>
+            </div>
+        </div>
+        
+        <!-- 步驟指示器（底部置中） -->
+        <div class="step-indicator">
+            <div class="step active" data-step="1"></div>
+            <div class="step" data-step="2"></div>
+            <div class="step" data-step="3"></div>
+            <div class="step" data-step="4"></div>
+        </div>
+    </main>
+
+    <!-- 高亮遮罩 -->
+    <div class="highlight-overlay" id="highlight-overlay"></div>
+    <div class="highlight-tooltip" id="highlight-tooltip"></div>
+
+    <!-- 模擬提交頁面（全局） -->
+    <div class="tutorial-submit-overlay" id="tutorial-submit-overlay">
+        <div class="tutorial-submit-window" id="tutorial-submit-window">
+            <h3>模擬提交翻譯</h3>
+            <div class="submit-form-group">
+                <label for="tutorial-original-text">原始翻譯</label>
+                <input id="tutorial-original-text" type="text" value="這是需要改進的字幕翻譯" readonly>
+            </div>
+            <div class="submit-form-group">
+                <label for="tutorial-language-select">字幕語言</label>
+                <select id="tutorial-language-select">
+                    <option value="">請選擇語言...</option>
+                    <option value="en">English</option>
+                    <option value="zh-TW" selected>繁體中文</option>
+                    <option value="zh-CN">简体中文</option>
+                    <option value="ja">日本語</option>
+                    <option value="ko">한국어</option>
+                    <option value="es">Español</option>
+                    <option value="fr">Français</option>
+                    <option value="de">Deutsch</option>
+                    <option value="other">其他 (請在原因中註明)</option>
+                </select>
+            </div>
+            <div class="submit-form-group">
+                <label for="tutorial-translation-input">修正翻譯</label>
+                <textarea id="tutorial-translation-input">這是需要改進的字幕翻譯</textarea>
+            </div>
+            <div class="submit-form-group">
+                <label for="tutorial-reason-input">調整原因</label>
+                <textarea id="tutorial-reason-input" placeholder="請簡述為何需要調整翻譯(這只是模擬請隨便亂填)"></textarea>
+            </div>
+            <div class="submit-form-buttons">
+                <button id="tutorial-cancel-btn" class="tutorial-cancel-btn">取消</button>
+                <button id="tutorial-submit-btn" class="tutorial-submit-btn">提交</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="tutorial.js"></script>
+</body>
+</html>
