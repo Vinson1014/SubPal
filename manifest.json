@@ -11,7 +11,8 @@
   },
   "permissions": [
     "storage",
-    "alarms"
+    "alarms",
+    "tabs"
   ],
   "host_permissions": [
     "*://*.netflix.com/*"
@@ -44,5 +45,8 @@
       "resources": ["content/*"],
       "matches": ["*://*.netflix.com/*"]
     }
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  }
 }
