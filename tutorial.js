@@ -52,7 +52,7 @@ class TutorialManager {
         if (prevBtn) prevBtn.addEventListener('click', () => this.previousStep());
         if (nextBtn) nextBtn.addEventListener('click', () => this.nextStep());
         if (finishBtn) finishBtn.addEventListener('click', () => this.finishTutorial());
-        if (skipBtn) skipBtn.addEventListener('click', () => this.finishTutorial());
+        if (skipBtn) skipBtn.addEventListener('click', () => this.skipTutorial());
         
         // 步驟指示器點擊
         document.querySelectorAll('.step').forEach(step => {
@@ -80,17 +80,21 @@ class TutorialManager {
         if (step4NetflixBtn) {
             step4NetflixBtn.addEventListener('click', () => {
                 console.log('[Tutorial] 第四頁開啟Netflix並關閉教學');
+                // 先記錄教學完成狀態
+                this.markTutorialCompleted();
+                // 然後開啟Netflix並關閉教學
                 window.open('https://netflix.com', '_blank');
-                // 開啟Netflix後自動關閉教學頁面
                 setTimeout(() => {
                     window.close();
-                }, 500); // 稍微延遲確保Netflix頁面已開啟
+                }, 500);
             });
         }
         
         if (step4CloseBtn) {
             step4CloseBtn.addEventListener('click', () => {
                 console.log('[Tutorial] 第四頁關閉教學');
+                // 先記錄教學完成狀態
+                this.markTutorialCompleted();
                 window.close();
             });
         }
@@ -980,6 +984,151 @@ class TutorialManager {
     }
     
     finishTutorial() {
+        // 記錄教學完成狀態
+        this.markTutorialCompleted();
+        
+        // 直接關閉教學頁面（只有最後一頁的按鈕才會到這裡）
+        window.close();
+    }
+    
+    skipTutorial() {
+        // 顯示跳過教學的確認視窗
+        this.showSkipConfirmation();
+    }
+    
+    showSkipConfirmation() {
+        const confirmationDiv = document.createElement('div');
+        confirmationDiv.className = 'skip-confirmation';
+        confirmationDiv.innerHTML = `
+            <div class="skip-confirmation-content">
+                <h3>確認跳過教學？</h3>
+                <p>您確定要離開教學嗎？</p>
+                <div class="skip-confirmation-buttons">
+                    <button id="skip-confirm-yes" class="skip-btn-yes">是，離開教學</button>
+                    <button id="skip-confirm-no" class="skip-btn-no">繼續教學</button>
+                </div>
+            </div>
+        `;
+        
+        confirmationDiv.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 4000;
+            animation: fadeIn 0.3s ease-out;
+        `;
+        
+        document.body.appendChild(confirmationDiv);
+        
+        // 添加樣式
+        if (!document.querySelector('#skip-confirmation-styles')) {
+            const style = document.createElement('style');
+            style.id = 'skip-confirmation-styles';
+            style.textContent = `
+                .skip-confirmation-content {
+                    background: var(--color-card-bg);
+                    padding: 2rem;
+                    border-radius: 12px;
+                    text-align: center;
+                    max-width: 400px;
+                    animation: slideInUp 0.3s ease-out;
+                }
+                .skip-confirmation-content h3 {
+                    color: var(--tutorial-primary);
+                    margin-bottom: 1rem;
+                    font-size: 1.5rem;
+                }
+                .skip-confirmation-content p {
+                    color: var(--color-gray);
+                    margin-bottom: 1.5rem;
+                    line-height: 1.5;
+                }
+                .skip-confirmation-buttons {
+                    display: flex;
+                    gap: 1rem;
+                    justify-content: center;
+                }
+                .skip-btn-yes, .skip-btn-no {
+                    padding: 0.8rem 1.5rem;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 1rem;
+                    font-weight: 500;
+                    cursor: pointer;
+                    transition: all 0.3s ease;
+                }
+                .skip-btn-yes {
+                    background: #f44336;
+                    color: white;
+                }
+                .skip-btn-yes:hover {
+                    background: #d32f2f;
+                    transform: translateY(-2px);
+                }
+                .skip-btn-no {
+                    background: var(--tutorial-primary);
+                    color: white;
+                }
+                .skip-btn-no:hover {
+                    background: var(--tutorial-secondary);
+                    transform: translateY(-2px);
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        // 添加事件監聽器
+        const yesBtn = document.getElementById('skip-confirm-yes');
+        const noBtn = document.getElementById('skip-confirm-no');
+        
+        if (yesBtn) {
+            yesBtn.addEventListener('click', () => {
+                console.log('[Tutorial] 確認跳過教學');
+                this.markTutorialCompleted();
+                this.hideSkipConfirmation();
+                setTimeout(() => {
+                    window.close();
+                }, 300);
+            });
+        }
+        
+        if (noBtn) {
+            noBtn.addEventListener('click', () => {
+                console.log('[Tutorial] 繼續教學');
+                this.hideSkipConfirmation();
+            });
+        }
+        
+        // ESC鍵關閉確認試窗
+        const handleKeyDown = (e) => {
+            if (e.key === 'Escape') {
+                this.hideSkipConfirmation();
+                document.removeEventListener('keydown', handleKeyDown);
+            }
+        };
+        document.addEventListener('keydown', handleKeyDown);
+    }
+    
+    hideSkipConfirmation() {
+        const confirmationDiv = document.querySelector('.skip-confirmation');
+        if (confirmationDiv) {
+            confirmationDiv.style.animation = 'fadeOut 0.3s ease-in';
+            setTimeout(() => {
+                if (confirmationDiv.parentNode) {
+                    confirmationDiv.remove();
+                }
+            }, 300);
+        }
+    }
+    
+    // 獨立的方法來記錄教學完成狀態
+    markTutorialCompleted() {
         // 記錄教學完成狀態到擴充功能的儲存空間
         if (typeof chrome !== 'undefined' && chrome.storage) {
             chrome.storage.local.set({ tutorialCompleted: true }, () => {
@@ -992,185 +1141,11 @@ class TutorialManager {
         
         // 清除popup檢測狀態，下次重新開始教學時會重置
         localStorage.removeItem('subpal-tutorial-popup-detected');
-        
-        // 顯示完成提示
-        this.showCompletionMessage();
-        
-        // 移除自動關閉邏輯，只有用戶點擊按鈕才關閉
-        // setTimeout(() => {
-        //     window.close();
-        // }, 3000);
     }
     
-    showCompletionMessage() {
-        const completionDiv = document.createElement('div');
-        completionDiv.className = 'completion-message';
-        completionDiv.innerHTML = `
-            <div class="completion-content">
-                <button class="completion-close-x" id="completion-close-x" title="關閉此確認頁面">×</button>
-                <h2>🎉 教學完成！</h2>
-                <p>現在您已經了解如何使用 SubPal 字幕助手了</p>
-                <p>前往 Netflix 開始您的字幕改進之旅吧！</p>
-                <div class="completion-buttons">
-                    <button id="completion-netflix-btn" class="completion-btn">前往 Netflix</button>
-                    <button id="completion-close-btn" class="completion-btn secondary">關閉教學</button>
-                </div>
-            </div>
-        `;
-        
-        completionDiv.style.cssText = `
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.9);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 3000;
-            animation: fadeIn 0.5s ease-out;
-        `;
-        
-        document.body.appendChild(completionDiv);
-        
-        // 添加完成樣式
-        const style = document.createElement('style');
-        style.textContent = `
-            .completion-content {
-                background: var(--color-card-bg);
-                padding: 3rem;
-                border-radius: 16px;
-                text-align: center;
-                max-width: 500px;
-                animation: slideInUp 0.5s ease-out;
-                position: relative;
-            }
-            .completion-close-x {
-                position: absolute;
-                top: 1rem;
-                right: 1rem;
-                background: transparent;
-                border: none;
-                font-size: 2rem;
-                color: var(--color-gray);
-                cursor: pointer;
-                padding: 0.5rem;
-                border-radius: 50%;
-                width: 40px;
-                height: 40px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                transition: all 0.3s ease;
-                line-height: 1;
-            }
-            .completion-close-x:hover {
-                background: rgba(161, 161, 170, 0.2);
-                color: white;
-                transform: scale(1.1);
-            }
-            .completion-content h2 {
-                color: var(--tutorial-primary);
-                margin-bottom: 1rem;
-                font-size: 2.5rem;
-            }
-            .completion-content p {
-                color: var(--color-gray);
-                margin-bottom: 1rem;
-                font-size: 1.1rem;
-            }
-            .completion-buttons {
-                display: flex;
-                gap: 1rem;
-                justify-content: center;
-                margin-top: 2rem;
-            }
-            .completion-btn {
-                background: var(--tutorial-primary);
-                color: white;
-                border: none;
-                padding: 0.8rem 2rem;
-                border-radius: 8px;
-                font-size: 1rem;
-                font-weight: 500;
-                cursor: pointer;
-                transition: all 0.3s ease;
-            }
-            .completion-btn:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 4px 20px rgba(20, 184, 166, 0.3);
-            }
-            .completion-btn.secondary {
-                background: var(--color-gray);
-            }
-            .completion-btn.secondary:hover {
-                box-shadow: 0 4px 20px rgba(161, 161, 170, 0.3);
-            }
-            @keyframes slideInUp {
-                from { transform: translateY(50px); opacity: 0; }
-                to { transform: translateY(0); opacity: 1; }
-            }
-            @keyframes fadeOut {
-                from { opacity: 1; }
-                to { opacity: 0; }
-            }
-        `;
-        document.head.appendChild(style);
-        
-        // 添加按鈕事件監聽器
-        const netflixBtn = document.getElementById('completion-netflix-btn');
-        const closeBtn = document.getElementById('completion-close-btn');
-        const closeXBtn = document.getElementById('completion-close-x');
-        
-        if (netflixBtn) {
-            netflixBtn.addEventListener('click', () => {
-                console.log('[Tutorial] 開啟Netflix頁面並關閉教學');
-                window.open('https://netflix.com', '_blank');
-                // 開啟Netflix後自動關閉教學頁面
-                setTimeout(() => {
-                    window.close();
-                }, 500); // 稍微延遲確保Netflix頁面已開啟
-            });
-        }
-        
-        if (closeBtn) {
-            closeBtn.addEventListener('click', () => {
-                console.log('[Tutorial] 關閉教學頁面');
-                window.close();
-            });
-        }
-        
-        if (closeXBtn) {
-            closeXBtn.addEventListener('click', () => {
-                console.log('[Tutorial] 關閉確認頁面，回到教學');
-                this.hideCompletionMessage();
-            });
-        }
-        
-        // 按ESC鍵也能關閉確認頁面
-        const handleKeyDown = (e) => {
-            if (e.key === 'Escape') {
-                console.log('[Tutorial] 按ESC關閉確認頁面');
-                this.hideCompletionMessage();
-                document.removeEventListener('keydown', handleKeyDown);
-            }
-        };
-        document.addEventListener('keydown', handleKeyDown);
-    }
-    
-    // 隱藏完成確認頁面
-    hideCompletionMessage() {
-        const completionDiv = document.querySelector('.completion-message');
-        if (completionDiv) {
-            completionDiv.style.animation = 'fadeOut 0.3s ease-in';
-            setTimeout(() => {
-                if (completionDiv.parentNode) {
-                    completionDiv.remove();
-                }
-            }, 300);
-        }
-    }
+    // 移除不必要的完成確認頁面邏輯
+    // showCompletionMessage() 和 hideCompletionMessage() 方法已被移除
+    // 現在直接透過第四頁的按鈕執行相應動作
 }
 
 // 初始化教學管理器
