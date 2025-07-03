@@ -11,8 +11,7 @@
   },
   "permissions": [
     "storage",
-    "alarms",
-    "tabs"
+    "alarms"
   ],
   "host_permissions": [
     "*://*.netflix.com/*"
