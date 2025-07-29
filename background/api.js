@@ -149,8 +149,35 @@ async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
       throw new Error(jsonResponse.error || 'API 回傳失敗或字幕數據格式不正確');
     }
   } catch (error) {
-    console.error('[API Module] Error during fetch subtitles:', error);
-    throw error;
+    // 處理 401 錯誤 - JWT 過期
+    if (error.status === 401) {
+      console.log('[API Module] JWT expired during fetchSubtitlesFromAPI, attempting to refresh and retry...');
+      try {
+        await refreshJwtToken();
+        // 重新嘗試請求
+        const retryResponse = await sendToAPI(url, null, 'GET');
+        if (retryResponse && retryResponse.success === true && Array.isArray(retryResponse.data?.translations)) {
+          const subtitles = retryResponse.data.translations;
+          if (isDebugModeEnabled) console.log(`[API Module] API returned ${subtitles.length} subtitles after JWT refresh.`);
+          return subtitles.map(sub => ({
+            videoID: sub.videoID,
+            timestamp: sub.timestamp,
+            translationID: sub.translationID,
+            originalSubtitle: sub.originalSubtitle,
+            suggestedSubtitle: sub.suggestedSubtitle,
+            contributorUserID: sub.contributorUserID
+          }));
+        } else {
+          throw new Error(retryResponse.error || 'API 回傳失敗或字幕數據格式不正確');
+        }
+      } catch (refreshError) {
+        console.error('[API Module] JWT refresh failed during fetchSubtitlesFromAPI:', refreshError);
+        throw new Error('認證已過期且刷新失敗，請重新啟動擴展。');
+      }
+    } else {
+      console.error('[API Module] Error during fetch subtitles:', error);
+      throw error;
+    }
   }
 }
 
@@ -180,8 +207,21 @@ async function handleGenericSubmitRequest(data, portSendResponse, apiCallFunctio
       // 檢查是否為 401 Unauthorized 錯誤
       if (apiError.status === 401) {
         console.error(`[API Module] ${dataTypeLabel} submission failed due to Unauthorized (401). JWT might be invalid or expired.`, apiError.message);
-        portSendResponse({ success: false, error: '認證失敗，請重新登錄或檢查擴展權限。' });
-        // TODO: 觸發 JWT 刷新或重新註冊流程
+        console.log(`[API Module] Attempting to refresh JWT and retry ${dataTypeLabel} submission...`);
+        
+        try {
+          // 嘗試刷新 JWT
+          await refreshJwtToken();
+          console.log(`[API Module] JWT refreshed successfully, retrying ${dataTypeLabel} submission...`);
+          
+          // 重新嘗試 API 調用
+          const retryResult = await apiCallFunction(fullData);
+          console.log(`[API Module] ${dataTypeLabel} retry after JWT refresh succeeded:`, retryResult);
+          portSendResponse({ success: true, result: retryResult });
+        } catch (refreshError) {
+          console.error(`[API Module] JWT refresh failed or retry failed:`, refreshError);
+          portSendResponse({ success: false, error: '認證已過期且刷新失敗，請重新啟動擴展或檢查網路連接。' });
+        }
         return;
       }
       // 檢查是否為 409 衝突錯誤
@@ -513,7 +553,25 @@ export async function registerUser(userID) {
  */
 export async function fetchUserStats(userID) {
   const url = `${API_BASE_URL}/users/${userID}`;
-  return await sendToAPI(url, null, 'GET');
+  
+  try {
+    return await sendToAPI(url, null, 'GET');
+  } catch (error) {
+    // 處理 401 錯誤 - JWT 過期
+    if (error.status === 401) {
+      console.log('[API Module] JWT expired during fetchUserStats, attempting to refresh and retry...');
+      try {
+        await refreshJwtToken();
+        // 重新嘗試請求
+        return await sendToAPI(url, null, 'GET');
+      } catch (refreshError) {
+        console.error('[API Module] JWT refresh failed during fetchUserStats:', refreshError);
+        throw new Error('認證已過期且刷新失敗，請重新啟動擴展。');
+      }
+    } else {
+      throw error;
+    }
+  }
 }
 
 /**
@@ -523,5 +581,66 @@ export async function fetchUserStats(userID) {
  */
 export async function submitReplacementEvents(events) {
   const url = `${API_BASE_URL}/replacement-events`;
-  return await sendToAPI(url, { events }, 'POST');
+  
+  try {
+    return await sendToAPI(url, { events }, 'POST');
+  } catch (error) {
+    // 處理 401 錯誤 - JWT 過期
+    if (error.status === 401) {
+      console.log('[API Module] JWT expired during submitReplacementEvents, attempting to refresh and retry...');
+      try {
+        await refreshJwtToken();
+        // 重新嘗試請求
+        return await sendToAPI(url, { events }, 'POST');
+      } catch (refreshError) {
+        console.error('[API Module] JWT refresh failed during submitReplacementEvents:', refreshError);
+        throw new Error('認證已過期且刷新失敗，請重新啟動擴展。');
+      }
+    } else {
+      throw error;
+    }
+  }
+}
+
+/**
+ * 刷新 JWT Token - 重新註冊用戶獲取新的 JWT
+ * @returns {Promise<void>} - 成功刷新或拋出錯誤
+ */
+async function refreshJwtToken() {
+  console.log('[API Module] Starting JWT token refresh...');
+  
+  try {
+    // 獲取當前的 userID
+    const { userID } = await chrome.storage.local.get('userID');
+    
+    if (!userID) {
+      // 如果沒有 userID，生成一個新的
+      const newUserID = crypto.randomUUID();
+      await chrome.storage.local.set({ userID: newUserID });
+      console.log('[API Module] Generated new userID for JWT refresh:', newUserID);
+      
+      // 使用新的 userID 註冊
+      const response = await registerUser(newUserID);
+      if (response.token) {
+        await chrome.storage.local.set({ jwt: response.token });
+        console.log('[API Module] JWT refreshed successfully with new userID.');
+      } else {
+        throw new Error(response.error || 'Failed to get new JWT token');
+      }
+    } else {
+      // 使用現有 userID 重新註冊
+      console.log('[API Module] Re-registering existing userID for JWT refresh:', userID);
+      const response = await registerUser(userID);
+      
+      if (response.token) {
+        await chrome.storage.local.set({ jwt: response.token });
+        console.log('[API Module] JWT refreshed successfully for existing userID.');
+      } else {
+        throw new Error(response.error || 'Failed to refresh JWT token');
+      }
+    }
+  } catch (error) {
+    console.error('[API Module] Error during JWT token refresh:', error);
+    throw error;
+  }
 }

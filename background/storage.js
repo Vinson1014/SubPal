@@ -3,6 +3,63 @@
 let isDebugModeEnabled = false; // 快取 Debug 模式狀態
 
 /**
+ * 驗證字幕樣式配置格式
+ * @param {object} config - 字幕樣式配置對象
+ * @returns {boolean} - 驗證結果
+ */
+function validateSubtitleStyleConfig(config) {
+  if (!config || typeof config !== 'object') {
+    return false;
+  }
+
+  // 檢查基本結構
+  if (!config.mode || !['single', 'dual'].includes(config.mode)) {
+    return false;
+  }
+
+  // 檢查 primary 配置
+  if (!validateStyleConfig(config.primary)) {
+    return false;
+  }
+
+  // 如果是雙語模式，檢查 secondary 配置
+  if (config.mode === 'dual' && !validateStyleConfig(config.secondary)) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * 驗證單個樣式配置
+ * @param {object} styleConfig - 樣式配置
+ * @returns {boolean} - 驗證結果
+ */
+function validateStyleConfig(styleConfig) {
+  if (!styleConfig || typeof styleConfig !== 'object') {
+    return false;
+  }
+
+  // 檢查必要屬性
+  if (typeof styleConfig.fontSize !== 'number' || 
+      styleConfig.fontSize < 12 || 
+      styleConfig.fontSize > 100) {
+    return false;
+  }
+
+  if (typeof styleConfig.textColor !== 'string' || 
+      !styleConfig.textColor.match(/^#[0-9a-fA-F]{6}$/)) {
+    return false;
+  }
+
+  if (typeof styleConfig.backgroundColor !== 'string') {
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * 初始化存儲模組，設置初始值並更新快取
  */
 function initializeStorage() {
@@ -94,12 +151,12 @@ function setStorageItem(items) {
  * @param {object} sender - 發送者信息
  * @param {function} portSendResponse - 回應函數 (通過 port 發送)
  */
-export function handleMessage(request, sender, portSendResponse) {
+export function handleMessage(request, _sender, portSendResponse) {
   if (isDebugModeEnabled) console.log('[Storage] Handling message:', request);
 
   switch (request.type) {
     case 'GET_SETTINGS':
-      const keys = request.keys || ['debugMode', 'isEnabled', 'subtitleStyle'];
+      const keys = request.keys || ['debugMode', 'isEnabled', 'subtitleStyle', 'subtitleStyleConfig', 'dualSubtitleEnabled', 'primaryLanguage', 'secondaryLanguage'];
       getStorageItem(keys)
         .then(result => {
           if (isDebugModeEnabled) console.log('[Storage] Responding with settings:', result);
@@ -117,6 +174,17 @@ export function handleMessage(request, sender, portSendResponse) {
         portSendResponse({ success: false, error: '缺少 settings' });
         break;
       }
+      
+      // 驗證 subtitleStyleConfig 格式（如果存在）
+      if (request.settings.subtitleStyleConfig) {
+        const isValidConfig = validateSubtitleStyleConfig(request.settings.subtitleStyleConfig);
+        if (!isValidConfig) {
+          console.error('[Storage] SAVE_SETTINGS error: Invalid subtitleStyleConfig format');
+          portSendResponse({ success: false, error: '字幕樣式配置格式無效' });
+          break;
+        }
+      }
+      
       setStorageItem(request.settings)
         .then(() => {
           if (isDebugModeEnabled) console.log('[Storage] Settings saved:', request.settings);

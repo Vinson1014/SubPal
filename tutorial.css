@@ -440,8 +440,9 @@ body {
     opacity: 0.8;
 }
 
-/* 第三頁恭喜訊息樣式 */
-.step3-congratulation {
+/* 第三頁和第四頁恭喜訊息樣式 */
+.step3-congratulation,
+.step4-congratulation {
     opacity: 0;
     visibility: hidden;
     transform: translateY(20px);
@@ -451,7 +452,8 @@ body {
     padding: 2rem;
 }
 
-.step3-congratulation.show {
+.step3-congratulation.show,
+.step4-congratulation.show {
     opacity: 1;
     visibility: visible;
     transform: translateY(0);
@@ -1187,7 +1189,8 @@ body {
     }
     
     /* 第三頁恭喜訊息響應式 */
-    .step3-congratulation {
+    .step3-congratulation,
+    .step4-congratulation {
         margin-top: 1rem;
         padding: 1rem;
     }
@@ -1217,4 +1220,993 @@ body {
         top: 0.5rem !important;
         right: 0.5rem !important;
     }
+    
+    /* 字幕自定義響應式調整 */
+    .tutorial-subtitle-customization {
+        margin: 0.5rem;
+        height: auto;
+        overflow: visible;
+    }
+    
+    /* 小螢幕改為垂直佈局 */
+    .tutorial-layout-container {
+        flex-direction: column;
+        gap: 1rem;
+        height: auto;
+        align-items: normal;
+    }
+    
+    .tutorial-left-panel {
+        flex: none;
+        order: 1;
+    }
+    
+    .tutorial-right-panel {
+        flex: none;
+        order: 2;
+        overflow-y: visible;
+        padding-right: 0;
+    }
+    
+    .tutorial-preview-section,
+    .tutorial-mode-selector,
+    .tutorial-language-section,
+    .style-panel {
+        padding: 1rem;
+    }
+    
+    .language-selector-grid {
+        grid-template-columns: 1fr;
+        gap: 1rem;
+    }
+    
+    /* 在手機上，樣式面板改為垂直排列 */
+    .tutorial-style-panels {
+        flex-direction: column;
+        gap: 1rem;
+    }
+    
+    .style-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto;
+        gap: 0.75rem;
+    }
+    
+    .tutorial-action-buttons {
+        flex-direction: column;
+        align-items: center;
+        gap: 0.75rem;
+    }
+    
+    .tutorial-action-btn {
+        width: 100%;
+        max-width: 280px;
+    }
+    
+    .tutorial-preview-container {
+        padding: 1rem;
+        min-height: 60px;
+    }
+    
+    .tutorial-preview-subtitle {
+        font-size: 16px !important;
+        padding: 6px 12px;
+        min-width: 100px;
+    }
+    
+    .secondary-preview {
+        font-size: 12px !important;
+    }
+}
+
+@media (max-width: 480px) {
+    /* 字幕自定義小螢幕調整 */
+    .tutorial-subtitle-customization {
+        margin: 0.25rem;
+        height: auto;
+        overflow: visible;
+    }
+    
+    /* 超小螢幕繼續使用垂直佈局 */
+    .tutorial-layout-container {
+        flex-direction: column;
+        gap: 0.75rem;
+        height: auto;
+        align-items: normal;
+    }
+    
+    .tutorial-left-panel,
+    .tutorial-right-panel {
+        flex: none;
+        overflow-y: visible;
+        padding-right: 0;
+    }
+    
+    .tutorial-preview-section,
+    .tutorial-mode-selector,
+    .tutorial-language-section,
+    .style-panel {
+        padding: 0.75rem;
+    }
+    
+    .section-title,
+    .preview-title,
+    .panel-title {
+        font-size: 1rem;
+        margin-bottom: 1rem;
+    }
+    
+    .tutorial-preview-container {
+        padding: 1rem 0.5rem;
+        min-height: 50px;
+    }
+    
+    .tutorial-preview-subtitle {
+        font-size: 14px !important;
+        padding: 4px 8px;
+        min-width: 80px;
+    }
+    
+    .secondary-preview {
+        font-size: 10px !important;
+    }
+    
+    .color-input {
+        width: 35px;
+        height: 35px;
+    }
+    
+    .tutorial-action-btn {
+        padding: 0.6rem 1.2rem;
+        font-size: 0.9rem;
+    }
+    
+    .style-item {
+        gap: 0.5rem;
+    }
+    
+    .style-header {
+        margin-bottom: 0.25rem;
+    }
+}
+
+
+/* 字幕自定義容器 */
+.tutorial-subtitle-customization {
+    max-width: 1500px;
+    margin: 0.5rem auto;
+    padding: 0;
+    background: transparent;
+    height: calc(100vh - 150px);
+    overflow: hidden;
+}
+
+/* 左右排版主容器 */
+.tutorial-layout-container {
+    display: flex;
+    gap: 1.5rem;
+    height: 100%;
+    align-items: stretch;
+}
+
+/* 左側面板（預覽區域） */
+.tutorial-left-panel {
+    flex: 0 0 52%;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    padding-right: 1rem;
+    padding-top: 2rem;
+}
+
+/* 右側面板（所有設定） */
+.tutorial-right-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    overflow-y: auto;
+    padding-left: 0.75rem;
+    padding-right: 0.5rem;
+}
+
+/* 即時預覽區域 */
+.tutorial-preview-section {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    border-radius: 16px;
+    padding: 1.2rem;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(20, 184, 166, 0.2);
+    max-height: 70vh;
+    overflow: hidden;
+}
+
+/* 預覽區域標題列 */
+.preview-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.preview-title {
+    color: var(--tutorial-primary);
+    margin: 0;
+    font-size: 1.2rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* 重置按鈕樣式 */
+.tutorial-reset-btn {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 8px;
+    color: #ef4444;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.4rem 0.8rem;
+    font-size: 0.85rem;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(10px);
+}
+
+.tutorial-reset-btn:hover {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: rgba(239, 68, 68, 0.5);
+    transform: translateY(-1px);
+}
+
+.tutorial-reset-btn .btn-icon {
+    font-size: 0.9rem;
+}
+
+.preview-icon {
+    font-size: 1.2rem;
+}
+
+/* 模式選擇器 */
+.tutorial-mode-selector {
+    background: rgba(39, 39, 42, 0.8);
+    border-radius: 16px;
+    padding: 1rem 1.5rem;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.section-title {
+    color: var(--tutorial-primary);
+    margin: 0 0 1rem 0;
+    font-size: 1.2rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.section-icon {
+    font-size: 1.1rem;
+}
+
+.mode-toggle-group {
+    position: relative;
+}
+
+.mode-toggle-group input[type="radio"] {
+    display: none;
+}
+
+.mode-toggle-slider {
+    display: flex;
+    background: rgba(20, 20, 23, 0.8);
+    border-radius: 12px;
+    padding: 3px;
+    position: relative;
+    overflow: hidden;
+}
+
+.mode-toggle-slider::before {
+    content: '';
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: calc(50% - 3px);
+    height: calc(100% - 6px);
+    background: linear-gradient(135deg, var(--tutorial-primary), var(--tutorial-secondary));
+    border-radius: 8px;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 1;
+}
+
+#tutorialDualMode:checked ~ .mode-toggle-slider::before {
+    transform: translateX(100%);
+}
+
+.mode-option {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+    z-index: 2;
+    border-radius: 8px;
+    color: rgba(255, 255, 255, 0.7);
+    font-weight: 500;
+}
+
+.mode-option:hover {
+    color: white;
+}
+
+#tutorialSingleMode:checked ~ .mode-toggle-slider .single-mode,
+#tutorialDualMode:checked ~ .mode-toggle-slider .dual-mode {
+    color: white;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.mode-icon {
+    font-size: 1.1rem;
+}
+
+/* 語言設定區域 */
+.tutorial-language-section {
+    background: rgba(39, 39, 42, 0.8);
+    border-radius: 16px;
+    padding: 1.5rem;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    animation: slideDown 0.3s ease-out;
+}
+
+@keyframes slideDown {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.language-selector-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+}
+
+.language-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.language-label {
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.9rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.language-select {
+    padding: 0.75rem 1rem;
+    background: rgba(20, 20, 23, 0.6);
+    border: 2px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    color: white;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.language-select:hover {
+    border-color: rgba(20, 184, 166, 0.5);
+}
+
+.language-select:focus {
+    outline: none;
+    border-color: var(--tutorial-primary);
+    box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.1);
+}
+
+/* 樣式面板 */
+.tutorial-style-panels {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* 雙語模式時嘗試並排顯示，空間不足時垂直排列 */
+@media (min-width: 1000px) {
+    .tutorial-style-panels {
+        flex-direction: row;
+        gap: 1rem;
+    }
+    
+    .tutorial-style-panels .style-panel {
+        flex: 1;
+    }
+}
+
+/* 單語模式時只顯示一個面板 */
+.tutorial-style-panels.single-mode {
+    flex-direction: column;
+}
+
+.style-panel {
+    background: rgba(39, 39, 42, 0.8);
+    border-radius: 16px;
+    padding: 1.5rem;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    transition: all 0.3s ease;
+}
+
+.style-panel:hover {
+    border-color: rgba(20, 184, 166, 0.3);
+    box-shadow: 0 4px 20px rgba(20, 184, 166, 0.1);
+}
+
+.panel-title {
+    color: var(--tutorial-primary);
+    margin: 0 0 1.5rem 0;
+    font-size: 1.2rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.panel-icon {
+    font-size: 1.1rem;
+}
+
+.style-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 1rem;
+}
+
+.style-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.style-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.style-label {
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+.style-value {
+    color: var(--tutorial-primary);
+    font-size: 0.9rem;
+    font-weight: 600;
+    min-width: 50px;
+    text-align: right;
+}
+
+/* 滑桿樣式 */
+.style-slider {
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: linear-gradient(to right, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.1));
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.style-slider:hover {
+    background: linear-gradient(to right, rgba(20, 184, 166, 0.3), rgba(20, 184, 166, 0.1));
+}
+
+.style-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--tutorial-primary), var(--tutorial-secondary));
+    cursor: pointer;
+    border: 2px solid white;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    transition: all 0.3s ease;
+}
+
+.style-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.1);
+    box-shadow: 0 4px 12px rgba(20, 184, 166, 0.4);
+}
+
+.style-slider::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--tutorial-primary), var(--tutorial-secondary));
+    cursor: pointer;
+    border: 2px solid white;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* 透明度滑桿特殊樣式 */
+.opacity-slider {
+    background: linear-gradient(to right, 
+        rgba(255, 255, 255, 0) 0%, 
+        rgba(255, 255, 255, 0.5) 50%, 
+        rgba(255, 255, 255, 1) 100%);
+}
+
+/* 顏色輸入組件 */
+.color-input-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.color-input {
+    width: 50px;
+    height: 50px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    background: none;
+    padding: 0;
+    outline: none;
+    transition: transform 0.3s ease;
+}
+
+.color-input:hover {
+    transform: scale(1.05);
+}
+
+.color-input::-webkit-color-swatch-wrapper {
+    padding: 0;
+    border-radius: 8px;
+    border: 3px solid rgba(255, 255, 255, 0.2);
+    transition: border-color 0.3s ease;
+}
+
+.color-input:hover::-webkit-color-swatch-wrapper {
+    border-color: var(--tutorial-primary);
+}
+
+.color-input::-webkit-color-swatch {
+    border: none;
+    border-radius: 5px;
+}
+
+.color-preview {
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    position: relative;
+    overflow: hidden;
+}
+
+.color-preview::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: attr(data-color);
+}
+
+/* 操作按鈕 */
+.tutorial-action-buttons {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    margin-top: 1rem;
+}
+
+.tutorial-action-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1rem 2rem;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: 600;
+    transition: all 0.3s ease;
+    min-width: 140px;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+}
+
+.tutorial-action-btn::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+    transition: left 0.5s;
+}
+
+.tutorial-action-btn:hover::before {
+    left: 100%;
+}
+
+.reset-btn {
+    background: rgba(244, 67, 54, 0.8);
+    color: white;
+    border: 2px solid rgba(244, 67, 54, 0.3);
+}
+
+.reset-btn:hover {
+    background: rgba(244, 67, 54, 1);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(244, 67, 54, 0.4);
+}
+
+.save-btn {
+    background: linear-gradient(135deg, var(--tutorial-primary), var(--tutorial-secondary));
+    color: white;
+    border: 2px solid rgba(20, 184, 166, 0.3);
+}
+
+.save-btn:hover {
+    background: linear-gradient(135deg, var(--tutorial-secondary), var(--tutorial-primary));
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(20, 184, 166, 0.4);
+}
+
+.btn-icon {
+    font-size: 1.1rem;
+}
+
+/* 更新預覽容器樣式（縮小版本） */
+.tutorial-preview-container {
+    background: 
+        radial-gradient(circle at 25% 25%, rgba(20, 184, 166, 0.1) 0%, transparent 50%),
+        radial-gradient(circle at 75% 75%, rgba(34, 197, 94, 0.1) 0%, transparent 50%),
+        linear-gradient(45deg, #1a1a2e 25%, transparent 25%), 
+        linear-gradient(-45deg, #1a1a2e 25%, transparent 25%), 
+        linear-gradient(45deg, transparent 75%, #1a1a2e 75%), 
+        linear-gradient(-45deg, transparent 75%, #1a1a2e 75%);
+    background-size: 
+        150px 150px,
+        150px 150px,
+        20px 20px,
+        20px 20px,
+        20px 20px,
+        20px 20px;
+    background-position: 
+        0 0,
+        75px 75px,
+        0 0, 
+        0 10px, 
+        10px -10px, 
+        -10px 0px;
+    background-color: #0f0f1a;
+    padding: 1.5rem;
+    border-radius: 12px;
+    text-align: center;
+    min-height: 80px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 0.5rem;
+    border: 2px solid rgba(20, 184, 166, 0.3);
+    position: relative;
+    overflow: hidden;
+}
+
+.tutorial-preview-container::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: linear-gradient(45deg, transparent, rgba(20, 184, 166, 0.03), transparent);
+    animation: shimmer 3s infinite;
+}
+
+@keyframes shimmer {
+    0% { transform: translateX(-100%) translateY(-100%) rotate(45deg); }
+    100% { transform: translateX(100%) translateY(100%) rotate(45deg); }
+}
+
+.tutorial-preview-subtitle {
+    display: inline-block;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-family: 'Arial', 'Helvetica', sans-serif;
+    text-align: center;
+    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+    min-width: 120px;
+    margin: 2px 6px;
+    transition: all 0.3s ease;
+    font-weight: 600;
+    position: relative;
+    z-index: 2;
+    backdrop-filter: blur(2px);
+}
+
+.tutorial-preview-subtitle:hover {
+    transform: scale(1.02);
+    filter: brightness(1.1);
+}
+
+.primary-preview {
+    font-size: 20px;
+    color: #ffffff;
+    background-color: rgba(0, 0, 0, 0.75);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.secondary-preview {
+    font-size: 14px;
+    color: #ffff00;
+    background-color: rgba(0, 0, 0, 0.75);
+    border: 1px solid rgba(255, 255, 0, 0.2);
+}
+
+.tutorial-select-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.tutorial-select-group label {
+    margin-bottom: 0.5rem;
+    color: var(--color-gray);
+    font-size: 1rem;
+    font-weight: 500;
+}
+
+.tutorial-select-group select {
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    border: 2px solid var(--color-gray);
+    background-color: var(--color-dark);
+    color: var(--color-gray);
+    font-size: 1rem;
+    transition: all 0.3s ease;
+}
+
+.tutorial-select-group select:focus {
+    outline: none;
+    border-color: var(--tutorial-primary);
+    box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.1);
+    color: white;
+}
+
+/* 樣式控制項 */
+.tutorial-style-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-top: 1rem;
+}
+
+.tutorial-control-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.tutorial-control-group label {
+    margin-bottom: 0.5rem;
+    color: var(--color-gray);
+    font-size: 1rem;
+    font-weight: 500;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* 範圍滑桿（針對教學頁面的特定選擇器） */
+.tutorial-subtitle-customization input[type="range"] {
+    width: 100%;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--color-gray);
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 8px 0;
+    cursor: pointer;
+}
+
+.tutorial-subtitle-customization input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--tutorial-primary);
+    cursor: pointer;
+    border: 3px solid var(--color-dark);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+    transition: all 0.3s ease;
+}
+
+.tutorial-subtitle-customization input[type="range"]::-webkit-slider-thumb:hover {
+    background: var(--tutorial-secondary);
+    transform: scale(1.1);
+}
+
+.tutorial-subtitle-customization input[type="range"]::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--tutorial-primary);
+    cursor: pointer;
+    border: 3px solid var(--color-dark);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+/* 顏色選擇器（針對教學頁面的特定選擇器） */
+.tutorial-subtitle-customization input[type="color"] {
+    width: 70px;
+    height: 45px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    background: none;
+    padding: 0;
+    outline: none;
+    transition: transform 0.3s ease;
+}
+
+.tutorial-subtitle-customization input[type="color"]:hover {
+    transform: scale(1.05);
+}
+
+.tutorial-subtitle-customization input[type="color"]::-webkit-color-swatch-wrapper {
+    padding: 0;
+    border-radius: 8px;
+    border: 3px solid var(--color-gray);
+    transition: border-color 0.3s ease;
+}
+
+.tutorial-subtitle-customization input[type="color"]:hover::-webkit-color-swatch-wrapper {
+    border-color: var(--tutorial-primary);
+}
+
+.tutorial-subtitle-customization input[type="color"]::-webkit-color-swatch {
+    border: none;
+    border-radius: 5px;
+}
+
+/* 預覽區域 */
+.tutorial-preview-container {
+    background: linear-gradient(45deg, #333 25%, transparent 25%), 
+                linear-gradient(-45deg, #333 25%, transparent 25%), 
+                linear-gradient(45deg, transparent 75%, #333 75%), 
+                linear-gradient(-45deg, transparent 75%, #333 75%);
+    background-size: 24px 24px;
+    background-position: 0 0, 0 12px, 12px -12px, -12px 0px;
+    background-color: #222;
+    padding: 1.5rem 1rem;
+    border-radius: 12px;
+    text-align: center;
+    margin: 1rem 0;
+    min-height: 120px;
+    max-height: 60vh;
+    width: 100%;
+    min-width: 480px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    align-items: center;
+    gap: 0.5rem;
+    border: 2px solid var(--tutorial-primary);
+}
+
+.tutorial-preview-subtitle {
+    display: block;
+    padding: 10px 15px;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    text-align: center;
+    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.8);
+    max-width: 90%;
+    margin: 3px auto;
+    transition: all 0.3s ease;
+    font-weight: 600;
+    line-height: 1.2;
+    word-break: break-word;
+    hyphens: auto;
+}
+
+.tutorial-preview-subtitle:hover {
+    transform: scale(1.02);
+}
+
+.primary-preview {
+    font-size: 28px;
+    color: #ffffff;
+    background-color: rgba(0, 0, 0, 0.75);
+}
+
+.secondary-preview {
+    font-size: 18px;
+    color: #ffff00;
+    background-color: rgba(0, 0, 0, 0.75);
+}
+
+/* 預覽控制按鈕 */
+.tutorial-preview-controls {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    margin-top: 1.5rem;
+}
+
+.tutorial-btn {
+    padding: 0.75rem 1.5rem;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: 600;
+    transition: all 0.3s ease;
+    min-width: 120px;
+    position: relative;
+    overflow: hidden;
+}
+
+.tutorial-btn::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+    transition: left 0.5s;
+}
+
+.tutorial-btn:hover::before {
+    left: 100%;
+}
+
+.tutorial-btn-primary {
+    background: linear-gradient(135deg, var(--tutorial-primary), var(--tutorial-secondary));
+    color: white;
+    box-shadow: 0 4px 15px rgba(20, 184, 166, 0.3);
+}
+
+.tutorial-btn-primary:hover {
+    background: linear-gradient(135deg, var(--tutorial-secondary), var(--tutorial-primary));
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(20, 184, 166, 0.4);
+}
+
+.tutorial-btn-outline {
+    background-color: transparent;
+    color: var(--color-gray);
+    border: 2px solid var(--color-gray);
+}
+
+.tutorial-btn-outline:hover {
+    background-color: var(--color-gray);
+    color: var(--color-dark);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(161, 161, 170, 0.3);
 }

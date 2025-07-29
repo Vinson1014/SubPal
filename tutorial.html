@@ -103,8 +103,193 @@
             
         </section>
 
-        <!-- 步驟 3: 擴充功能面板指導 -->
+        <!-- 步驟 3: 字幕樣式自定義 -->
         <section class="tutorial-step" id="step-3">
+            <div class="tutorial-instruction">
+                <h2>設定你的專屬字幕樣式</h2>
+                <p>選擇單語或雙語模式，並調整字幕的外觀設定</p>
+            </div>
+            
+            <div class="tutorial-subtitle-customization">
+                <!-- 左右排版主要容器 -->
+                <div class="tutorial-layout-container">
+                    <!-- 左側面板：預覽區域 -->
+                    <div class="tutorial-left-panel">
+                        <div class="tutorial-preview-section">
+                            <div class="preview-header">
+                                <h3 class="preview-title">
+                                    <span class="preview-icon">👁️</span>
+                                    即時預覽
+                                </h3>
+                                <button id="tutorialResetStyles" class="tutorial-reset-btn">
+                                    <span class="btn-icon">🔄</span>
+                                    <span class="btn-text">重置</span>
+                                </button>
+                            </div>
+                            <div class="tutorial-preview-container">
+                                <div class="tutorial-preview-subtitle primary-preview" id="tutorialPrimaryPreview">
+                                    主要語言預覽文字
+                                </div>
+                                <div class="tutorial-preview-subtitle secondary-preview" id="tutorialSecondaryPreview" style="display: none;">
+                                    次要語言預覽文字
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 右側面板：所有設定 -->
+                    <div class="tutorial-right-panel">
+                        <!-- 模式選擇器 -->
+                        <div class="tutorial-mode-selector">
+                            <h3 class="section-title">
+                                <span class="section-icon">🎯</span>
+                                字幕模式
+                            </h3>
+                            <div class="mode-toggle-group">
+                                <input type="radio" name="tutorialSubtitleMode" value="single" id="tutorialSingleMode" checked>
+                                <input type="radio" name="tutorialSubtitleMode" value="dual" id="tutorialDualMode">
+                                <div class="mode-toggle-slider">
+                                    <label for="tutorialSingleMode" class="mode-option single-mode">
+                                        <span class="mode-icon">🔤</span>
+                                        <span class="mode-text">單語模式</span>
+                                    </label>
+                                    <label for="tutorialDualMode" class="mode-option dual-mode">
+                                        <span class="mode-icon">🌏</span>
+                                        <span class="mode-text">雙語模式</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 語言設定（雙語模式時顯示） -->
+                        <div class="tutorial-language-section" id="tutorialDualLanguageGroup" style="display: none;">
+                            <h3 class="section-title">
+                                <span class="section-icon">🌐</span>
+                                語言設定
+                            </h3>
+                            <div class="language-selector-grid">
+                                <div class="language-selector">
+                                    <label class="language-label">主要語言</label>
+                                    <select id="tutorialPrimaryLanguageSelect" class="language-select">
+                                        <option value="zh-Hant">繁體中文</option>
+                                        <option value="zh-Hans">简体中文</option>
+                                        <option value="en">English</option>
+                                        <option value="ja">日本語</option>
+                                        <option value="ko">한국어</option>
+                                    </select>
+                                </div>
+                                <div class="language-selector">
+                                    <label class="language-label">次要語言</label>
+                                    <select id="tutorialSecondaryLanguageSelect" class="language-select">
+                                        <option value="en">English</option>
+                                        <option value="zh-Hant">繁體中文</option>
+                                        <option value="zh-Hans">简体中文</option>
+                                        <option value="ja">日本語</option>
+                                        <option value="ko">한국어</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 樣式自定義面板 -->
+                        <div class="tutorial-style-panels">
+                            <!-- 主要語言樣式 -->
+                            <div class="style-panel primary-panel">
+                                <h3 class="panel-title">
+                                    <span class="panel-icon">🎨</span>
+                                    主要語言樣式
+                                </h3>
+                                <div class="style-grid">
+                                    <div class="style-item">
+                                        <div class="style-header">
+                                            <span class="style-label">字體大小</span>
+                                            <span class="style-value" id="tutorialPrimaryFontSizeValue">55px</span>
+                                        </div>
+                                        <input type="range" id="tutorialPrimaryFontSize" min="12" max="100" value="55" step="1" class="style-slider">
+                                    </div>
+                                    
+                                    <div class="style-item">
+                                        <div class="style-header">
+                                            <span class="style-label">文字顏色</span>
+                                        </div>
+                                        <div class="color-input-wrapper">
+                                            <input type="color" id="tutorialPrimaryTextColor" value="#ffffff" class="color-input">
+                                            <div class="color-preview" data-color="#ffffff"></div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="style-item">
+                                        <div class="style-header">
+                                            <span class="style-label">背景顏色</span>
+                                        </div>
+                                        <div class="color-input-wrapper">
+                                            <input type="color" id="tutorialPrimaryBackgroundColor" value="#000000" class="color-input">
+                                            <div class="color-preview" data-color="#000000"></div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="style-item">
+                                        <div class="style-header">
+                                            <span class="style-label">背景透明度</span>
+                                            <span class="style-value" id="tutorialPrimaryBackgroundOpacityValue">0.75</span>
+                                        </div>
+                                        <input type="range" id="tutorialPrimaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05" class="style-slider opacity-slider">
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- 次要語言樣式（雙語模式時顯示） -->
+                            <div class="style-panel secondary-panel" id="tutorialSecondaryStyleSection" style="display: none;">
+                                <h3 class="panel-title">
+                                    <span class="panel-icon">🎭</span>
+                                    次要語言樣式
+                                </h3>
+                                <div class="style-grid">
+                                    <div class="style-item">
+                                        <div class="style-header">
+                                            <span class="style-label">字體大小</span>
+                                            <span class="style-value" id="tutorialSecondaryFontSizeValue">24px</span>
+                                        </div>
+                                        <input type="range" id="tutorialSecondaryFontSize" min="12" max="100" value="24" step="1" class="style-slider">
+                                    </div>
+                                    
+                                    <div class="style-item">
+                                        <div class="style-header">
+                                            <span class="style-label">文字顏色</span>
+                                        </div>
+                                        <div class="color-input-wrapper">
+                                            <input type="color" id="tutorialSecondaryTextColor" value="#ffff00" class="color-input">
+                                            <div class="color-preview" data-color="#ffff00"></div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="style-item">
+                                        <div class="style-header">
+                                            <span class="style-label">背景顏色</span>
+                                        </div>
+                                        <div class="color-input-wrapper">
+                                            <input type="color" id="tutorialSecondaryBackgroundColor" value="#000000" class="color-input">
+                                            <div class="color-preview" data-color="#000000"></div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="style-item">
+                                        <div class="style-header">
+                                            <span class="style-label">背景透明度</span>
+                                            <span class="style-value" id="tutorialSecondaryBackgroundOpacityValue">0.75</span>
+                                        </div>
+                                        <input type="range" id="tutorialSecondaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05" class="style-slider opacity-slider">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 步驟 4: 擴充功能面板指導 -->
+        <section class="tutorial-step" id="step-4">
             <div class="tutorial-instruction">
                 <h2>使用擴充功能面板</h2>
                 <p>點擊右上角的拼圖圖示，然後選擇「字幕助手」</p>
@@ -133,7 +318,7 @@
                 </div>
                 
                 <!-- 恭喜訊息區域 -->
-                <div class="step3-congratulation" id="step3-congratulation">
+                <div class="step4-congratulation" id="step4-congratulation">
                     <div class="congratulation-content">
                         <div class="congratulation-icon">🎉</div>
                         <div class="congratulation-text">
@@ -146,8 +331,8 @@
             </div>
         </section>
 
-        <!-- 步驟 4: 完成教學 -->
-        <section class="tutorial-step" id="step-4">
+        <!-- 步驟 5: 完成教學 -->
+        <section class="tutorial-step" id="step-5">
             <div class="completion-page">
                 <div class="completion-content">
                     <div class="completion-icon">🎉</div>
@@ -174,8 +359,8 @@
                     </div>
                     
                     <div class="completion-actions">
-                        <button id="step4-netflix-btn" class="completion-btn primary">前往 Netflix</button>
-                        <button id="step4-close-btn" class="completion-btn secondary">關閉教學</button>
+                        <button id="step5-netflix-btn" class="completion-btn primary">前往 Netflix</button>
+                        <button id="step5-close-btn" class="completion-btn secondary">關閉教學</button>
                     </div>
                 </div>
             </div>
@@ -200,6 +385,7 @@
             <div class="step" data-step="2"></div>
             <div class="step" data-step="3"></div>
             <div class="step" data-step="4"></div>
+            <div class="step" data-step="5"></div>
         </div>
     </main>
 

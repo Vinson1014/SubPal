@@ -195,7 +195,7 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
       const handledCoreMessageTypes = [
-        'CONTENT_SCRIPT_LOADED', 'TOGGLE_EXTENSION', 'TOGGLE_DEBUG_MODE', 'VIDEO_ID_CHANGED', 'UPDATE_STATS'
+        'CONTENT_SCRIPT_LOADED', 'CONTENT_SCRIPT_READY', 'TOGGLE_EXTENSION', 'TOGGLE_DEBUG_MODE', 'VIDEO_ID_CHANGED', 'UPDATE_STATS'
       ];
       if (handledCoreMessageTypes.includes(message.type)) {
         handleCoreMessagePort(messageId, message, port);
@@ -431,10 +431,34 @@ function handleCoreMessagePort(messageId, request, port) {
       });
       port.postMessage({ messageId, response: { success: true } }); // 發送響應
       break;
+    case 'CONTENT_SCRIPT_READY':
+      if (isDebugModeEnabled) console.log('[Background] Content script ready with features:', request.features);
+      // 記錄內容腳本已準備就緒，可以執行相關邏輯
+      port.postMessage({ messageId, response: { success: true } });
+      break;
       
     case 'API_BASE_URL_CHANGED':
       if (isDebugModeEnabled) console.log('[Background] API Base URL changed to:', request.url);
       apiModule.setApiBaseUrl(request.url);
+      port.postMessage({ messageId, response: { success: true } });
+      break;
+      
+    case 'SUBTITLE_STYLE_UPDATED':
+      if (isDebugModeEnabled) console.log('[Background] Subtitle style updated:', request.config);
+      // 轉發消息到所有相關的 content scripts (通過 port)
+      contentScriptPorts.forEach(contentPort => {
+        try {
+          contentPort.postMessage({
+            messageId: 'subtitle-style-broadcast',
+            response: {
+              type: 'SUBTITLE_STYLE_UPDATED',
+              config: request.config
+            }
+          });
+        } catch (error) {
+          console.error('[Background] Error forwarding SUBTITLE_STYLE_UPDATED to content script:', error);
+        }
+      });
       port.postMessage({ messageId, response: { success: true } });
       break;
 
@@ -471,7 +495,8 @@ function routeMessageToModulePort(messageId, request, port) {
     'TRIGGER_TRANSLATION_SYNC': 'sync',
     'REPORT_REPLACEMENT_EVENTS': 'storage',
     'CLEAR_QUEUE': 'storage', // 新增 CLEAR_QUEUE 消息類型
-    'API_BASE_URL_CHANGED': 'core' // 添加 API_BASE_URL_CHANGED 消息路由
+    'API_BASE_URL_CHANGED': 'core', // 添加 API_BASE_URL_CHANGED 消息路由
+    'SUBTITLE_STYLE_UPDATED': 'core' // 添加字幕樣式更新消息路由
   };
 
   const moduleName = moduleMapping[request.type];
