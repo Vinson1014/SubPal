@@ -58,6 +58,9 @@ let currentSubtitle = null;
 // 字幕交互按鈕
 let interactionButtons = null;
 
+// 雙語字幕狀態
+let isDualSubtitleMode = false;
+
 function debugLog(...args) {
   if (debugMode) {
     console.log('[UIManager]', ...args);
@@ -314,13 +317,18 @@ function loadDebugMode() {
   // 使用 sendMessage 而不是直接存取 chrome.storage
   sendMessage({
     type: 'GET_SETTINGS',
-    keys: ['debugMode']
+    keys: ['debugMode', 'dualSubtitleEnabled']
   })
 .then(result => {
     if (result && result.debugMode !== undefined) {
       debugMode = result.debugMode;
       debugLog('載入調試模式設置:', debugMode);
       toggleDebugTimestamp(debugMode);
+    }
+    
+    if (result && result.dualSubtitleEnabled !== undefined) {
+      isDualSubtitleMode = result.dualSubtitleEnabled;
+      debugLog('載入雙語字幕模式設置:', isDualSubtitleMode);
     }
   })
   .catch(error => {
@@ -332,6 +340,17 @@ function loadDebugMode() {
     debugMode = data.debugMode;
     debugLog('透過內部事件機制更新調試模式:', debugMode);
     toggleDebugTimestamp(debugMode);
+  });
+  
+  // 使用內部事件機制監聽雙語字幕模式變更
+  registerInternalEventHandler('TOGGLE_DUAL_SUBTITLE', (data) => {
+    isDualSubtitleMode = data.enabled;
+    debugLog('透過內部事件機制更新雙語字幕模式:', isDualSubtitleMode);
+    
+    // 如果切換到雙語模式，隱藏單語字幕UI
+    if (isDualSubtitleMode) {
+      hideSubtitle();
+    }
   });
 }
 
@@ -585,6 +604,12 @@ export function hideSubtitle() {
  */
 export function showSubtitle(subtitleData) {
   debugLog('顯示字幕:', subtitleData);
+
+  // 如果是雙語字幕模式，不顯示單語字幕UI
+  if (isDualSubtitleMode) {
+    debugLog('當前為雙語字幕模式，跳過單語字幕顯示');
+    return;
+  }
 
   if (!customSubtitleContainer || !customSubtitleElement) {
     debugLog('字幕容器或字幕元素不存在，創建自定義字幕容器');

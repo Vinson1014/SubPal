@@ -102,7 +102,7 @@ function debugLog(...args) {
 export function initMessaging() {
   // 監聽來自 content.js 的消息事件 (用於接收 background 的回應或 content.js 的內部消息)
   window.addEventListener('messageFromContentScript', (event) => {
-    const { message, sender } = event.detail;
+    const { message, messageId, sender } = event.detail;
     debugLog('收到來自 content.js 的消息', message, sender);
 
     // 處理特定的內部消息，例如更新 debug 模式或連接狀態
@@ -110,6 +110,14 @@ export function initMessaging() {
       debugMode = message.debugMode;
       debugLog('Debug mode set to:', debugMode);
       // 不需要進一步處理，這個消息是單向的
+      return;
+    }
+
+    // 處理內部事件消息
+    const internalEventTypes = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED', 'SUBTITLE_STYLE_UPDATED'];
+    if (internalEventTypes.includes(message.type)) {
+      debugLog(`收到 ${message.type} 消息，分發給內部事件處理器`);
+      dispatchInternalEvent(message);
       return;
     }
 
@@ -365,4 +373,158 @@ export function registerMessageHandler(type, handler) {
  */
 export function onMessage(callback) {
   registerMessageHandler('*', callback);
+}
+
+// === Page Script 通信功能 ===
+
+// 存儲 page script 監聽器
+const pageScriptListeners = new Map();
+
+/**
+ * 發送消息到 page script
+ * @param {Object} message - 消息對象
+ * @returns {Promise<any>}
+ */
+export function sendMessageToPageScript(message) {
+  debugLog('發送消息到 page script:', message);
+  
+  return new Promise((resolve, reject) => {
+    // 檢查是否有 page script 可用
+    if (!window.subpalPageScript) {
+      reject(new Error('Page script 不可用'));
+      return;
+    }
+
+    // 生成唯一的訊息 ID
+    const messageId = `page_msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const timeoutMs = getTimeoutForMessageType(message.type);
+
+    debugLog('發送到 page script:', messageId, message.type, timeoutMs, 'ms');
+
+    // 創建監聽器
+    const listener = (event) => {
+      // 檢查消息來源和 messageId
+      if (event.data?.source === 'subpal-page-script' && 
+          event.data?.messageId === messageId) {
+        // 收到回應，清理監聽器和超時計時器
+        cleanupPageScriptListener(messageId);
+        debugLog('收到 page script 回應:', messageId, event.data);
+
+        // 處理響應
+        if (event.data.error) {
+          const error = new Error(event.data.error);
+          console.error('page script 消息失敗:', messageId, message.type, error);
+          reject(error);
+        } else {
+          resolve(event.data);
+        }
+      }
+    };
+
+    // 添加監聽器
+    window.addEventListener('message', listener);
+
+    // 設置超時處理
+    const timeoutId = setTimeout(() => {
+      cleanupPageScriptListener(messageId);
+      const error = new Error(`Page script message timeout: ${message.type}`);
+      console.error('page script 消息超時:', messageId, message.type, error);
+      reject(error);
+    }, timeoutMs);
+
+    // 保存監聽器和計時器引用
+    pageScriptListeners.set(messageId, { listener, timeoutId });
+
+    // 發送消息到 page script
+    window.postMessage({
+      source: 'subpal-content-script',
+      target: 'subpal-page-script',
+      messageId: messageId,
+      ...message
+    }, '*');
+    
+    debugLog('已發送訊息到 page script:', messageId, message.type);
+  });
+}
+
+/**
+ * 清理 page script 監聽器
+ * @param {string} messageId - 消息 ID
+ */
+function cleanupPageScriptListener(messageId) {
+  const item = pageScriptListeners.get(messageId);
+  if (item) {
+    const { listener, timeoutId } = item;
+    window.removeEventListener('message', listener);
+    clearTimeout(timeoutId);
+    pageScriptListeners.delete(messageId);
+    debugLog(`清理 page script 監聽器: ${messageId}`);
+  }
+}
+
+/**
+ * 檢查 page script 是否可用
+ * @returns {boolean}
+ */
+export function isPageScriptAvailable() {
+  return !!(window.subpalPageScript);
+}
+
+/**
+ * 等待 page script 可用
+ * @param {number} timeout - 超時時間（毫秒）
+ * @returns {Promise<boolean>}
+ */
+export function waitForPageScript(timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    if (isPageScriptAvailable()) {
+      resolve(true);
+      return;
+    }
+
+    let checkCount = 0;
+    const maxChecks = timeout / 500;
+    
+    const checkInterval = setInterval(() => {
+      checkCount++;
+      if (isPageScriptAvailable()) {
+        clearInterval(checkInterval);
+        resolve(true);
+      } else if (checkCount >= maxChecks) {
+        clearInterval(checkInterval);
+        reject(new Error('Page script 載入超時'));
+      }
+    }, 500);
+  });
+}
+
+/**
+ * 請求注入 page script
+ * @returns {Promise<void>}
+ */
+export function requestPageScriptInjection() {
+  debugLog('請求注入 page script');
+  
+  return new Promise((resolve, reject) => {
+    // 檢查是否已經存在
+    if (isPageScriptAvailable()) {
+      debugLog('Page script 已存在');
+      resolve();
+      return;
+    }
+
+    // 觸發注入事件
+    const event = new CustomEvent('subpal-inject-page-script', {
+      detail: { timestamp: Date.now() }
+    });
+    window.dispatchEvent(event);
+
+    // 等待注入完成
+    waitForPageScript(10000)
+      .then(() => {
+        debugLog('Page script 注入成功');
+        resolve();
+      })
+      .catch(reject);
+  });
 }
