@@ -453,7 +453,12 @@ async function sendToAPI(url, body, method = 'POST') { // 允許指定方法，�
       let errorDetails = {};
       try {
         const errJson = await res.json();
-        errorMsg = errJson.error || errorMsg;
+        // 正確處理錯誤訊息格式
+        if (errJson.error && typeof errJson.error === 'object' && errJson.error.message) {
+          errorMsg = errJson.error.message;
+        } else if (typeof errJson.error === 'string') {
+          errorMsg = errJson.error;
+        }
         errorDetails = errJson;
       } catch (e) {
         if (isDebugModeEnabled) console.log('[API Module] Failed to parse API error response as JSON.');
