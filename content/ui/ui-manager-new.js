@@ -195,13 +195,39 @@ class UIManager {
     if (!this.currentSubtitle) {
       return true; // 首次顯示
     }
-    
-    // 檢查關鍵屬性是否有變化
+
+    // 檢查主要文本是否有變化
     const hasTextChanged = this.currentSubtitle.text !== newSubtitleData.text;
+
+    // 檢查雙語字幕的次要文本是否有變化
+    const hasSecondaryTextChanged = this.hasSecondaryTextChanged(
+      this.currentSubtitle.dualSubtitleData,
+      newSubtitleData.dualSubtitleData
+    );
+
+    // 檢查位置是否有變化
     const hasPositionChanged = this.hasPositionChanged(this.currentSubtitle.position, newSubtitleData.position);
-    const hasTimestampChanged = Math.abs(this.currentSubtitle.timestamp - newSubtitleData.timestamp) > 0.5; // 超過 0.5 秒算變化
-    
-    return hasTextChanged || hasPositionChanged || hasTimestampChanged;
+
+    // 檢查時間戳是否有顯著變化（超過 0.5 秒）
+    const hasTimestampChanged = Math.abs(this.currentSubtitle.timestamp - newSubtitleData.timestamp) > 0.5;
+
+    return hasTextChanged || hasSecondaryTextChanged || hasPositionChanged || hasTimestampChanged;
+  }
+
+  // 檢查雙語字幕的次要文本是否有變化
+  hasSecondaryTextChanged(oldDualData, newDualData) {
+    // 如果兩者都不存在，則沒有變化
+    if (!oldDualData && !newDualData) {
+      return false;
+    }
+
+    // 如果只有一個存在，則有變化
+    if (!oldDualData || !newDualData) {
+      return true;
+    }
+
+    // 檢查次要字幕文本是否有變化
+    return oldDualData.secondaryText !== newDualData.secondaryText;
   }
 
   // 檢查位置是否有顯著變化

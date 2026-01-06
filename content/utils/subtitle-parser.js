@@ -186,7 +186,7 @@ class SubtitleParser {
   /**
    * 根據時間查找字幕
    */
-  findSubtitleByTime(subtitles, currentTime, tolerance = 0.1) {
+  findSubtitleByTime(subtitles, currentTime, tolerance = 0.005) {
     if (!subtitles || subtitles.length === 0) return null;
     
     for (const subtitle of subtitles) {
@@ -258,7 +258,7 @@ class SubtitleParser {
   /**
    * 使用時間索引快速查找字幕
    */
-  findSubtitleByTimeIndex(timeIndex, currentTime, tolerance = 0.1) {
+  findSubtitleByTimeIndex(timeIndex, currentTime, tolerance = 0.005) {
     const timeInterval = 10; // 與建立索引時相同的間隔
     const interval = Math.floor(currentTime / timeInterval);
     const candidates = timeIndex.get(interval) || [];

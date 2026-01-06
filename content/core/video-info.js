@@ -404,9 +404,8 @@ class VideoInfoManager {
             try {
                 const currentTimeMs = this.videoPlayer.getCurrentTime();
                 if (typeof currentTimeMs === 'number' && currentTimeMs >= 0) {
-                    // Netflix API 返回毫秒，轉換為秒並保留一位小數
-                    const currentTimeSec = currentTimeMs / 1000;
-                    return Math.round(currentTimeSec * 10) / 10;
+                    // Netflix API 返回毫秒，轉換為秒（保持完整精度）
+                    return currentTimeMs / 1000;
                 }
             } catch (error) {
                 this.debugLog('從 Netflix API 獲取時間戳失敗:', error);
@@ -415,7 +414,7 @@ class VideoInfoManager {
         
         // 方法 2: 從視頻元素獲取（後備）
         if (this.videoElement) {
-            return Math.round(this.videoElement.currentTime * 10) / 10;
+            return this.videoElement.currentTime;
         }
         
         // 方法 3: 如果還沒初始化完成，嘗試立即查找視頻元素
@@ -424,14 +423,14 @@ class VideoInfoManager {
             for (const video of videos) {
                 if (!video.paused && video.currentTime > 0) {
                     this.debugLog('緊急查找到播放中的視頻元素');
-                    return Math.round(video.currentTime * 10) / 10;
+                    return video.currentTime;
                 }
             }
             // 如果沒有播放中的，使用最後一個視頻元素
             if (videos.length > 0) {
                 const lastVideo = videos[videos.length - 1];
                 this.debugLog('緊急使用最後一個視頻元素');
-                return Math.round(lastVideo.currentTime * 10) / 10;
+                return lastVideo.currentTime;
             }
         }
         
