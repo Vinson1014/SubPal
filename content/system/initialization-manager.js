@@ -13,7 +13,7 @@ class InitializationManager {
     this.isInitialized = false;
     this.initializationSteps = [];
     this.currentStep = 0;
-    this.debug = true;
+    this.debug = false; // 將由 ConfigBridge 設置
     
     // 初始化狀態
     this.state = {
@@ -46,6 +46,13 @@ class InitializationManager {
         description: '初始化消息傳遞系統',
         handler: this.initializeMessaging.bind(this),
         timeout: 2000,
+        retryable: true
+      },
+      {
+        name: 'configBridge',
+        description: '初始化配置橋接器',
+        handler: this.initializeConfigBridge.bind(this),
+        timeout: 3000,
         retryable: true
       },
       {
@@ -112,11 +119,19 @@ class InitializationManager {
       if (!messagingSuccess) {
         throw new Error('消息傳遞系統初始化失敗');
       }
-      
-      // 階段 2: 並行執行 pageScript 和 configuration
-      this.log('階段 2: 並行執行 pageScript 和 configuration');
-      const pageScriptStep = this.initializationSteps[1];
-      const configStep = this.initializationSteps[4]; // configuration 現在是第5步
+
+      // 階段 2: 初始化配置橋接器（必須在其他模組前完成）
+      this.log('階段 2: 初始化配置橋接器');
+      const configBridgeStep = this.initializationSteps[1];
+      const configBridgeSuccess = await this.executeStep(configBridgeStep);
+      if (!configBridgeSuccess) {
+        throw new Error('配置橋接器初始化失敗');
+      }
+
+      // 階段 3: 並行執行 pageScript 和 configuration
+      this.log('階段 3: 並行執行 pageScript 和 configuration');
+      const pageScriptStep = this.initializationSteps[2];
+      const configStep = this.initializationSteps[5]; // configuration 現在是第6步
       
       const [pageScriptSuccess, configSuccess] = await Promise.all([
         this.executeStep(pageScriptStep),
@@ -130,33 +145,33 @@ class InitializationManager {
         throw new Error('配置載入失敗');
       }
       
-      // 階段 3: 等待播放頁面（依賴 netflixAPI）
-      this.log('階段 3: 等待播放頁面');
-      const waitForPlaybackStep = this.initializationSteps[2];
+      // 階段 4: 等待播放頁面（依賴 netflixAPI）
+      this.log('階段 4: 等待播放頁面');
+      const waitForPlaybackStep = this.initializationSteps[3];
       const waitForPlaybackSuccess = await this.executeStep(waitForPlaybackStep);
       if (!waitForPlaybackSuccess) {
         throw new Error('等待播放頁面失敗');
       }
 
-      // 階段 4: 檢查 Netflix API（依賴 pageScript）
-      this.log('階段 4: 檢查 Netflix API');
-      const netflixAPIStep = this.initializationSteps[3];
+      // 階段 5: 檢查 Netflix API（依賴 pageScript）
+      this.log('階段 5: 檢查 Netflix API');
+      const netflixAPIStep = this.initializationSteps[4];
       const netflixAPISuccess = await this.executeStep(netflixAPIStep);
       if (!netflixAPISuccess) {
         throw new Error('Netflix API 初始化失敗');
       }
-      
-      // 階段 5: 初始化組件（依賴 waitForPlayback 和 configuration）
-      this.log('階段 5: 初始化組件');
-      const componentsStep = this.initializationSteps[5];
+
+      // 階段 6: 初始化組件（依賴 waitForPlayback 和 configuration）
+      this.log('階段 6: 初始化組件');
+      const componentsStep = this.initializationSteps[6];
       const componentsSuccess = await this.executeStep(componentsStep);
       if (!componentsSuccess) {
         throw new Error('組件初始化失敗');
       }
-      
-      // 階段 6: 整合和啟動（依賴 components）
-      this.log('階段 6: 整合和啟動');
-      const integrationStep = this.initializationSteps[6];
+
+      // 階段 7: 整合和啟動（依賴 components）
+      this.log('階段 7: 整合和啟動');
+      const integrationStep = this.initializationSteps[7];
       const integrationSuccess = await this.executeStep(integrationStep);
       if (!integrationSuccess) {
         throw new Error('系統整合失敗');
@@ -224,22 +239,19 @@ class InitializationManager {
    */
   async initializeMessaging() {
     this.log('初始化消息傳遞系統...');
-    
+
     try {
       // 動態導入 messaging 模塊
       const messagingModule = await import('./messaging.js');
-      
+
       // 初始化 messaging 系統
       if (messagingModule.initMessaging) {
         messagingModule.initMessaging();
       }
-      
-      // 等待調試模式設置載入
-      await this.waitForDebugMode();
-      
+
       this.state.messagingReady = true;
       return true;
-      
+
     } catch (error) {
       console.error('初始化消息傳遞系統失敗:', error);
       throw error;
@@ -247,7 +259,43 @@ class InitializationManager {
   }
 
   /**
-   * 步驟2: 注入和初始化 Page Script
+   * 步驟2: 初始化配置橋接器
+   */
+  async initializeConfigBridge() {
+    this.log('初始化 ConfigBridge...');
+
+    try {
+      // 動態導入 ConfigBridge（單例）
+      const { configBridge } = await import('./config/config-bridge.js');
+
+      // 初始化 ConfigBridge（會從 content.js 獲取所有配置）
+      await configBridge.initialize();
+      this.log('ConfigBridge 初始化完成');
+
+      // 從 ConfigBridge 讀取 debug mode
+      this.debug = configBridge.get('debugMode');
+      this.log(`調試模式設置為: ${this.debug}`);
+
+      // 訂閱 debugMode 變更
+      configBridge.subscribe('debugMode', (key, newValue, oldValue) => {
+        this.debug = newValue;
+        this.log(`調試模式已更新: ${oldValue} -> ${newValue}`);
+      });
+
+      // 保存 configBridge 實例供其他方法使用
+      this.configBridge = configBridge;
+
+      this.state.configLoaded = true;
+      return true;
+
+    } catch (error) {
+      console.error('ConfigBridge 初始化失敗:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * 步驟3: 注入和初始化 Page Script
    */
   async initializePageScript() {
     this.log('注入和初始化 Page Script...');
@@ -275,7 +323,7 @@ class InitializationManager {
   }
 
   /**
-   * 步驟3: 檢查 Netflix API 可用性並初始化播放器助手
+   * 步驟4: 檢查 Netflix API 可用性並初始化播放器助手
    */
   async checkNetflixAPI() {
     this.log('檢查 Netflix API 可用性並初始化播放器助手...');
@@ -337,7 +385,7 @@ class InitializationManager {
   }
 
   /**
-   * 步驟4: 等待用戶進入播放頁面
+   * 步驟5: 等待用戶進入播放頁面
    */
   async waitForPlaybackPage() {
     // 設置視頻監控
@@ -363,24 +411,20 @@ class InitializationManager {
   }
 
   /**
-   * 步驟5: 載入配置和設置
+   * 步驟6: 載入配置和設置
    */
   async loadConfiguration() {
     this.log('載入配置和設置...');
-    
+
     try {
-      // 載入調試模式設置
-      await this.loadDebugMode();
-      
       // 初始化雙語字幕配置
       const { dualSubtitleConfig } = await import('../config/dual-subtitle-config.js');
       await dualSubtitleConfig.initialize();
       this.components.dualSubtitleConfig = dualSubtitleConfig;
-      
+
       this.log('配置載入完成');
-      this.state.configLoaded = true;
       return true;
-      
+
     } catch (error) {
       console.error('配置載入失敗:', error);
       throw error;
@@ -388,7 +432,7 @@ class InitializationManager {
   }
 
   /**
-   * 步驟6: 初始化核心組件
+   * 步驟7: 初始化核心組件
    */
   async initializeComponents() {
     this.log('初始化核心組件...');
@@ -445,15 +489,12 @@ class InitializationManager {
    */
   async initializeSubtitleCoordinatorSafely() {
     this.log('安全初始化字幕協調器...');
-    
+
     const coordinator = this.components.subtitleCoordinator;
-    
+
     // 設置基本狀態
     coordinator.uiManager = this.components.uiManager;
-    
-    // 載入調試模式設置
-    await coordinator.loadDebugMode();
-    
+
     // 設置事件處理器
     coordinator.setupEventHandlers();
     
@@ -503,7 +544,7 @@ class InitializationManager {
   }
 
   /**
-   * 步驟7: 整合和啟動系統
+   * 步驟8: 整合和啟動系統
    */
   async integrateAndStart() {
     this.log('整合和啟動系統...');
@@ -640,32 +681,6 @@ class InitializationManager {
     }).catch(error => {
       console.warn('通知後台初始化完成失敗:', error);
     });
-  }
-
-  /**
-   * 等待調試模式設置
-   */
-  async waitForDebugMode() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode']
-      });
-      
-      if (result && result.debugMode !== undefined) {
-        this.debug = result.debugMode;
-        this.log(`調試模式: ${this.debug}`);
-      }
-    } catch (error) {
-      console.error('載入調試模式設置失敗:', error);
-    }
-  }
-
-  /**
-   * 載入調試模式設置
-   */
-  async loadDebugMode() {
-    await this.waitForDebugMode();
   }
 
   /**

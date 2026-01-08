@@ -13,7 +13,7 @@
  * @module config-bridge
  */
 
-import { sendMessage, onMessage } from '../../utils/messaging.js';
+import { sendMessage, onMessage } from '../messaging.js';
 
 /**
  * ConfigBridge 類

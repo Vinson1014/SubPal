@@ -15,33 +15,45 @@ class SubPalApp {
     this.isInitialized = false;
     this.initializationManager = initializationManager;
     this.components = {};
-    this.debug = true;
+    this.debug = false; // 將由 ConfigBridge 設置
   }
 
   async initialize() {
     this.log('SubPal 應用初始化中...');
-    
+
     try {
       // 檢查環境
       if (!this.checkEnvironment()) {
         throw new Error('環境檢查失敗');
       }
-      
-      // 使用統一初始化管理器
+
+      // 使用統一初始化管理器（已包含 ConfigBridge 初始化）
       const success = await this.initializationManager.initialize();
-      
+
       if (!success) {
         throw new Error('統一初始化流程失敗');
       }
-      
+
       // 獲取初始化的組件
       this.components = this.initializationManager.getComponents();
-      
+
+      // 從 ConfigBridge 讀取 debug mode
+      // ConfigBridge 已經在 initialization-manager 中初始化
+      const { configBridge } = await import('./system/config/config-bridge.js');
+      this.debug = configBridge.get('debugMode');
+      this.log(`調試模式設置為: ${this.debug}`);
+
+      // 訂閱 debugMode 變更
+      configBridge.subscribe('debugMode', (key, newValue, oldValue) => {
+        this.debug = newValue;
+        this.log(`調試模式已更新: ${oldValue} -> ${newValue}`);
+      });
+
       this.isInitialized = true;
       this.log('SubPal 應用初始化完成');
-      
+
       return true;
-      
+
     } catch (error) {
       console.error('SubPal 應用初始化失敗:', error);
       this.handleInitializationError(error);
