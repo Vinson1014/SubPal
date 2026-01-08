@@ -21,6 +21,223 @@
   let initialDebugMode = false; // 預設值
   let messageCounter = 0; // 用於生成唯一訊息 ID 的計數器
   let backgroundPort = null; // 長連接 port
+  let configManager = null; // ConfigManager 實例
+
+  // 初始化 ConfigManager
+  async function initializeConfigManager() {
+    try {
+      debugLog('開始初始化 ConfigManager...');
+
+      // 動態導入 ConfigManager
+      const { ConfigManager } = await import(chrome.runtime.getURL('content/system/config/config-manager.js'));
+
+      // 創建實例
+      configManager = new ConfigManager({ debug: debugMode });
+
+      // 初始化
+      await configManager.initialize();
+
+      // 訂閱配置變更，廣播到 page context
+      // 這裡不訂閱特定 key，而是在 ConfigManager 內部處理變更通知
+      // 當配置變更時，通過 window event 廣播
+
+      debugLog('ConfigManager 初始化完成');
+      return true;
+    } catch (error) {
+      console.error('[Content Script] ConfigManager 初始化失敗:', error);
+      return false;
+    }
+  }
+
+  // 處理配置相關訊息
+  function handleConfigMessage(messageId, message) {
+    if (!configManager) {
+      debugLog('ConfigManager 尚未初始化，回應錯誤');
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            success: false,
+            error: 'ConfigManager not initialized'
+          }
+        }
+      }));
+      return;
+    }
+
+    // 處理不同類型的配置訊息
+    switch (message.type) {
+      case 'CONFIG_GET_ALL':
+        handleConfigGetAll(messageId);
+        break;
+
+      case 'CONFIG_GET':
+        handleConfigGet(messageId, message.key);
+        break;
+
+      case 'CONFIG_SET':
+        handleConfigSet(messageId, message.key, message.value);
+        break;
+
+      case 'CONFIG_SET_MULTIPLE':
+        handleConfigSetMultiple(messageId, message.items);
+        break;
+
+      default:
+        debugLog('未知的配置訊息類型:', message.type);
+        window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+          detail: {
+            messageId: messageId,
+            response: {
+              success: false,
+              error: `Unknown config message type: ${message.type}`
+            }
+          }
+        }));
+    }
+  }
+
+  // CONFIG_GET_ALL 處理
+  async function handleConfigGetAll(messageId) {
+    try {
+      const config = configManager.getAll();
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            success: true,
+            config: config
+          }
+        }
+      }));
+    } catch (error) {
+      debugLog('CONFIG_GET_ALL 失敗:', error);
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            success: false,
+            error: error.message
+          }
+        }
+      }));
+    }
+  }
+
+  // CONFIG_GET 處理
+  async function handleConfigGet(messageId, key) {
+    try {
+      const value = configManager.get(key);
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            success: true,
+            value: value
+          }
+        }
+      }));
+    } catch (error) {
+      debugLog('CONFIG_GET 失敗:', error);
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            success: false,
+            error: error.message
+          }
+        }
+      }));
+    }
+  }
+
+  // CONFIG_SET 處理
+  async function handleConfigSet(messageId, key, value) {
+    try {
+      const oldValue = configManager.get(key);
+      await configManager.set(key, value);
+
+      // 廣播配置變更到 page context
+      window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+        detail: {
+          message: {
+            type: 'CONFIG_CHANGED',
+            key: key,
+            newValue: value,
+            oldValue: oldValue
+          }
+        }
+      }));
+
+      // 回應成功
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            success: true
+          }
+        }
+      }));
+    } catch (error) {
+      debugLog('CONFIG_SET 失敗:', error);
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            success: false,
+            error: error.message
+          }
+        }
+      }));
+    }
+  }
+
+  // CONFIG_SET_MULTIPLE 處理
+  async function handleConfigSetMultiple(messageId, items) {
+    try {
+      const oldValues = {};
+      for (const key of Object.keys(items)) {
+        oldValues[key] = configManager.get(key);
+      }
+
+      await configManager.setMultiple(items);
+
+      // 廣播每個配置變更到 page context
+      for (const [key, newValue] of Object.entries(items)) {
+        window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+          detail: {
+            message: {
+              type: 'CONFIG_CHANGED',
+              key: key,
+              newValue: newValue,
+              oldValue: oldValues[key]
+            }
+          }
+        }));
+      }
+
+      // 回應成功
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            success: true
+          }
+        }
+      }));
+    } catch (error) {
+      debugLog('CONFIG_SET_MULTIPLE 失敗:', error);
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            success: false,
+            error: error.message
+          }
+        }
+      }));
+    }
+  }
 
   // 建立到 background script 的長連接
   function connectToBackground() {
@@ -121,12 +338,21 @@
     const { messageId, message } = event.detail;
     debugLog('Received from page:', messageId, message);
 
+    // 檢查是否為配置相關訊息（由 content script 處理，不轉發到 background）
+    const configMessages = ['CONFIG_GET_ALL', 'CONFIG_GET', 'CONFIG_SET', 'CONFIG_SET_MULTIPLE'];
+
+    if (configMessages.includes(message.type)) {
+      debugLog('處理配置訊息:', message.type);
+      handleConfigMessage(messageId, message);
+      return;
+    }
+
     // 檢查是否為內部消息（不需要發送到 background）
     const internalMessages = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED'];
-    
+
     if (internalMessages.includes(message.type)) {
       debugLog('處理內部消息:', message.type);
-      
+
       // 將內部消息分發給 page context 模組
       window.dispatchEvent(new CustomEvent('messageFromContentScript', {
         detail: {
@@ -134,7 +360,7 @@
           message: message
         }
       }));
-      
+
       // 內部消息不需要回應，直接返回
       return;
     }
@@ -204,6 +430,15 @@
 
   // 建立初始連接
   connectToBackground();
+
+  // 初始化 ConfigManager
+  initializeConfigManager().then(success => {
+    if (success) {
+      debugLog('ConfigManager 初始化成功');
+    } else {
+      console.error('[Content Script] ConfigManager 初始化失敗');
+    }
+  });
 
   debugLog('Message bridge initialized.');
 })();
