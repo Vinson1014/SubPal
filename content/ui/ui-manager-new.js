@@ -148,7 +148,6 @@ class UIManager {
         // 攔截模式：位置已在 subtitle-interceptor.js 中計算完成
         this.log('攔截模式：使用預計算位置', {
           position: processedSubtitle.position,
-          region: processedSubtitle.originalData.region
         });
       } else if (processedSubtitle.mode === 'dom') {
         // DOM監聽模式：直接使用原生字幕位置

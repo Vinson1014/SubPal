@@ -28,18 +28,35 @@
     try {
       debugLog('開始初始化 ConfigManager...');
 
-      // 動態導入 ConfigManager
+      // 動態導入 ConfigManager 和 getAllConfigKeys
       const { ConfigManager } = await import(chrome.runtime.getURL('content/system/config/config-manager.js'));
-
+      const { getAllConfigKeys } = await import(chrome.runtime.getURL('content/system/config/config-schema.js'));
       // 創建實例
       configManager = new ConfigManager({ debug: debugMode });
 
       // 初始化
       await configManager.initialize();
 
-      // 訂閱配置變更，廣播到 page context
-      // 這裡不訂閱特定 key，而是在 ConfigManager 內部處理變更通知
-      // 當配置變更時，通過 window event 廣播
+      // 訂閱所有配置變更，統一轉發到 page context
+      // 當 Options Page 直接修改 storage 時，ConfigManager 會收到通知
+      // 這裡訂閱所有配置的變更，並轉發為 CONFIG_CHANGED 消息
+      const allConfigKeys = getAllConfigKeys();
+      configManager.subscribe(allConfigKeys, (key, newValue, oldValue) => {
+        debugLog('ConfigManager 配置變更:', key, newValue, oldValue);
+
+        // 轉發 CONFIG_CHANGED 消息到 page context
+        // 利用原本設計好的 messaging system
+        window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+          detail: {
+            message: {
+              type: 'CONFIG_CHANGED',
+              key: key,
+              newValue: newValue,
+              oldValue: oldValue
+            }
+          }
+        }));
+      });
 
       debugLog('ConfigManager 初始化完成');
       return true;

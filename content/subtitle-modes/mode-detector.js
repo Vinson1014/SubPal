@@ -12,7 +12,7 @@ import { sendMessageToPageScript, requestPageScriptInjection, sendMessage, regis
 
 class ModeDetector {
   constructor() {
-    this.debug = true;
+    this.debug = false; // 從 ConfigBridge 讀取
     this.apiCheckTimeout = 5000; // 5秒超時
     this.retryCount = 0;
     this.maxRetries = 3;
@@ -22,17 +22,23 @@ class ModeDetector {
 
   async initialize() {
     this.log('模式檢測器初始化中...');
-    
+
     try {
-      // 載入調試模式設置
-      await this.loadDebugMode();
-      
-      // 設置事件處理器
-      this.setupEventHandlers();
-      
+      // 獲取 ConfigBridge（專為 Page Context 設計）
+      const { configBridge } = await import('../system/config/config-bridge.js');
+
+      // 讀取 debugMode 配置
+      this.debug = configBridge.get('debugMode');
+      this.log(`調試模式: ${this.debug}`);
+
+      // 訂閱 debugMode 變更
+      configBridge.subscribe('debugMode', (newValue) => {
+        this.debug = newValue;
+      });
+
       this.isInitialized = true;
       this.log('模式檢測器初始化完成');
-      
+
     } catch (error) {
       console.error('模式檢測器初始化失敗:', error);
       throw error;
@@ -325,31 +331,6 @@ class ModeDetector {
     this.log('模式檢測器配置已更新:', options);
   }
 
-  // 從存儲中載入調試模式設置
-  async loadDebugMode() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode']
-      });
-      
-      if (result && result.debugMode !== undefined) {
-        this.debug = result.debugMode;
-        this.log(`調試模式: ${this.debug}`);
-      }
-    } catch (error) {
-      console.error('載入調試模式設置時出錯:', error);
-    }
-  }
-
-  // 設置事件處理器
-  setupEventHandlers() {
-    // 監聽調試模式變更
-    registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
-      this.debug = message.debugMode;
-      this.log('調試模式設置已更新:', this.debug);
-    });
-  }
 
   log(message, ...args) {
     if (this.debug) {

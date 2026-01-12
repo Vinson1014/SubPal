@@ -2,6 +2,7 @@
 // 消息傳遞模組 - 抽象層，與 content.js 透過 CustomEvent 通訊
 
 // 註冊的消息處理器
+// 修改為支持多個 handler 的結構：type -> Set<handler>
 const messageHandlers = new Map();
 
 // 註冊的內部事件處理器，支持多個處理函數
@@ -160,21 +161,28 @@ export function initMessaging() {
 
 
     // 處理其他來自 content.js 的內部消息 (如果有的話)
-    const handler = messageHandlers.get(message.type) || messageHandlers.get('*');
-    if (!handler) {
+    // 收集所有匹配的 handler：type-specific + wildcard
+    const typeHandlers = messageHandlers.get(message.type) || new Set();
+    const wildcardHandlers = messageHandlers.get('*') || new Set();
+    const allHandlers = new Set([...typeHandlers, ...wildcardHandlers]);
+
+    if (allHandlers.size === 0) {
       debugLog('無處理器，類型:', message.type);
       // 無法直接 sendResponse，需要透過 content.js 回應
       // 這裡應該是內部消息，通常不需要回應
       return;
     }
 
-    try {
-      // 內部消息處理通常是同步的，或者通過 dispatchInternalEvent 處理
-      // 如果這裡有異步處理，需要考慮如何回應，但目前架構下，
-      // 來自 content.js 的消息主要是 background 的回應或單向通知
-      handler(message, sender); // 執行處理器
-    } catch (err) {
-      console.error('處理內部消息時出錯:', err);
+    // 調用所有匹配的 handler
+    for (const handler of allHandlers) {
+      try {
+        // 內部消息處理通常是同步的，或者通過 dispatchInternalEvent 處理
+        // 如果這裡有異步處理，需要考慮如何回應，但目前架構下，
+        // 來自 content.js 的消息主要是 background 的回應或單向通知
+        handler(message, sender); // 執行處理器
+      } catch (err) {
+        console.error('處理內部消息時出錯:', err);
+      }
     }
   });
 
@@ -354,25 +362,43 @@ export function sendMessage(message) {
 }
 
 /**
- * 註冊消息處理器
+ * 註冊消息處理器（支持多個 handler）
  * @param {string} type - 消息類型，'*' 表示通用處理
  * @param {Function} handler - 處理函數 (message, sender) => result|Promise
+ * @returns {Function} 取消訂閱函數
  */
 export function registerMessageHandler(type, handler) {
   if (!type || typeof handler !== 'function') {
     console.error('registerMessageHandler 參數錯誤', type, handler);
-    return;
+    return () => {};
   }
-  messageHandlers.set(type, handler);
-  debugLog('註冊處理器', type);
+
+  // 如果該類型還沒有 handler set，創建一個
+  if (!messageHandlers.has(type)) {
+    messageHandlers.set(type, new Set());
+  }
+
+  // 添加 handler 到 set
+  messageHandlers.get(type).add(handler);
+  debugLog('註冊處理器', type, '當前處理器數量:', messageHandlers.get(type).size);
+
+  // 返回取消訂閱函數
+  return () => {
+    const handlers = messageHandlers.get(type);
+    if (handlers) {
+      handlers.delete(handler);
+      debugLog('取消註冊處理器', type, '剩餘處理器數量:', handlers.size);
+    }
+  };
 }
 
 /**
- * 高階接口：註冊通用消息回調
+ * 高階接口：註冊通用消息回調（支持多個訂閱者）
  * @param {Function} callback - (message, sender) => result|Promise
+ * @returns {Function} 取消訂閱函數
  */
 export function onMessage(callback) {
-  registerMessageHandler('*', callback);
+  return registerMessageHandler('*', callback);
 }
 
 // === Page Script 通信功能 ===

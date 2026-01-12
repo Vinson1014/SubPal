@@ -39,32 +39,68 @@ class SubtitleInterceptor {
     this.lastRenderedSubtitle = null;
     this.renderInterval = null;
     
-    // 調試模式
-    this.debug = true;
+    // 調試模式（從 ConfigBridge 讀取）
+    this.debug = false;
   }
 
   async initialize() {
     this.log('字幕攔截模式初始化中...');
-    
+
     try {
-      // 載入調試模式設置
-      await this.loadDebugMode();
-      
-      // 初始化雙語字幕配置
+      // 獲取 ConfigBridge（專為 Page Context 設計）
+      const { configBridge } = await import('../system/config/config-bridge.js');
+      this.configBridge = configBridge;
+
+      // 一次性獲取所有需要的配置（從本地緩存，無需 chrome API）
+      this.debug = configBridge.get('debugMode');
+      this.dualSubtitleEnabled = configBridge.get('subtitle.dualModeEnabled');
+      this.primaryLanguage = configBridge.get('subtitle.primaryLanguage');
+      this.secondaryLanguage = configBridge.get('subtitle.secondaryLanguage');
+
+      this.log(`配置已載入: debug=${this.debug}, dualMode=${this.dualSubtitleEnabled}, primary=${this.primaryLanguage}, secondary=${this.secondaryLanguage}`);
+
+      // 訂閱配置變更（通過 messaging 接收通知）
+      configBridge.subscribe('debugMode', (newValue) => {
+        this.debug = newValue;
+        this.log('調試模式已更新:', newValue);
+      });
+
+      configBridge.subscribe('subtitle.dualModeEnabled', (newValue) => {
+        this.dualSubtitleEnabled = newValue;
+        this.log('雙語字幕開關已更新:', newValue);
+        if (this.isActive) {
+          this.loadInterceptedSubtitles(); // 重新載入字幕
+        }
+      });
+
+      configBridge.subscribe('subtitle.primaryLanguage', (newValue) => {
+        this.primaryLanguage = newValue;
+        this.log('主要語言已更新:', newValue);
+        if (this.isActive) {
+          this.loadInterceptedSubtitles();
+        }
+      });
+
+      configBridge.subscribe('subtitle.secondaryLanguage', (newValue) => {
+        this.secondaryLanguage = newValue;
+        this.log('次要語言已更新:', newValue);
+        if (this.isActive) {
+          this.loadInterceptedSubtitles();
+        }
+      });
+
+      // 初始化雙語字幕配置（保留以確保兼容性）
       await dualSubtitleConfig.initialize();
-      
-      // 載入雙語字幕設置
-      await this.loadDualSubtitleSettings();
-      
+
       // 設置事件處理器
       this.setupEventHandlers();
-      
+
       // 等待播放器準備就緒
       await this.waitForPlayerReady();
-      
+
       this.isInitialized = true;
       this.log('字幕攔截模式初始化完成');
-      
+
     } catch (error) {
       console.error('字幕攔截模式初始化失敗:', error);
       throw error;
@@ -679,14 +715,19 @@ class SubtitleInterceptor {
   // 設置語言配置
   async setLanguages(primaryLanguage, secondaryLanguage) {
     this.log(`設置語言配置: 主要=${primaryLanguage}, 次要=${secondaryLanguage}`);
-    
+
     try {
-      await dualSubtitleConfig.setLanguages(primaryLanguage, secondaryLanguage);
-      
-      // 更新本地設置
+      // 使用 ConfigBridge 設置配置（會自動更新緩存並通知訂閱者）
+      await this.configBridge.setMultiple({
+        'subtitle.primaryLanguage': primaryLanguage,
+        'subtitle.secondaryLanguage': secondaryLanguage
+      });
+
+      // 本地設置會通過訂閱機制自動更新
+      // 但為了避免訂閱回調觸發 loadInterceptedSubtitles 之前就返回，也手動更新
       this.primaryLanguage = primaryLanguage;
       this.secondaryLanguage = secondaryLanguage;
-      
+
       // 如果已經初始化，重新載入字幕
       if (this.isInitialized && this.isActive) {
         this.loadInterceptedSubtitles();
@@ -700,13 +741,15 @@ class SubtitleInterceptor {
   // 設置雙語字幕開關
   async setDualSubtitleEnabled(enabled) {
     this.log(`設置雙語字幕開關: ${enabled}`);
-    
+
     try {
-      await dualSubtitleConfig.setDualSubtitleEnabled(enabled);
-      
-      // 更新本地設置
+      // 使用 ConfigBridge 設置配置（會自動更新緩存並通知訂閱者）
+      await this.configBridge.set('subtitle.dualModeEnabled', enabled);
+
+      // 本地設置會通過訂閱機制自動更新
+      // 但為了避免訂閱回調觸發 loadInterceptedSubtitles 之前就返回，也手動更新
       this.dualSubtitleEnabled = enabled;
-      
+
       // 如果已經初始化，重新載入字幕
       if (this.isInitialized && this.isActive) {
         this.loadInterceptedSubtitles();
@@ -758,49 +801,6 @@ class SubtitleInterceptor {
     this.log('字幕攔截器資源清理完成');
   }
 
-  // 從存儲中載入調試模式設置
-  async loadDebugMode() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode']
-      });
-      
-      if (result && result.debugMode !== undefined) {
-        this.debug = result.debugMode;
-        this.log(`調試模式: ${this.debug}`);
-      }
-    } catch (error) {
-      console.error('載入調試模式設置時出錯:', error);
-    }
-  }
-
-  // 載入雙語字幕設置
-  async loadDualSubtitleSettings() {
-    try {
-      const settings = dualSubtitleConfig.getSettings();
-      
-      this.dualSubtitleEnabled = settings.dualSubtitleEnabled;
-      this.primaryLanguage = settings.primaryLanguage;
-      this.secondaryLanguage = settings.secondaryLanguage;
-      
-      this.log(`雙語字幕設置: 啟用=${this.dualSubtitleEnabled}, 主要語言=${this.primaryLanguage}, 次要語言=${this.secondaryLanguage}`);
-    } catch (error) {
-      console.error('載入雙語字幕設置時出錯:', error);
-    }
-  }
-
-  // 保存雙語字幕設置
-  async saveDualSubtitleSettings() {
-    try {
-      await dualSubtitleConfig.setLanguages(this.primaryLanguage, this.secondaryLanguage);
-      await dualSubtitleConfig.setDualSubtitleEnabled(this.dualSubtitleEnabled);
-      
-      this.log('雙語字幕設置已保存');
-    } catch (error) {
-      console.error('保存雙語字幕設置時出錯:', error);
-    }
-  }
 
   /**
    * 解析緩存鍵，提取語言和 videoID 等信息
@@ -992,52 +992,26 @@ class SubtitleInterceptor {
 
   // 設置事件處理器
   setupEventHandlers() {
-    // 監聽調試模式變更
-    registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
-      this.debug = message.debugMode;
-      this.log('調試模式設置已更新:', this.debug);
-    });
-
-    // 新增：監聽 raw TTML 攔截事件
+    // 監聽 raw TTML 攔截事件
     registerInternalEventHandler('RAW_TTML_INTERCEPTED', (event) => {
       this.handleRawTTMLIntercepted(event);
     });
 
-    // 新增：監聽影片 ID 變化事件
+    // 監聽影片 ID 變化事件
     registerInternalEventHandler('VIDEO_ID_CHANGED', async (event) => {
       const newVideoId = event.newVideoId || event.videoId;
       const oldVideoId = event.oldVideoId;
-      
+
       this.log(`檢測到影片切換: ${oldVideoId} -> ${newVideoId}`);
-      
+
       // 步驟1: 清理舊影片的緩存數據
       this.cleanupOldVideoCache(newVideoId);
-      
+
       // 步驟2: 重新載入字幕數據（覆用現有邏輯）
       // loadInterceptedSubtitles() 已包含完整的緩存檢查、分析和載入流程
       if (this.isActive) {
         this.log('重新載入字幕數據以確保使用正確的字幕檔...');
         await this.loadInterceptedSubtitles();
-      }
-    });
-
-    // 監聽雙語字幕設置變更
-    registerInternalEventHandler('DUAL_SUBTITLE_SETTINGS_CHANGED', (event) => {
-      this.log('雙語字幕設置變更:', event);
-      
-      if (event.dualSubtitleEnabled !== undefined) {
-        this.dualSubtitleEnabled = event.dualSubtitleEnabled;
-      }
-      if (event.primaryLanguage) {
-        this.primaryLanguage = event.primaryLanguage;
-      }
-      if (event.secondaryLanguage) {
-        this.secondaryLanguage = event.secondaryLanguage;
-      }
-      
-      // 如果已經初始化，重新載入字幕
-      if (this.isInitialized && this.isActive) {
-        this.loadInterceptedSubtitles();
       }
     });
   }

@@ -1,18 +1,34 @@
 /**
  * 字幕解析器 - 解析 TTML 格式字幕
- * 
+ *
  * 此模組負責：
  * 1. 解析 TTML 格式字幕
  * 2. 統一時間格式轉換
  * 3. 處理分行和樣式
  * 4. 建立時間索引
  * 5. 提取 region 屬性供動態位置計算使用
- * 
+ *
  * 注意：位置計算已移至 NetflixPlayerAdapter，此處只負責解析
  */
 
-// 調試模式
-let debugMode = true;
+// 調試模式（從 ConfigBridge 同步）
+let debugMode = false;
+
+// 初始化 ConfigBridge 並同步 debugMode
+(async () => {
+  try {
+    const { configBridge } = await import('../system/config/config-bridge.js');
+    debugMode = configBridge.get('debugMode');
+
+    // 訂閱 debugMode 變更
+    configBridge.subscribe('debugMode', (newValue) => {
+      debugMode = newValue;
+    });
+  } catch (error) {
+    // 如果 ConfigBridge 不可用（例如在測試環境），保持默認值
+    console.warn('[SubtitleParser] ConfigBridge 初始化失敗，使用默認 debugMode=false');
+  }
+})();
 
 function debugLog(...args) {
   if (debugMode) {

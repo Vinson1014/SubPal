@@ -26,19 +26,29 @@ class SubtitleCoordinator {
       onError: null
     };
     
-    // 調試模式
-    this.debug = true;
+    // 調試模式（從 ConfigBridge 讀取）
+    this.debug = false;
     this.lastSubtitleData = null;
   }
 
   async initialize(uiManager) {
     this.log('字幕協調器初始化中...');
     this.uiManager = uiManager;
-    
+
     try {
-      // 載入調試模式設置
-      await this.loadDebugMode();
-      
+      // 獲取 ConfigBridge（專為 Page Context 設計）
+      const { configBridge } = await import('../system/config/config-bridge.js');
+
+      // 讀取 debugMode 配置
+      this.debug = configBridge.get('debugMode');
+      this.log(`調試模式: ${this.debug}`);
+
+      // 訂閱 debugMode 變更
+      configBridge.subscribe('debugMode', (newValue) => {
+        this.debug = newValue;
+        this.log('調試模式已更新:', newValue);
+      });
+
       // 設置事件處理器
       this.setupEventHandlers();
       
@@ -307,22 +317,6 @@ class SubtitleCoordinator {
     }
   }
 
-  // 從存儲中載入調試模式設置
-  async loadDebugMode() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode']
-      });
-      
-      if (result && result.debugMode !== undefined) {
-        this.debug = result.debugMode;
-        this.log(`調試模式: ${this.debug}`);
-      }
-    } catch (error) {
-      console.error('載入調試模式設置時出錯:', error);
-    }
-  }
 
   /**
    * 啟動背景攔截器升級重試
@@ -426,11 +420,7 @@ class SubtitleCoordinator {
 
   // 設置事件處理器
   setupEventHandlers() {
-    // 監聽調試模式變更
-    registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
-      this.debug = message.debugMode;
-      this.log('調試模式設置已更新:', this.debug);
-    });
+    // 事件處理器（預留給未來擴展）
   }
 
   log(message, ...args) {

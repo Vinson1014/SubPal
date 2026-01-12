@@ -44,9 +44,9 @@ class SubPalApp {
       this.log(`調試模式設置為: ${this.debug}`);
 
       // 訂閱 debugMode 變更
-      configBridge.subscribe('debugMode', (key, newValue, oldValue) => {
+      configBridge.subscribe('debugMode', (newValue) => {
         this.debug = newValue;
-        this.log(`調試模式已更新: ${oldValue} -> ${newValue}`);
+        this.log(`調試模式已更新: ${newValue}`);
       });
 
       this.isInitialized = true;

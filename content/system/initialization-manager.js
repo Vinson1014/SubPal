@@ -277,9 +277,9 @@ class InitializationManager {
       this.log(`調試模式設置為: ${this.debug}`);
 
       // 訂閱 debugMode 變更
-      configBridge.subscribe('debugMode', (key, newValue, oldValue) => {
+      configBridge.subscribe('debugMode', (newValue) => {
         this.debug = newValue;
-        this.log(`調試模式已更新: ${oldValue} -> ${newValue}`);
+        this.log(`調試模式已更新: ${newValue}`);
       });
 
       // 保存 configBridge 實例供其他方法使用
@@ -494,6 +494,16 @@ class InitializationManager {
 
     // 設置基本狀態
     coordinator.uiManager = this.components.uiManager;
+
+    // 訂閱 debugMode 變更（從 SubtitleCoordinator.initialize 遷移過來）
+    const { configBridge } = await import('./config/config-bridge.js');
+    coordinator.debug = configBridge.get('debugMode');
+    this.log(`SubtitleCoordinator 調試模式: ${coordinator.debug}`);
+
+    configBridge.subscribe('debugMode', (newValue) => {
+      coordinator.debug = newValue;
+      this.log(`SubtitleCoordinator 調試模式已更新: ${newValue}`);
+    });
 
     // 設置事件處理器
     coordinator.setupEventHandlers();

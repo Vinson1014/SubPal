@@ -227,20 +227,20 @@ export class ConfigBridge {
    * 支援細粒度訂閱，只訂閱需要的配置項
    *
    * @param {string|string[]} keys - 配置鍵或鍵陣列
-   * @param {Function} callback - 回調函數 (key, newValue, oldValue) => void
+   * @param {Function} callback - 回調函數 (newValue) => void
    * @returns {Function} 取消訂閱函數
    *
    * @example
    * // 訂閱單個配置
-   * const unsubscribe = configBridge.subscribe('debugMode', (key, newValue, oldValue) => {
-   *   console.log(`${key} 從 ${oldValue} 變更為 ${newValue}`);
+   * const unsubscribe = configBridge.subscribe('debugMode', (newValue) => {
+   *   console.log(`debugMode 變更為 ${newValue}`);
    * });
    *
    * // 訂閱多個配置
    * const unsubscribe = configBridge.subscribe(
    *   ['subtitle.primaryLanguage', 'subtitle.secondaryLanguage'],
-   *   (key, newValue, oldValue) => {
-   *     console.log(`語言設置變更: ${key}`);
+   *   (newValue) => {
+   *     console.log(`語言設置變更`);
    *   }
    * );
    *
@@ -317,7 +317,7 @@ export class ConfigBridge {
 
     for (const callback of callbacks) {
       try {
-        callback(key, newValue, oldValue);
+        callback(newValue);
       } catch (error) {
         this.error(`執行訂閱回調時發生錯誤 (${key}):`, error);
       }

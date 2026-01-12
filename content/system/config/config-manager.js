@@ -437,7 +437,12 @@ export class ConfigManager {
       if (configKey === storageKey || configKey.startsWith(storageKey + '.')) {
         // 更新緩存
         const currentValue = this.cache.get(configKey);
-        const extractedValue = this.extractNestedValue(newValue, configKey.replace(storageKey + '.', ''));
+
+        // 計算正確的 path：
+        // - 如果 configKey === storageKey（頂層配置），path 應該是空字符串
+        // - 如果 configKey 是嵌套配置（如 'subtitle.primaryLanguage'），path 應該是去掉 'subtitle.' 前綴
+        const path = configKey === storageKey ? '' : configKey.replace(storageKey + '.', '');
+        const extractedValue = this.extractNestedValue(newValue, path);
 
         if (extractedValue !== undefined && extractedValue !== currentValue) {
           this.cache.set(configKey, extractedValue);
