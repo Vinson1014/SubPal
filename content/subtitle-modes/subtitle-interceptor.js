@@ -11,7 +11,6 @@
 import { parseSubtitle, findSubtitleByTime, buildTimeIndex, findSubtitleByTimeIndex } from '../utils/subtitle-parser.js';
 import { sendMessageToPageScript, sendMessage, registerInternalEventHandler } from '../system/messaging.js';
 import { getCurrentTimestamp, getVideoId } from '../core/video-info.js';
-import { dualSubtitleConfig } from '../config/dual-subtitle-config.js';
 import { getPlayerAdapter, setRegionConfigs } from '../ui/netflix-player-adapter.js';
 
 class SubtitleInterceptor {
@@ -88,9 +87,6 @@ class SubtitleInterceptor {
           this.loadInterceptedSubtitles();
         }
       });
-
-      // 初始化雙語字幕配置（保留以確保兼容性）
-      await dualSubtitleConfig.initialize();
 
       // 設置事件處理器
       this.setupEventHandlers();

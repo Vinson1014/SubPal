@@ -44,17 +44,38 @@ class SubtitleReplacer {
 
   async initialize() {
     this.log('字幕替換器初始化中...');
-    
+
     try {
-      // 載入設置
-      await this.loadSettings();
-      
+      // 初始化 ConfigBridge 並讀取配置
+      const { configBridge } = await import('../system/config/config-bridge.js');
+
+      // 讀取配置
+      this.debug = configBridge.get('debugMode');
+      this.isEnabled = configBridge.get('isEnabled') !== false; // 默認啟用
+
+      this.log('設置載入完成:', {
+        debug: this.debug,
+        enabled: this.isEnabled
+      });
+
+      // 訂閱配置變更
+      configBridge.subscribe('debugMode', (newValue) => {
+        this.debug = newValue;
+        this.log('調試模式已更新:', this.debug);
+      });
+
+      configBridge.subscribe('isEnabled', (newValue) => {
+        this.setEnabled(newValue);
+      });
+
+      this.configBridge = configBridge;
+
       // 設置事件處理器
       this.setupEventHandlers();
-      
+
       this.isInitialized = true;
       this.log('字幕替換器初始化完成');
-      
+
     } catch (error) {
       console.error('字幕替換器初始化失敗:', error);
       throw error;
@@ -512,63 +533,20 @@ class SubtitleReplacer {
   }
 
   /**
-   * 載入設置
-   */
-  async loadSettings() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode', 'isEnabled', 'isTestModeEnabled', 'testRules']
-      });
-      
-      if (result) {
-        this.debug = result.debugMode || false;
-        this.isEnabled = result.isEnabled !== false; // 默認啟用
-        this.isTestModeEnabled = result.isTestModeEnabled || false;
-        this.testRules = result.testRules || [];
-        
-        this.log('設置載入完成:', {
-          debug: this.debug,
-          enabled: this.isEnabled,
-          testMode: this.isTestModeEnabled,
-          testRulesCount: this.testRules.length
-        });
-      }
-    } catch (error) {
-      console.error('載入設置時出錯:', error);
-    }
-  }
-
-  /**
    * 設置事件處理器
    */
   setupEventHandlers() {
-    // 監聽設置變更
+    // 監聽設置變更（保留用於測試模式等非配置管理的功能）
     registerInternalEventHandler('SETTINGS_CHANGED', (message) => {
       if (message.changes.isTestModeEnabled !== undefined) {
         this.isTestModeEnabled = message.changes.isTestModeEnabled;
         this.log('測試模式設置已更新:', this.isTestModeEnabled);
       }
-      
+
       if (message.changes.testRules) {
         this.testRules = message.changes.testRules || [];
         this.log('測試規則已更新:', this.testRules.length);
       }
-      
-      if (message.changes.isEnabled !== undefined) {
-        this.setEnabled(message.changes.isEnabled);
-      }
-    });
-
-    // 監聽調試模式切換
-    registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
-      this.debug = message.debugMode;
-      this.log('調試模式已更新:', this.debug);
-    });
-
-    // 監聽擴充功能開關
-    registerInternalEventHandler('TOGGLE_EXTENSION', (message) => {
-      this.setEnabled(message.isEnabled);
     });
   }
 

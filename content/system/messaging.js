@@ -100,7 +100,30 @@ function debugLog(...args) {
 }
 
 // 導出初始化函式，由外部調用
-export function initMessaging() {
+export async function initMessaging() {
+  // 初始化 ConfigBridge 並讀取 debugMode
+  try {
+    const { configBridge } = await import('./config/config-bridge.js');
+
+    // ConfigBridge 應該已經在 initialization-manager 初始化
+    if (!configBridge.isInitialized) {
+      await configBridge.initialize();
+    }
+
+    // 讀取 debugMode
+    debugMode = configBridge.get('debugMode');
+    debugLog('初始 debug mode:', debugMode);
+
+    // 訂閱 debugMode 變更
+    configBridge.subscribe('debugMode', (newValue) => {
+      debugMode = newValue;
+      debugLog('Debug mode 已更新:', debugMode);
+    });
+  } catch (error) {
+    console.error('messaging.js 初始化 ConfigBridge 失敗:', error);
+    // 不拋出錯誤，讓 messaging 系統繼續運行
+  }
+
   // 監聽來自 content.js 的消息事件 (用於接收 background 的回應或 content.js 的內部消息)
   window.addEventListener('messageFromContentScript', (event) => {
     const { message, messageId, sender } = event.detail;
@@ -202,15 +225,7 @@ export function initMessaging() {
    });
 
 
-  // 請求初始 debugMode 狀態 (通過新的 sendMessage 機制)
-  sendMessage({ type: 'GET_SETTINGS', keys: ['debugMode'] }).then(res => {
-    if (res?.success && typeof res.debugMode === 'boolean') {
-      debugMode = res.debugMode;
-      debugLog('Initial debug mode:', debugMode);
-    } else {
-       console.warn('Failed to get initial debug mode via sendMessage:', res?.error);
-    }
-  }).catch(err => console.warn('Failed to get initial debug mode via sendMessage (catch):', err));
+  // debugMode 將通過 initMessaging() 初始化
 
 
   // 請求初始連接狀態 (如果 content.js 提供了這個功能)
@@ -530,7 +545,7 @@ export function waitForPageScript(timeout = 10000) {
  */
 export function requestPageScriptInjection() {
   debugLog('請求注入 page script');
-  
+
   return new Promise((resolve, reject) => {
     // 檢查是否已經存在
     if (isPageScriptAvailable()) {
@@ -554,3 +569,4 @@ export function requestPageScriptInjection() {
       .catch(reject);
   });
 }
+

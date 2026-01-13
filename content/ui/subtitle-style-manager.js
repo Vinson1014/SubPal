@@ -1,51 +1,44 @@
 /**
- * 字幕樣式管理器 - 統一管理單語和雙語字幕樣式
- * 
+ * 字幕樣式管理器 - 統一管理單語和雙語字幕樣式（重構版）
+ *
  * 設計理念：
- * 1. 統一配置格式：使用 SubtitleStyleConfig 統一管理所有樣式配置
+ * 1. 配置由 ConfigBridge 管理：不再直接管理配置，只訂閱配置變更
  * 2. 依賴注入模式：接收現有 UIManager 實例，不創建新實例
- * 3. 雙語樣式支持：支持主要和次要語言的獨立樣式配置
+ * 3. 純 UI 樣式應用：專注於將配置轉換為 UI 樣式並應用
  * 4. 預覽功能：為設定頁面提供即時預覽功能
  * 5. 向後兼容：保持與現有樣式系統的完全兼容
  */
 
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
-
-/**
- * 預設樣式配置
- */
-const DEFAULT_SUBTITLE_STYLE_CONFIG = {
-  mode: 'single',  
-  
-  primary: {
-    fontSize: 55,                           // 用戶測試的預設值
-    textColor: '#ffffff',                   
-    backgroundColor: 'rgba(0, 0, 0, 0.75)' // RGBA格式傳遞
-  },
-  
-  secondary: {
-    fontSize: 24,                           // 用戶測試的預設值
-    textColor: '#ffff00',                   // 黃色
-    backgroundColor: 'rgba(0, 0, 0, 0.75)'
-  }
-};
+import { registerInternalEventHandler } from '../system/messaging.js';
 
 class SubtitleStyleManager {
   constructor() {
     this.isInitialized = false;
-    
-    // 當前樣式配置
-    this.currentConfig = { ...DEFAULT_SUBTITLE_STYLE_CONFIG };
-    
+
+    // 當前樣式配置（從 ConfigBridge 讀取）
+    this.currentConfig = {
+      mode: 'single',
+      primary: {
+        fontSize: 55,
+        textColor: '#ffffff',
+        backgroundColor: 'rgba(0, 0, 0, 0.75)'
+      },
+      secondary: {
+        fontSize: 24,
+        textColor: '#ffff00',
+        backgroundColor: 'rgba(0, 0, 0, 0.75)'
+      }
+    };
+
     // UIManager 實例引用（依賴注入）
     this.uiManager = null;
-    
+
     // 調試模式
     this.debug = false;
   }
 
   // === 基礎 ===
-  
+
   /**
    * 初始化字幕樣式管理器
    * @param {Object} uiManager - 現有的 UIManager 實例
@@ -54,125 +47,100 @@ class SubtitleStyleManager {
     if (!uiManager) {
       throw new Error('SubtitleStyleManager 需要 UIManager 實例才能初始化');
     }
-    
+
     this.log('字幕樣式管理器初始化中...');
-    
+
     try {
       // 注入 UIManager 實例
       this.uiManager = uiManager;
-      
-      // 載入用戶設定
-      await this.loadSettings();
-      
+
+      // 初始化 ConfigBridge 並讀取配置
+      const { configBridge } = await import('../system/config/config-bridge.js');
+
+      // 讀取所有樣式配置
+      this.currentConfig.primary.fontSize = configBridge.get('subtitle.style.primary.fontSize');
+      this.currentConfig.primary.textColor = configBridge.get('subtitle.style.primary.textColor');
+      this.currentConfig.primary.backgroundColor = configBridge.get('subtitle.style.primary.backgroundColor');
+      this.currentConfig.secondary.fontSize = configBridge.get('subtitle.style.secondary.fontSize');
+      this.currentConfig.secondary.textColor = configBridge.get('subtitle.style.secondary.textColor');
+      this.currentConfig.secondary.backgroundColor = configBridge.get('subtitle.style.secondary.backgroundColor');
+      this.currentConfig.mode = configBridge.get('subtitle.dualModeEnabled') ? 'dual' : 'single';
+
+      this.debug = configBridge.get('debugMode');
+
+      this.log('樣式配置已載入:', this.currentConfig);
+
+      // 訂閱配置變更
+      const styleKeys = [
+        'subtitle.style.primary.fontSize',
+        'subtitle.style.primary.textColor',
+        'subtitle.style.primary.backgroundColor',
+        'subtitle.style.secondary.fontSize',
+        'subtitle.style.secondary.textColor',
+        'subtitle.style.secondary.backgroundColor',
+        'subtitle.dualModeEnabled',
+        'debugMode'
+      ];
+
+      for (const key of styleKeys) {
+        configBridge.subscribe(key, (newValue) => {
+          this.handleStyleChange(key, newValue);
+        });
+      }
+
+      this.configBridge = configBridge;
+
       // 設置事件處理器
       this.setupEventHandlers();
-      
+
       // 應用當前樣式
       this.applyCurrentStyle();
-      
+
       this.isInitialized = true;
       this.log('字幕樣式管理器初始化完成');
-      
+
     } catch (error) {
       console.error('字幕樣式管理器初始化失敗:', error);
       throw error;
     }
   }
 
-  // === 配置管理 ===
-  
   /**
-   * 載入保存的樣式設定
+   * 處理樣式配置變更
    */
-  async loadSettings() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['subtitleStyleConfig']
-      });
-      
-      if (result && result.subtitleStyleConfig) {
-        const savedConfig = result.subtitleStyleConfig;
-        
-        // 驗證並應用保存的配置
-        if (this.validateConfig(savedConfig)) {
-          this.currentConfig = { ...this.currentConfig, ...savedConfig };
-          this.log('載入用戶樣式配置:', savedConfig);
-        } else {
-          this.log('保存的配置無效，使用預設配置');
-        }
-      }
-    } catch (error) {
-      console.error('載入樣式設定時出錯:', error);
-    }
-  }
+  handleStyleChange(key, newValue) {
+    this.log(`配置變更: ${key} = ${newValue}`);
 
-  /**
-   * 保存樣式設定
-   */
-  async saveSettings() {
-    try {
-      await sendMessage({
-        type: 'SAVE_SETTINGS',
-        settings: {
-          subtitleStyleConfig: this.currentConfig
-        }
-      });
-      
-      this.log('樣式設定已保存');
-    } catch (error) {
-      console.error('保存樣式設定時出錯:', error);
-    }
-  }
+    // 映射配置鍵到 currentConfig
+    const keyMap = {
+      'subtitle.style.primary.fontSize': ['primary', 'fontSize'],
+      'subtitle.style.primary.textColor': ['primary', 'textColor'],
+      'subtitle.style.primary.backgroundColor': ['primary', 'backgroundColor'],
+      'subtitle.style.secondary.fontSize': ['secondary', 'fontSize'],
+      'subtitle.style.secondary.textColor': ['secondary', 'textColor'],
+      'subtitle.style.secondary.backgroundColor': ['secondary', 'backgroundColor'],
+      'subtitle.dualModeEnabled': ['mode'],
+      'debugMode': ['debug']
+    };
 
-  /**
-   * 獲取預設配置
-   */
-  getDefaultConfig() {
-    return { ...DEFAULT_SUBTITLE_STYLE_CONFIG };
-  }
+    const path = keyMap[key];
+    if (!path) return;
 
-  /**
-   * 更新配置
-   * @param {Object} updates - 要更新的配置項
-   */
-  updateConfig(updates) {
-    if (!updates || typeof updates !== 'object') {
-      console.error('無效的配置更新對象');
-      return false;
+    if (path[0] === 'mode') {
+      this.currentConfig.mode = newValue ? 'dual' : 'single';
+    } else if (path[0] === 'debug') {
+      this.debug = newValue;
+    } else {
+      this.currentConfig[path[0]][path[1]] = newValue;
     }
 
-    this.log('更新樣式配置:', updates);
-    
-    // 深度合併配置
-    this.currentConfig = this.mergeConfig(this.currentConfig, updates);
-    
-    // 驗證配置
-    if (!this.validateConfig(this.currentConfig)) {
-      console.error('更新後的配置無效，恢復預設配置');
-      this.currentConfig = { ...DEFAULT_SUBTITLE_STYLE_CONFIG };
-      return false;
-    }
-    
-    return true;
-  }
-
-  /**
-   * 獲取當前配置
-   */
-  getCurrentConfig() {
-    return { ...this.currentConfig };
-  }
-
-  /**
-   * 重置為預設配置
-   */
-  resetToDefaults() {
-    this.log('重置為預設配置');
-    this.currentConfig = { ...DEFAULT_SUBTITLE_STYLE_CONFIG };
+    // 立即應用新樣式
     this.applyCurrentStyle();
-    this.saveSettings();
   }
+
+  // === 配置管理（配置由 ConfigBridge 管理，此類只訂閱變更） ===
+  // 移除 loadSettings(), saveSettings(), updateConfig(), getCurrentConfig()
+  // 配置更新現在通過 ConfigBridge.set() 和自動訂閱處理
 
   // === 樣式應用 ===
   
@@ -298,27 +266,13 @@ class SubtitleStyleManager {
   }
 
   // === 事件處理 ===
-  
+
   /**
    * 設置事件處理器
    */
   setupEventHandlers() {
-    // 監聽來自 options 頁面的樣式更新
-    registerInternalEventHandler('SUBTITLE_STYLE_UPDATED', (event) => {
-      if (event.config) {
-        this.log('接收到樣式更新事件:', event.config);
-        
-        // 更新配置
-        if (this.updateConfig(event.config)) {
-          // 應用新樣式
-          this.applyCurrentStyle();
-          this.log('樣式更新已應用');
-        } else {
-          this.log('樣式更新失敗，配置無效');
-        }
-      }
-    });
-    
+    // 未來可擴展其他事件處理
+    // 樣式配置更新已由 ConfigBridge 訂閱處理
     this.log('事件處理器設置完成');
   }
 
@@ -437,15 +391,7 @@ class SubtitleStyleManager {
       console.log(`[SubtitleStyleManager] ${message}`, ...args);
     }
   }
-  
-  /**
-   * 啟用調試模式
-   * @param {boolean} enabled - 是否啟用調試模式
-   */
-  setDebugMode(enabled) {
-    this.debug = enabled;
-    this.log(`調試模式已${enabled ? '啟用' : '關閉'}`);
-  }
+  // setDebugMode() 移除，debug mode 由 ConfigBridge 管理
 }
 
-export { SubtitleStyleManager, DEFAULT_SUBTITLE_STYLE_CONFIG };
+export { SubtitleStyleManager };

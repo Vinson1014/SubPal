@@ -31,6 +31,7 @@ class NetflixAPIBridge {
     this.retryCount = 0;
     this.maxRetries = 3;
     this.pageScriptInjected = false;
+    this.debug = false; // 將由 ConfigBridge 設置
   }
 
   /**
@@ -38,24 +39,38 @@ class NetflixAPIBridge {
    */
   async initialize() {
     debugLog('初始化Netflix API橋接器...');
-    
+
     try {
-      // 載入調試模式設置
-      await this.loadDebugMode();
-      
+      // 初始化 ConfigBridge 並讀取配置
+      const { configBridge } = await import('./config/config-bridge.js');
+
+      // 讀取 debugMode
+      this.debug = configBridge.get('debugMode');
+      debugMode = this.debug; // 同步更新全局變數
+      debugLog('調試模式設置已載入:', debugMode);
+
+      // 訂閱 debugMode 變更
+      configBridge.subscribe('debugMode', (newValue) => {
+        this.debug = newValue;
+        debugMode = newValue; // 同步更新全局變數
+        debugLog('調試模式已更新:', debugMode);
+      });
+
+      this.configBridge = configBridge;
+
       // 注入page script
       await this.injectPageScript();
-      
+
       // 檢測Netflix API可用性
       this.isAPIAvailable = await this.checkAPIAvailability();
-      
+
       if (this.isAPIAvailable) {
         // 初始化播放器助手
         await this.initializePlayerHelper();
-        
+
         // 初始化字幕攔截器
         await this.initializeSubtitleInterceptor();
-        
+
         this.isInitialized = true;
         debugLog('Netflix API橋接器初始化成功');
         return true;
@@ -277,30 +292,6 @@ class NetflixAPIBridge {
     }
   }
 
-  /**
-   * 載入調試模式設置
-   */
-  async loadDebugMode() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode']
-      });
-      
-      if (result && result.debugMode !== undefined) {
-        debugMode = result.debugMode;
-        debugLog('調試模式設置已載入:', debugMode);
-      }
-    } catch (error) {
-      console.error('載入調試模式設置時出錯:', error);
-    }
-    
-    // 監聽調試模式變更
-    registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
-      debugMode = message.debugMode;
-      debugLog('調試模式已更新:', debugMode);
-    });
-  }
 
   /**
    * 獲取API狀態

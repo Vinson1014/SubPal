@@ -11,7 +11,7 @@ class VideoInfoManager {
     constructor() {
         this.currentVideoId = null;
         this.currentVideoTitle = null;
-        this.debugMode = false;
+        this.debug = false; // 將由 ConfigBridge 設置
         
         // Netflix Player API 相關
         this.playerHelper = null;
@@ -36,56 +36,46 @@ class VideoInfoManager {
      */
     async initialize() {
         if (this.isInitialized) return;
-        
-        console.log('初始化視頻信息模塊...');
-        
-        // 載入調試模式設置
-        await this.loadDebugMode();
-        
-        // 嘗試初始化 Netflix Player API
-        await this.initializeNetflixAPI();
-        
-        // 設置後備視頻元素檢測
-        this.setupVideoElementFallback();
-        
-        // 提取初始視頻信息
-        await this.extractVideoInfo();
-        
-        // 設置定期檢查
-        this.startPeriodicCheck();
-        
-        // 監聽頁面變化
-        this.setupPageChangeListeners();
-        
-        this.isInitialized = true;
-        this.debugLog('視頻信息模塊初始化完成');
-    }
 
-    /**
-     * 載入調試模式設置
-     */
-    async loadDebugMode() {
         try {
-            const result = await sendMessage({
-                type: 'GET_SETTINGS',
-                keys: ['debugMode']
+            console.log('初始化視頻信息模塊...');
+
+            // 初始化 ConfigBridge 並讀取配置
+            const { configBridge } = await import('../system/config/config-bridge.js');
+
+            // 讀取 debugMode
+            this.debug = configBridge.get('debugMode');
+            this.log(`調試模式設置為: ${this.debug}`);
+
+            // 訂閱 debugMode 變更
+            configBridge.subscribe('debugMode', (newValue) => {
+                this.debug = newValue;
+                this.log(`調試模式已更新: ${newValue}`);
             });
-            
-            if (result && result.debugMode !== undefined) {
-                this.debugMode = result.debugMode;
-                this.debugLog('載入調試模式設置:', this.debugMode);
-            }
+
+            this.configBridge = configBridge;
+
+            // 嘗試初始化 Netflix Player API
+            await this.initializeNetflixAPI();
+
+            // 設置後備視頻元素檢測
+            this.setupVideoElementFallback();
+
+            // 提取初始視頻信息
+            await this.extractVideoInfo();
+
+            // 設置定期檢查
+            this.startPeriodicCheck();
+
+            // 監聽頁面變化
+            this.setupPageChangeListeners();
+
+            this.isInitialized = true;
+            this.log('視頻信息模塊初始化完成');
         } catch (error) {
-            console.error('載入調試模式設置時出錯:', error);
+            console.error('VideoInfoManager 初始化失敗:', error);
+            throw error;
         }
-        
-        // 監聽設置變更
-        onMessage((message) => {
-            if (message.type === 'TOGGLE_DEBUG_MODE') {
-                this.debugMode = message.debugMode;
-                this.debugLog('調試模式設置已更新:', this.debugMode);
-            }
-        });
     }
 
     /**
@@ -95,7 +85,7 @@ class VideoInfoManager {
         try {
             // 檢查 Netflix API 是否可用
             if (!window.netflix?.appContext?.state?.playerApp) {
-                this.debugLog('Netflix Player API 不可用，使用後備方案');
+                this.log('Netflix Player API 不可用，使用後備方案');
                 return false;
             }
             
@@ -105,18 +95,18 @@ class VideoInfoManager {
             // 獲取播放會話
             const sessions = this.playerAPI.getOpenPlaybackSessions();
             if (!sessions || sessions.length === 0) {
-                this.debugLog('沒有找到活躍的播放會話');
+                this.log('沒有找到活躍的播放會話');
                 return false;
             }
             
             this.sessionId = sessions[0].sessionId;
             this.videoPlayer = this.playerAPI.videoPlayer.getVideoPlayerBySessionId(this.sessionId);
             
-            this.debugLog('Netflix Player API 初始化成功');
+            this.log('Netflix Player API 初始化成功');
             return true;
             
         } catch (error) {
-            this.debugLog('初始化 Netflix Player API 失敗:', error);
+            this.log('初始化 Netflix Player API 失敗:', error);
             return false;
         }
     }
@@ -153,7 +143,7 @@ class VideoInfoManager {
             if (!video.paused) {
                 this.videoElement = video;
                 this.setupVideoEventListeners(video);
-                this.debugLog('找到播放中的視頻元素作為後備方案');
+                this.log('找到播放中的視頻元素作為後備方案');
                 return;
             }
         }
@@ -161,7 +151,7 @@ class VideoInfoManager {
         // 如果沒有播放中的，選擇最後一個
         this.videoElement = videos[videos.length - 1];
         this.setupVideoEventListeners(this.videoElement);
-        this.debugLog('使用最後一個視頻元素作為後備方案');
+        this.log('使用最後一個視頻元素作為後備方案');
     }
 
     /**
@@ -185,7 +175,7 @@ class VideoInfoManager {
      * 處理視頻播放事件
      */
     handleVideoPlay(event) {
-        this.debugLog('視頻播放事件觸發');
+        this.log('視頻播放事件觸發');
         
         // 更新當前有效的視頻元素
         if (event && event.target) {
@@ -208,7 +198,7 @@ class VideoInfoManager {
      * 處理視頻暫停事件
      */
     handleVideoPause(event) {
-        this.debugLog('視頻暫停事件觸發');
+        this.log('視頻暫停事件觸發');
         
         // 更新當前有效的視頻元素
         if (event && event.target) {
@@ -231,7 +221,7 @@ class VideoInfoManager {
      * 處理視頻跳轉事件
      */
     handleVideoSeeked(event) {
-        this.debugLog('視頻跳轉事件觸發');
+        this.log('視頻跳轉事件觸發');
         
         // 更新當前有效的視頻元素
         if (event && event.target) {
@@ -289,13 +279,13 @@ class VideoInfoManager {
                         }
                     }));
                     
-                    this.debugLog(`視頻切換事件已發送: ${oldVideoId} -> ${videoId}`);
+                    this.log(`視頻切換事件已發送: ${oldVideoId} -> ${videoId}`);
                 } catch (error) {
                     console.error('發送視頻 ID 變動事件失敗:', error);
                 }
             }
             
-            this.debugLog('視頻信息更新:', { videoId, videoTitle });
+            this.log('視頻信息更新:', { videoId, videoTitle });
         }
     }
 
@@ -308,18 +298,18 @@ class VideoInfoManager {
         //     try {
         //         const metadata = this.playerAPI.getActiveVideoMetadata();
         //         if (metadata && metadata.videoId) {
-        //             this.debugLog('從 Netflix API 獲取視頻 ID:', metadata.videoId);
+        //             this.log('從 Netflix API 獲取視頻 ID:', metadata.videoId);
         //             return metadata.videoId.toString();
         //         }
         //     } catch (error) {
-        //         this.debugLog('從 Netflix API 獲取視頻 ID 失敗:', error);
+        //         this.log('從 Netflix API 獲取視頻 ID 失敗:', error);
         //     }
         // }
         
         // 方法 2: 從 URL 提取
         const urlMatch = location.href.match(/netflix\.com\/watch\/(\d+)/);
         if (urlMatch && urlMatch[1]) {
-            this.debugLog('從 URL 提取視頻 ID:', urlMatch[1]);
+            this.log('從 URL 提取視頻 ID:', urlMatch[1]);
             return urlMatch[1];
         }
         
@@ -330,7 +320,7 @@ class VideoInfoManager {
         //     return videoIdFromDOM;
         // }
         
-        this.debugLog('無法提取視頻 ID，使用 unknown');
+        this.log('無法提取視頻 ID，使用 unknown');
         return 'unknown';
     }
 
@@ -367,11 +357,11 @@ class VideoInfoManager {
             try {
                 const metadata = this.playerAPI.getActiveVideoMetadata();
                 if (metadata && metadata.title) {
-                    this.debugLog('從 Netflix API 獲取視頻標題:', metadata.title);
+                    this.log('從 Netflix API 獲取視頻標題:', metadata.title);
                     return metadata.title;
                 }
             } catch (error) {
-                this.debugLog('從 Netflix API 獲取視頻標題失敗:', error);
+                this.log('從 Netflix API 獲取視頻標題失敗:', error);
             }
         }
         
@@ -387,7 +377,7 @@ class VideoInfoManager {
             const element = document.querySelector(selector);
             if (element && element.textContent.trim()) {
                 const title = element.textContent.trim();
-                this.debugLog('從 DOM 獲取視頻標題:', title);
+                this.log('從 DOM 獲取視頻標題:', title);
                 return title;
             }
         }
@@ -408,7 +398,7 @@ class VideoInfoManager {
                     return currentTimeMs / 1000;
                 }
             } catch (error) {
-                this.debugLog('從 Netflix API 獲取時間戳失敗:', error);
+                this.log('從 Netflix API 獲取時間戳失敗:', error);
             }
         }
         
@@ -422,14 +412,14 @@ class VideoInfoManager {
             const videos = document.querySelectorAll('video');
             for (const video of videos) {
                 if (!video.paused && video.currentTime > 0) {
-                    this.debugLog('緊急查找到播放中的視頻元素');
+                    this.log('緊急查找到播放中的視頻元素');
                     return video.currentTime;
                 }
             }
             // 如果沒有播放中的，使用最後一個視頻元素
             if (videos.length > 0) {
                 const lastVideo = videos[videos.length - 1];
-                this.debugLog('緊急使用最後一個視頻元素');
+                this.log('緊急使用最後一個視頻元素');
                 return lastVideo.currentTime;
             }
         }
@@ -446,7 +436,7 @@ class VideoInfoManager {
             try {
                 return this.videoPlayer.isPlaying();
             } catch (error) {
-                this.debugLog('從 Netflix API 獲取播放狀態失敗:', error);
+                this.log('從 Netflix API 獲取播放狀態失敗:', error);
             }
         }
         
@@ -467,7 +457,7 @@ class VideoInfoManager {
         const urlObserver = new MutationObserver(() => {
             if (location.href !== lastUrl) {
                 lastUrl = location.href;
-                this.debugLog('URL 變化，重新檢查視頻信息');
+                this.log('URL 變化，重新檢查視頻信息');
                 setTimeout(() => {
                     this.initializeNetflixAPI();
                     this.extractVideoInfo();
@@ -522,7 +512,7 @@ class VideoInfoManager {
                 }
             });
             
-            this.debugLog('視頻信息已保存到存儲');
+            this.log('視頻信息已保存到存儲');
         } catch (error) {
             console.error('保存視頻信息時出錯:', error);
         }
@@ -531,9 +521,9 @@ class VideoInfoManager {
     /**
      * 調試日誌
      */
-    debugLog(...args) {
-        if (this.debugMode) {
-            console.log('[VideoInfo]', ...args);
+    log(message, ...args) {
+        if (this.debug) {
+            console.log(`[VideoInfo] ${message}`, ...args);
         }
     }
 
@@ -569,7 +559,7 @@ class VideoInfoManager {
     destroy() {
         this.stopPeriodicCheck();
         this.isInitialized = false;
-        this.debugLog('視頻信息模塊已銷毀');
+        this.log('視頻信息模塊已銷毀');
     }
 }
 

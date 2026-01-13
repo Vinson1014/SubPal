@@ -48,20 +48,32 @@ class TranslationManager {
 
   async initialize() {
     this.log('翻譯管理器初始化中...');
-    
+
     try {
-      // 載入設置
-      await this.loadSettings();
-      
+      // 初始化 ConfigBridge 並讀取配置
+      const { configBridge } = await import('../system/config/config-bridge.js');
+
+      // 讀取 debugMode
+      this.debug = configBridge.get('debugMode');
+      this.log(`翻譯管理器初始化完成，調試模式: ${this.debug}`);
+
+      // 訂閱 debugMode 變更
+      configBridge.subscribe('debugMode', (newValue) => {
+        this.debug = newValue;
+        this.log(`調試模式已更新: ${newValue}`);
+      });
+
+      this.configBridge = configBridge;
+
       // 設置事件處理器
       this.setupEventHandlers();
-      
+
       // 處理離線隊列
       await this.processOfflineQueue();
-      
+
       this.isInitialized = true;
       this.log('翻譯管理器初始化完成');
-      
+
     } catch (error) {
       console.error('翻譯管理器初始化失敗:', error);
       throw error;
@@ -465,33 +477,10 @@ class TranslationManager {
   }
 
   /**
-   * 載入設置
-   */
-  async loadSettings() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode']
-      });
-      
-      if (result) {
-        this.debug = result.debugMode || false;
-        this.log('設置載入完成:', { debug: this.debug });
-      }
-    } catch (error) {
-      console.error('載入設置時出錯:', error);
-    }
-  }
-
-  /**
    * 設置事件處理器
    */
   setupEventHandlers() {
-    // 監聽調試模式變更
-    registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
-      this.debug = message.debugMode;
-      this.log('調試模式設置已更新:', this.debug);
-    });
+    // 未來可擴展其他事件處理（目前 debugMode 由 ConfigBridge 處理）
   }
 
   log(message, ...args) {

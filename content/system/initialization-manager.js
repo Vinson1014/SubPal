@@ -417,12 +417,8 @@ class InitializationManager {
     this.log('載入配置和設置...');
 
     try {
-      // 初始化雙語字幕配置
-      const { dualSubtitleConfig } = await import('../config/dual-subtitle-config.js');
-      await dualSubtitleConfig.initialize();
-      this.components.dualSubtitleConfig = dualSubtitleConfig;
-
-      this.log('配置載入完成');
+      // 配置由 ConfigBridge 管理，不再需要單獨初始化
+      this.log('配置載入完成（由 ConfigBridge 管理）');
       return true;
 
     } catch (error) {
