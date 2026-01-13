@@ -53,9 +53,9 @@ class ToastManager {
     this.maxConcurrentToasts = 3; // 最大同時顯示數量
     this.defaultDuration = 3000; // 默認顯示時間（3秒，比舊版稍長）
     
-    // 調試模式
+    // 調試模式（將由 ConfigBridge 設置）
     this.debug = false;
-    
+
     // 容器配置
     this.containerConfig = {
       top: '30px', // 保持與舊版一致的位置
@@ -65,10 +65,23 @@ class ToastManager {
 
   async initialize() {
     this.log('Toast 管理器初始化中...');
-    
+
     try {
-      // 載入調試模式設置
-      await this.loadDebugMode();
+      // 導入 ConfigBridge（專為 Page Context 設計）
+      const { configBridge } = await import('../system/config/config-bridge.js');
+
+      // 從 ConfigBridge 讀取配置
+      this.debug = configBridge.get('debugMode');
+      this.log(`調試模式設置為: ${this.debug}`);
+
+      // 訂閱配置變更
+      configBridge.subscribe('debugMode', (newValue) => {
+        this.debug = newValue;
+        this.log(`調試模式已更新: ${newValue}`);
+      });
+
+      // 保存 ConfigBridge 實例
+      this.configBridge = configBridge;
       
       // 設置事件處理器
       this.setupEventHandlers();
@@ -370,30 +383,9 @@ class ToastManager {
     this.log('Toast 管理器資源清理完成');
   }
 
-  // 從存儲中載入調試模式設置
-  async loadDebugMode() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode']
-      });
-      
-      if (result && result.debugMode !== undefined) {
-        this.debug = result.debugMode;
-        this.log(`調試模式: ${this.debug}`);
-      }
-    } catch (error) {
-      console.error('載入調試模式設置時出錯:', error);
-    }
-  }
-
   // 設置事件處理器
   setupEventHandlers() {
-    // 監聽調試模式變更
-    registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
-      this.debug = message.debugMode;
-      this.log('調試模式設置已更新:', this.debug);
-    });
+    // 配置變更已通過 ConfigBridge 訂閱處理
   }
 
   log(message, ...args) {

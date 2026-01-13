@@ -47,17 +47,88 @@ class SubtitleDisplay {
       maxWidth: '100%'
     };
     
-    // 調試模式
+    // 調試模式（將由 ConfigBridge 設置）
     this.debug = false;
   }
 
   async initialize() {
     this.log('字幕顯示組件初始化中...');
-    
+
     try {
-      // 載入調試模式設置
-      await this.loadDebugMode();
-      
+      // 導入 ConfigBridge（專為 Page Context 設計）
+      const { configBridge } = await import('../system/config/config-bridge.js');
+
+      // 從 ConfigBridge 讀取配置（從本地緩存，無需 chrome API）
+      this.debug = configBridge.get('debugMode');
+      this.log(`調試模式設置為: ${this.debug}`);
+
+      // 讀取所有字幕樣式配置
+      const primaryFontSize = configBridge.get('subtitle.style.primary.fontSize');
+      const primaryTextColor = configBridge.get('subtitle.style.primary.textColor');
+      const primaryBgColor = configBridge.get('subtitle.style.primary.backgroundColor');
+      const secondaryFontSize = configBridge.get('subtitle.style.secondary.fontSize');
+      const secondaryTextColor = configBridge.get('subtitle.style.secondary.textColor');
+      const secondaryBgColor = configBridge.get('subtitle.style.secondary.backgroundColor');
+      const fontFamily = configBridge.get('subtitle.style.fontFamily');
+
+      // 更新字幕樣式對象
+      this.subtitleStyle.fontSize = `${primaryFontSize}px`;
+      this.subtitleStyle.color = primaryTextColor;
+      this.subtitleStyle.backgroundColor = primaryBgColor;
+      this.subtitleStyle.fontFamily = fontFamily;
+
+      this.log('字幕樣式配置已載入:', this.subtitleStyle);
+
+      // 訂閱配置變更
+      configBridge.subscribe('debugMode', (newValue) => {
+        this.debug = newValue;
+        this.log('調試模式已更新:', newValue);
+      });
+
+      // 訂閱主要字幕樣式變更
+      configBridge.subscribe('subtitle.style.primary.fontSize', (newValue) => {
+        this.subtitleStyle.fontSize = `${newValue}px`;
+        this.log('主要字幕字體大小已更新:', newValue);
+        this.applyStyles();
+      });
+
+      configBridge.subscribe('subtitle.style.primary.textColor', (newValue) => {
+        this.subtitleStyle.color = newValue;
+        this.log('主要字幕字體顏色已更新:', newValue);
+        this.applyStyles();
+      });
+
+      configBridge.subscribe('subtitle.style.primary.backgroundColor', (newValue) => {
+        this.subtitleStyle.backgroundColor = newValue;
+        this.log('主要字幕背景顏色已更新:', newValue);
+        this.applyStyles();
+      });
+
+      // 訂閱次要字幕樣式變更
+      configBridge.subscribe('subtitle.style.secondary.fontSize', (newValue) => {
+        this.log('次要字幕字體大小已更新:', newValue);
+        this.applyStyles();
+      });
+
+      configBridge.subscribe('subtitle.style.secondary.textColor', (newValue) => {
+        this.log('次要字幕字體顏色已更新:', newValue);
+        this.applyStyles();
+      });
+
+      configBridge.subscribe('subtitle.style.secondary.backgroundColor', (newValue) => {
+        this.log('次要字幕背景顏色已更新:', newValue);
+        this.applyStyles();
+      });
+
+      configBridge.subscribe('subtitle.style.fontFamily', (newValue) => {
+        this.subtitleStyle.fontFamily = newValue;
+        this.log('字體家族已更新:', newValue);
+        this.applyStyles();
+      });
+
+      // 保存 ConfigBridge 實例供其他方法使用
+      this.configBridge = configBridge;
+
       // 設置事件處理器
       this.setupEventHandlers();
       
@@ -847,6 +918,64 @@ class SubtitleDisplay {
   }
 
   /**
+   * 應用樣式（配置變更時調用）
+   * 根據當前模式（單語/雙語）應用最新的樣式配置
+   */
+  applyStyles() {
+    if (!this.isInitialized || !this.configBridge) {
+      this.log('字幕顯示組件未初始化或 ConfigBridge 不可用，跳過樣式應用');
+      return;
+    }
+
+    this.log('應用最新樣式配置...');
+
+    if (this.isDualMode) {
+      // 雙語模式：從 ConfigBridge 讀取最新配置並應用
+      const primaryFontSize = this.configBridge.get('subtitle.style.primary.fontSize');
+      const primaryTextColor = this.configBridge.get('subtitle.style.primary.textColor');
+      const primaryBgColor = this.configBridge.get('subtitle.style.primary.backgroundColor');
+      const secondaryFontSize = this.configBridge.get('subtitle.style.secondary.fontSize');
+      const secondaryTextColor = this.configBridge.get('subtitle.style.secondary.textColor');
+      const secondaryBgColor = this.configBridge.get('subtitle.style.secondary.backgroundColor');
+      const fontFamily = this.configBridge.get('subtitle.style.fontFamily');
+
+      // 更新雙語樣式
+      if (this.dualModeStyles) {
+        this.dualModeStyles.primary = {
+          ...this.dualModeStyles.primary,
+          fontSize: `${primaryFontSize}px`,
+          color: primaryTextColor,
+          backgroundColor: primaryBgColor,
+          fontFamily: fontFamily
+        };
+
+        this.dualModeStyles.secondary = {
+          ...this.dualModeStyles.secondary,
+          fontSize: `${secondaryFontSize}px`,
+          color: secondaryTextColor,
+          backgroundColor: secondaryBgColor,
+          fontFamily: fontFamily
+        };
+
+        // 應用到容器
+        this.applyDualModeStyles();
+      } else {
+        this.log('雙語樣式對象不存在，跳過樣式應用');
+      }
+    } else {
+      // 單語模式：應用主要字幕樣式到單語容器
+      if (this.element) {
+        this.applyStylesToContainer(this.element, this.subtitleStyle);
+        this.log('單語字幕樣式已應用');
+      } else {
+        this.log('單語字幕容器不存在，跳過樣式應用');
+      }
+    }
+
+    this.log('樣式應用完成');
+  }
+
+  /**
    * 獲取當前雙語樣式
    * @returns {Object|null} 當前的雙語樣式對象
    */
@@ -928,31 +1057,8 @@ class SubtitleDisplay {
     this.log('字幕顯示組件資源清理完成');
   }
 
-  // 從存儲中載入調試模式設置
-  async loadDebugMode() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode']
-      });
-      
-      if (result && result.debugMode !== undefined) {
-        this.debug = result.debugMode;
-        this.log(`調試模式: ${this.debug}`);
-      }
-    } catch (error) {
-      console.error('載入調試模式設置時出錯:', error);
-    }
-  }
-
   // 設置事件處理器
   setupEventHandlers() {
-    // 監聽調試模式變更
-    registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
-      this.debug = message.debugMode;
-      this.log('調試模式設置已更新:', this.debug);
-    });
-
     // VIDEO_ID_CHANGED 事件現在由 UI Manager 統一處理，這裡不再需要單獨處理
   }
 

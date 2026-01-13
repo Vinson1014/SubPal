@@ -51,8 +51,8 @@ class UIManager {
       onError: null
     };
     
-    // 調試模式
-    this.debug = true;
+    // 調試模式（將由 ConfigBridge 設置）
+    this.debug = false;
     
     // 核心模組
     this.subtitleReplacer = null;
@@ -62,11 +62,24 @@ class UIManager {
 
   async initialize() {
     this.log('UI 管理器初始化中...');
-    
+
     try {
-      // 載入調試模式設置
-      await this.loadDebugMode();
-      
+      // 導入 ConfigBridge（專為 Page Context 設計）
+      const { configBridge } = await import('../system/config/config-bridge.js');
+
+      // 從 ConfigBridge 讀取配置（從本地緩存，無需 chrome API）
+      this.debug = configBridge.get('debugMode');
+      this.log(`調試模式設置為: ${this.debug}`);
+
+      // 訂閱配置變更（通過 messaging 接收通知）
+      configBridge.subscribe('debugMode', (newValue) => {
+        this.debug = newValue;
+        this.log(`調試模式已更新: ${newValue}`);
+      });
+
+      // 保存 ConfigBridge 實例供其他方法使用
+      this.configBridge = configBridge;
+
       // 設置事件處理器
       this.setupEventHandlers();
       
@@ -355,31 +368,8 @@ class UIManager {
     }
   }
 
-  // 從存儲中載入調試模式設置
-  async loadDebugMode() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode']
-      });
-      
-      if (result && result.debugMode !== undefined) {
-        this.debug = result.debugMode;
-        this.log(`調試模式: ${this.debug}`);
-      }
-    } catch (error) {
-      console.error('載入調試模式設置時出錯:', error);
-    }
-  }
-
   // 設置事件處理器
   setupEventHandlers() {
-    // 監聽調試模式變更
-    registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
-      this.debug = message.debugMode;
-      this.log('調試模式設置已更新:', this.debug);
-    });
-
     // 監聽影片切換事件 - 統一重新初始化所有UI組件
     registerInternalEventHandler('VIDEO_ID_CHANGED', async (event) => {
       this.log(`🎬 檢測到影片切換: ${event.oldVideoId} -> ${event.newVideoId}`);
