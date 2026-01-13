@@ -3,7 +3,6 @@
 
 import * as apiModule from './api.js';
 
-let isDebugModeEnabled = false;
 let isSyncingVotes = false;
 let isSyncingTranslations = false;
 
@@ -18,7 +17,7 @@ const MAX_QUEUE_SIZE = 100;
  * @param {Function} portSendResponse - 回應函數 (通過 port 發送)
  */
 export function handleMessage(request, sender, portSendResponse) {
-  if (isDebugModeEnabled) console.log('[Sync Module] Handling message (port):', request.type);
+  // Debug log removed - now managed by ConfigManager
 
   switch (request.type) {
     case 'SYNC_DATA':
@@ -51,7 +50,7 @@ export function handleMessage(request, sender, portSendResponse) {
  * @param {Function} portSendResponse - 回應函數 (通過 port 發送)
  */
 function handleSyncData(request, portSendResponse) {
-  if (isDebugModeEnabled) console.log('[Sync Module] Syncing data (port):', request.data);
+  // Debug log removed('[Sync Module] Syncing data (port):', request.data);
   // 根據請求數據決定同步類型
   if (request.data.type === 'vote') {
     syncPendingVotes().then(() => {
@@ -79,7 +78,7 @@ function handleSyncData(request, portSendResponse) {
  * @param {Function} portSendResponse - 回應函數 (通過 port 發送)
  */
 async function handleGetSyncStatus(request, portSendResponse) {
-  if (isDebugModeEnabled) console.log('[Sync Module] Getting sync status (port)');
+  // Debug log removed('[Sync Module] Getting sync status (port)');
   try {
     const voteQueue = await chrome.storage.local.get(VOTE_QUEUE_KEY);
     const translationQueue = await chrome.storage.local.get(TRANSLATION_QUEUE_KEY);
@@ -122,10 +121,10 @@ function triggerTranslationSync() {
  */
 function triggerSync(isSyncingFlag, syncFunction, dataTypeLabel) {
   if (!isSyncingFlag) {
-    if (isDebugModeEnabled) console.log(`[Sync Module] Triggering ${dataTypeLabel} sync.`);
+    // Debug log removed(`[Sync Module] Triggering ${dataTypeLabel} sync.`);
     syncFunction(); // 異步執行
   } else {
-    if (isDebugModeEnabled) console.log(`[Sync Module] ${dataTypeLabel} sync already in progress.`);
+    // Debug log removed(`[Sync Module] ${dataTypeLabel} sync already in progress.`);
   }
 }
 
@@ -166,17 +165,17 @@ async function syncPendingTranslations() {
 async function syncPendingItems(queueKey, isSyncingFlag, apiCallFunction, dataTypeLabel, setSyncingFlag) {
   if (isSyncingFlag) return;
   setSyncingFlag(true);
-  if (isDebugModeEnabled) console.log(`[Sync Module] Starting ${dataTypeLabel} sync...`);
+  // Debug log removed(`[Sync Module] Starting ${dataTypeLabel} sync...`);
 
   try {
     const { [queueKey]: queue = [] } = await chrome.storage.local.get(queueKey);
     if (queue.length === 0) {
-      if (isDebugModeEnabled) console.log(`[Sync Module] ${dataTypeLabel} queue is empty.`);
+      // Debug log removed(`[Sync Module] ${dataTypeLabel} queue is empty.`);
       setSyncingFlag(false);
       return;
     }
 
-    if (isDebugModeEnabled) console.log(`[Sync Module] Syncing ${queue.length} pending ${dataTypeLabel}s...`);
+    // Debug log removed(`[Sync Module] Syncing ${queue.length} pending ${dataTypeLabel}s...`);
     const remainingItems = [];
     let successCount = 0;
 
@@ -184,7 +183,7 @@ async function syncPendingItems(queueKey, isSyncingFlag, apiCallFunction, dataTy
       try {
         await apiCallFunction(itemData); // Assuming itemData includes userID
         successCount++;
-        if (isDebugModeEnabled) console.log(`[Sync Module] Synced ${dataTypeLabel}:`, itemData);
+        // Debug log removed(`[Sync Module] Synced ${dataTypeLabel}:`, itemData);
       } catch (error) {
         console.warn(`[Sync Module] Failed to sync ${dataTypeLabel}, keeping in queue:`, error.message, itemData);
         remainingItems.push(itemData);
@@ -193,7 +192,7 @@ async function syncPendingItems(queueKey, isSyncingFlag, apiCallFunction, dataTy
 
     // 更新隊列
     await chrome.storage.local.set({ [queueKey]: remainingItems });
-    if (isDebugModeEnabled) console.log(`[Sync Module] ${dataTypeLabel} sync finished. Synced: ${successCount}, Remaining: ${remainingItems.length}`);
+    // Debug log removed(`[Sync Module] ${dataTypeLabel} sync finished. Synced: ${successCount}, Remaining: ${remainingItems.length}`);
 
   } catch (error) {
     console.error(`[Sync Module] Error during ${dataTypeLabel} sync:`, error);
@@ -207,13 +206,13 @@ async function syncPendingItems(queueKey, isSyncingFlag, apiCallFunction, dataTy
  * @param {object} voteData - 包含 userID 的完整投票數據
  */
 async function sendVoteToAPI(voteData) {
-  if (isDebugModeEnabled) console.log('[Sync Module] Sending vote to API via direct apiModule call:', voteData);
+  // Debug log removed('[Sync Module] Sending vote to API via direct apiModule call:', voteData);
   try {
     // 模擬一個 sendResponse 函數，因為 apiModule.handleProcessVote 期望這個參數
     // 這裡我們不需要實際的 portSendResponse，因為 sync 模組是直接呼叫
     // 我們只需要確保 apiModule.handleProcessVote 內部邏輯能正常執行並返回結果
     const dummySendResponse = (response) => {
-      if (isDebugModeEnabled) console.log('[Sync Module] Dummy sendResponse received for vote:', response);
+      // Debug log removed('[Sync Module] Dummy sendResponse received for vote:', response);
       // 這裡可以根據 response 判斷成功或失敗，並拋出錯誤
       if (!response.success) {
         throw new Error(response.error || 'Failed to process vote via API module');
@@ -225,7 +224,7 @@ async function sendVoteToAPI(voteData) {
     const request = { type: 'PROCESS_VOTE', payload: voteData };
     // sender 參數可以為空對象或 null，因為是內部呼叫
     await apiModule.handleMessage(request, {}, dummySendResponse);
-    if (isDebugModeEnabled) console.log('[Sync Module] Vote processed successfully by apiModule.');
+    // Debug log removed('[Sync Module] Vote processed successfully by apiModule.');
     return { success: true }; // 假設成功處理
   } catch (error) {
     console.error('[Sync Module] Error processing vote via apiModule:', error);
@@ -238,10 +237,10 @@ async function sendVoteToAPI(voteData) {
  * @param {object} translationData - 包含 userID 的完整翻譯數據
  */
 async function sendTranslationToAPI(translationData) {
-  if (isDebugModeEnabled) console.log('[Sync Module] Sending translation to API via direct apiModule call:', translationData);
+  // Debug log removed('[Sync Module] Sending translation to API via direct apiModule call:', translationData);
   try {
     const dummySendResponse = (response) => {
-      if (isDebugModeEnabled) console.log('[Sync Module] Dummy sendResponse received for translation:', response);
+      // Debug log removed('[Sync Module] Dummy sendResponse received for translation:', response);
       if (!response.success) {
         throw new Error(response.error || 'Failed to submit translation via API module');
       }
@@ -260,7 +259,7 @@ async function sendTranslationToAPI(translationData) {
     };
     // sender 參數可以為空對象或 null
     await apiModule.handleMessage(request, {}, dummySendResponse);
-    if (isDebugModeEnabled) console.log('[Sync Module] Translation submitted successfully by apiModule.');
+    // Debug log removed('[Sync Module] Translation submitted successfully by apiModule.');
     return { success: true }; // 假設成功處理
   } catch (error) {
     console.error('[Sync Module] Error submitting translation via apiModule:', error);
@@ -282,16 +281,16 @@ async function sendReplacementEventsToAPI(events) {
  * 同步待處理的替換事件列表
  */
 async function syncPendingReplacementEvents() {
-  if (isDebugModeEnabled) console.log('[Sync Module] Starting replacement events sync...');
+  // Debug log removed('[Sync Module] Starting replacement events sync...');
   
   try {
     const { replacementEvents = [] } = await chrome.storage.local.get(['replacementEvents']);
     if (replacementEvents.length === 0) {
-      if (isDebugModeEnabled) console.log('[Sync Module] Replacement events queue is empty.');
+      // Debug log removed('[Sync Module] Replacement events queue is empty.');
       return;
     }
 
-    if (isDebugModeEnabled) console.log(`[Sync Module] Syncing ${replacementEvents.length} pending replacement events...`);
+    // Debug log removed(`[Sync Module] Syncing ${replacementEvents.length} pending replacement events...`);
     
     try {
       // 嘗試發送所有事件到 API
@@ -315,16 +314,8 @@ async function syncPendingReplacementEvents() {
  * 觸發替換事件同步
  */
 function triggerReplacementEventsSync() {
-  if (isDebugModeEnabled) console.log('[Sync Module] Triggering replacement events sync');
+  // Debug log removed('[Sync Module] Triggering replacement events sync');
   syncPendingReplacementEvents(); // 異步執行
-}
-
-/**
- * 設置調試模式狀態
- * @param {boolean} debugMode - 調試模式是否啟用
- */
-export function setDebugMode(debugMode) {
-  isDebugModeEnabled = debugMode;
 }
 
 // 定期觸發同步 (例如每 5 分鐘)
@@ -335,20 +326,20 @@ chrome.alarms.create('syncReplacementEventsAlarm', { periodInMinutes: 15 }); // 
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'syncVotesAlarm') {
-    if (isDebugModeEnabled) console.log('[Sync Module] Periodic vote sync triggered by alarm.');
+    // Debug log removed('[Sync Module] Periodic vote sync triggered by alarm.');
     triggerVoteSync();
   } else if (alarm.name === 'syncTranslationsAlarm') {
-    if (isDebugModeEnabled) console.log('[Sync Module] Periodic translation sync triggered by alarm.');
+    // Debug log removed('[Sync Module] Periodic translation sync triggered by alarm.');
     triggerTranslationSync();
   } else if (alarm.name === 'syncReplacementEventsAlarm') {
-    if (isDebugModeEnabled) console.log('[Sync Module] Periodic replacement events sync triggered by alarm.');
+    // Debug log removed('[Sync Module] Periodic replacement events sync triggered by alarm.');
     triggerReplacementEventsSync();
   }
 });
 
 // 擴充功能啟動時觸發所有同步
 chrome.runtime.onStartup.addListener(() => {
-  if (isDebugModeEnabled) console.log('[Sync Module] Extension startup, triggering all syncs.');
+  // Debug log removed('[Sync Module] Extension startup, triggering all syncs.');
   triggerVoteSync();
   triggerTranslationSync();
   triggerReplacementEventsSync();

@@ -1,7 +1,5 @@
 // storage.js - 負責處理與存儲相關的操作
 
-let isDebugModeEnabled = false; // 快取 Debug 模式狀態
-
 /**
  * 驗證字幕樣式配置格式
  * @param {object} config - 字幕樣式配置對象
@@ -60,29 +58,12 @@ function validateStyleConfig(styleConfig) {
 }
 
 /**
- * 初始化存儲模組，設置初始值並更新快取
+ * 初始化存儲模組
+ * 注意: Debug mode 現在由 ConfigManager 統一管理
  */
 function initializeStorage() {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.get(['debugMode'], (result) => {
-      if (result.debugMode === undefined) {
-        chrome.storage.local.set({ debugMode: false }, () => {
-          if (chrome.runtime.lastError) {
-            console.error('[Storage] Error setting initial debugMode:', chrome.runtime.lastError.message);
-            reject(chrome.runtime.lastError);
-          } else {
-            isDebugModeEnabled = false;
-            if (isDebugModeEnabled) console.log('[Storage] Debug mode is initially set to false.');
-            resolve();
-          }
-        });
-      } else {
-        isDebugModeEnabled = result.debugMode;
-        if (isDebugModeEnabled) console.log('[Storage] Debug mode is initially enabled.');
-        resolve();
-      }
-    });
-  });
+  console.log('[Storage] Storage module initialized.');
+  return Promise.resolve();
 }
 
 /**
@@ -104,7 +85,6 @@ function getStorageItem(keys) {
           console.error('[Storage] Error getting storage item:', chrome.runtime.lastError.message);
           reject(chrome.runtime.lastError);
         } else {
-          if (isDebugModeEnabled) console.log('[Storage] Retrieved storage item:', result);
           resolve(result);
         }
       } catch (e) {
@@ -134,7 +114,6 @@ function setStorageItem(items) {
           console.error('[Storage] Error setting storage item:', chrome.runtime.lastError.message);
           reject(chrome.runtime.lastError);
         } else {
-          if (isDebugModeEnabled) console.log('[Storage] Set storage item:', items);
           resolve();
         }
       } catch (e) {
@@ -152,14 +131,13 @@ function setStorageItem(items) {
  * @param {function} portSendResponse - 回應函數 (通過 port 發送)
  */
 export function handleMessage(request, _sender, portSendResponse) {
-  if (isDebugModeEnabled) console.log('[Storage] Handling message:', request);
+  // Debug log removed - now managed by ConfigManager
 
   switch (request.type) {
     case 'GET_SETTINGS':
       const keys = request.keys || ['debugMode', 'isEnabled', 'subtitleStyle', 'subtitleStyleConfig', 'dualSubtitleEnabled', 'primaryLanguage', 'secondaryLanguage'];
       getStorageItem(keys)
         .then(result => {
-          if (isDebugModeEnabled) console.log('[Storage] Responding with settings:', result);
           portSendResponse({ success: true, ...result });
         })
         .catch(error => {
@@ -184,10 +162,9 @@ export function handleMessage(request, _sender, portSendResponse) {
           break;
         }
       }
-      
+
       setStorageItem(request.settings)
         .then(() => {
-          if (isDebugModeEnabled) console.log('[Storage] Settings saved:', request.settings);
           portSendResponse({ success: true });
         })
         .catch(error => {
@@ -199,7 +176,6 @@ export function handleMessage(request, _sender, portSendResponse) {
     case 'GET_USER_ID':
       getStorageItem(['userID'])
         .then(({ userID }) => {
-          if (isDebugModeEnabled) console.log('[Storage] Responding with userID:', userID);
           portSendResponse({ success: true, userID });
         })
         .catch(error => {
@@ -217,7 +193,6 @@ export function handleMessage(request, _sender, portSendResponse) {
         };
         setStorageItem(videoInfo)
           .then(() => {
-            if (isDebugModeEnabled) console.log('[Storage] Video info saved:', videoInfo);
             portSendResponse({ success: true });
           })
           .catch(error => {
@@ -233,7 +208,6 @@ export function handleMessage(request, _sender, portSendResponse) {
     case 'GET_DEBUG_MODE':
       getStorageItem(['debugMode'])
         .then(result => {
-          if (isDebugModeEnabled) console.log('[Storage] Responding with debugMode:', result.debugMode);
           portSendResponse({ success: true, debugMode: result.debugMode || false });
         })
         .catch(error => {
@@ -245,7 +219,6 @@ export function handleMessage(request, _sender, portSendResponse) {
     case 'GET_USER_LANGUAGE':
       getStorageItem(['userLanguage'])
         .then(result => {
-          if (isDebugModeEnabled) console.log('[Storage] Responding with userLanguage:', result.userLanguage);
           portSendResponse({ success: true, languageCode: result.userLanguage });
         })
         .catch(error => {
@@ -258,7 +231,6 @@ export function handleMessage(request, _sender, portSendResponse) {
       if (request.languageCode) {
         setStorageItem({ userLanguage: request.languageCode })
           .then(() => {
-            if (isDebugModeEnabled) console.log('[Storage] User language saved:', request.languageCode);
             portSendResponse({ success: true });
           })
           .catch(error => {
@@ -321,10 +293,6 @@ async function filterDuplicateEvents(newEvents, existingEvents) {
     return eventTime > oneHourAgo;
   });
   
-  if (isDebugModeEnabled && recentEvents.length !== existingEvents.length) {
-    console.log(`[Storage] Cleaned ${existingEvents.length - recentEvents.length} old events from dedup cache`);
-  }
-  
   // 建立去重檢查的索引（僅檢查時間窗口內的事件）
   const recentEventsInWindow = recentEvents.filter(event => {
     const eventTime = new Date(event.occurredAt);
@@ -343,12 +311,9 @@ async function filterDuplicateEvents(newEvents, existingEvents) {
   
   for (const event of newEvents) {
     const key = `${event.translationID}_${event.beneficiaryUserID}`;
-    
+
     if (dedupIndex.has(key)) {
       duplicateCount++;
-      if (isDebugModeEnabled) {
-        console.log(`[Storage] Filtered duplicate event: ${key} within ${DEDUP_WINDOW_MINUTES} minute window`);
-      }
     } else {
       filteredEvents.push(event);
       // 將新事件添加到去重索引中，避免同一批次內的重複
@@ -376,8 +341,6 @@ async function handleStoreReplacementEvents(request, portSendResponse) {
     return;
   }
 
-  if (isDebugModeEnabled) console.log(`[Storage] Processing ${events.length} replacement events for deduplication (port)`);
-
   try {
     // 獲取現有的替換事件列表
     const { replacementEvents = [] } = await getStorageItem(['replacementEvents']);
@@ -400,11 +363,7 @@ async function handleStoreReplacementEvents(request, portSendResponse) {
     
     const storedCount = filteredEvents.length;
     const duplicateCount = events.length - storedCount;
-    
-    if (isDebugModeEnabled) {
-      console.log(`[Storage] Successfully processed replacement events: ${storedCount} stored, ${duplicateCount} duplicates filtered. Total events: ${updatedEvents.length} (port)`);
-    }
-    
+
     portSendResponse({ 
       success: true, 
       message: `處理完成：${storedCount} 個新事件已儲存，${duplicateCount} 個重複事件已過濾`,
@@ -424,29 +383,15 @@ async function handleStoreReplacementEvents(request, portSendResponse) {
  * @returns {Promise<void>}
  */
 export async function clearQueue(queueKey) {
-  if (isDebugModeEnabled) console.log(`[Storage] Clearing queue: ${queueKey}`);
   try {
     await setStorageItem({ [queueKey]: [] });
-    if (isDebugModeEnabled) console.log(`[Storage] Queue ${queueKey} cleared successfully.`);
   } catch (error) {
     console.error(`[Storage] Error clearing queue ${queueKey}:`, error);
     throw error;
   }
 }
 
-/**
- * 設置調試模式狀態
- * @param {boolean} debugMode - 調試模式是否啟用
- */
-export function setDebugMode(debugMode) {
-  isDebugModeEnabled = debugMode;
-}
-
 // 初始化存儲模組
-initializeStorage()
-  .then(() => {
-    if (isDebugModeEnabled) console.log('[Storage] Storage module initialized successfully.');
-  })
-  .catch(error => {
-    console.error('[Storage] Error initializing storage module:', error);
-  });
+initializeStorage().catch(error => {
+  console.error('[Storage] Error initializing storage module:', error);
+});

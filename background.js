@@ -28,27 +28,11 @@ import * as storageModule from './background/storage.js';
 import * as apiModule from './background/api.js';
 import * as syncModule from './background/sync.js';
 
-let isDebugModeEnabled = false; // 快取 Debug 模式狀態
-
 // 擴充功能安裝/更新事件
 chrome.runtime.onInstalled.addListener(async (details) => {
   const installedInstanceId = serviceWorkerInstanceId; // 捕獲當前腳本執行上下文的實例 ID
   console.log(`[Background] onInstalled event. Instance ID: ${installedInstanceId}. 字幕助手擴充功能已安裝或更新`);
   await chrome.storage.local.set({ onInstalledSWInstanceId: installedInstanceId });
-  
-  // 設置初始值並更新快取
-  const result = await chrome.storage.local.get(['debugMode']);
-  if (result.debugMode === undefined) {
-    await chrome.storage.local.set({ debugMode: false });
-    isDebugModeEnabled = false;
-  } else {
-    isDebugModeEnabled = result.debugMode;
-  }
-  if (isDebugModeEnabled) console.log('[Background] Debug mode is initially enabled.');
-  // 設置各模組的調試模式
-  storageModule.setDebugMode(isDebugModeEnabled);
-  apiModule.setDebugMode(isDebugModeEnabled);
-  syncModule.setDebugMode(isDebugModeEnabled);
 
   // 執行用戶註冊/JWT獲取邏輯
   await ensureUserRegisteredAndJwtPresent();
@@ -209,8 +193,6 @@ chrome.runtime.onConnect.addListener((port) => {
       contentScriptPorts.delete(tabId);
     });
 
-    port.postMessage({ messageId: 'initial-debug-mode', response: { type: 'SET_DEBUG_MODE', debugMode: isDebugModeEnabled } });
-
   } else if (port.name === "options-page-channel") {
     // 來自 options 頁面的連接
     console.log('[Background] Options page connected.');
@@ -318,7 +300,7 @@ function handlePopupMessage(request, sender, sendResponse) {
         // 處理核心消息 (與 handleCoreMessage 類似，但使用 sendResponse)
         switch (request.type) {
             case 'TOGGLE_EXTENSION':
-                if (isDebugModeEnabled) console.log(`[Background] Toggling extension (from popup): ${request.isEnabled}`);
+                console.log(`[Background] Toggling extension (from popup): ${request.isEnabled}`);
                 // 轉發消息到所有相關的 content scripts (通過 port)
                 contentScriptPorts.forEach(port => {
                     port.postMessage({ type: 'TOGGLE_EXTENSION', isEnabled: request.isEnabled });
@@ -326,17 +308,18 @@ function handlePopupMessage(request, sender, sendResponse) {
                 sendResponse({ success: true }); // 回應 popup
                 break;
             case 'TOGGLE_DEBUG_MODE':
-                isDebugModeEnabled = request.debugMode; // 更新快取狀態
-                if (isDebugModeEnabled) console.log(`[Background] Toggling debug mode (from popup): ${isDebugModeEnabled}`);
-                // 轉發消息到所有相關的 content scripts (通過 port)
-                contentScriptPorts.forEach(port => {
-                    port.postMessage({ type: 'TOGGLE_DEBUG_MODE', debugMode: isDebugModeEnabled });
+                console.warn('[Background] TOGGLE_DEBUG_MODE is deprecated. Use ConfigManager instead.');
+                // 為了向後兼容，將配置寫入 chrome.storage
+                // ConfigManager 會自動監聽並通知所有訂閱者
+                chrome.storage.local.set({ debugMode: request.debugMode }, () => {
+                    if (chrome.runtime.lastError) {
+                        console.error('[Background] Error setting debugMode:', chrome.runtime.lastError);
+                        sendResponse({ success: false, error: chrome.runtime.lastError.message });
+                    } else {
+                        console.log(`[Background] debugMode set to ${request.debugMode} (deprecated path)`);
+                        sendResponse({ success: true });
+                    }
                 });
-                // 更新各模組的調試模式狀態
-                storageModule.setDebugMode(isDebugModeEnabled);
-                apiModule.setDebugMode(isDebugModeEnabled); // 保持 apiModule.setDebugMode
-                syncModule.setDebugMode(isDebugModeEnabled);
-                sendResponse({ success: true }); // 回應 popup
                 break;
             // case 'DEBUG_MODE_CHANGED': // 現在通過 port 處理
             // case 'API_BASE_URL_CHANGED': // 現在通過 port 處理
@@ -358,7 +341,7 @@ function handlePopupMessage(request, sender, sendResponse) {
  */
 async function handlePopupApiRequest(request, sendResponse) {
     const { api, params } = request;
-    if (isDebugModeEnabled) console.log(`[Background] Handling POPUP_API_REQUEST for API: ${api} with params:`, params);
+    console.log(`[Background] Handling POPUP_API_REQUEST for API: ${api} with params:`, params);
 
     try {
         let result;
@@ -389,36 +372,41 @@ async function handlePopupApiRequest(request, sendResponse) {
 function handleCoreMessagePort(messageId, request, port) {
   switch (request.type) {
     case 'CONTENT_SCRIPT_LOADED':
-      if (isDebugModeEnabled) console.log('[Background] 內容腳本已加載 (port):', port.sender?.tab?.url);
+      console.log('[Background] 內容腳本已加載 (port):', port.sender?.tab?.url);
       // 通過 port 發送響應
       port.postMessage({ messageId, response: { success: true } });
       break;
 
     case 'TOGGLE_EXTENSION':
       // 來自 content script 的 TOGGLE_EXTENSION 消息，通常不需要再轉發回 content script
-      if (isDebugModeEnabled) console.log(`[Background] Received TOGGLE_EXTENSION from content script (port): ${request.isEnabled}`);
+      console.log(`[Background] Received TOGGLE_EXTENSION from content script (port): ${request.isEnabled}`);
       // 如果需要，可以更新狀態或通知其他地方
       port.postMessage({ messageId, response: { success: true } }); // 發送響應
       break;
 
     case 'TOGGLE_DEBUG_MODE':
-       // 來自 content script 的 TOGGLE_DEBUG_MODE 消息
-      isDebugModeEnabled = request.debugMode; // 更新快取狀態
-      if (isDebugModeEnabled) console.log(`[Background] Received TOGGLE_DEBUG_MODE from content script (port): ${isDebugModeEnabled}`);
-      // 更新各模組的調試模式狀態
-      storageModule.setDebugMode(isDebugModeEnabled);
-      apiModule.setDebugMode(isDebugModeEnabled);
-      syncModule.setDebugMode(isDebugModeEnabled);
-      port.postMessage({ messageId, response: { success: true } }); // 發送響應
+      // 來自 content script 的 TOGGLE_DEBUG_MODE 消息（廢棄）
+      console.warn('[Background] TOGGLE_DEBUG_MODE is deprecated (port). Use ConfigManager instead.');
+      // 為了向後兼容，將配置寫入 chrome.storage
+      // ConfigManager 會自動監聽並通知所有訂閱者
+      chrome.storage.local.set({ debugMode: request.debugMode }, () => {
+        if (chrome.runtime.lastError) {
+          console.error('[Background] Error setting debugMode:', chrome.runtime.lastError);
+          port.postMessage({ messageId, response: { success: false, error: chrome.runtime.lastError.message } });
+        } else {
+          console.log(`[Background] debugMode set to ${request.debugMode} (deprecated path, port)`);
+          port.postMessage({ messageId, response: { success: true } });
+        }
+      });
       break;
 
     case 'VIDEO_ID_CHANGED':
-      if (isDebugModeEnabled) console.log('[Background] Received VIDEO_ID_CHANGED message (port)');
+      console.log('[Background] Received VIDEO_ID_CHANGED message (port)');
       port.postMessage({ messageId, response: { success: true } }); // 發送響應
       break;
 
     case 'UPDATE_STATS':
-      if (isDebugModeEnabled) console.log('[Background] Received UPDATE_STATS message (port)');
+      console.log('[Background] Received UPDATE_STATS message (port)');
       // 將統計數據轉發到 popup
       chrome.runtime.sendMessage({
         type: 'UPDATE_STATS',
@@ -432,19 +420,19 @@ function handleCoreMessagePort(messageId, request, port) {
       port.postMessage({ messageId, response: { success: true } }); // 發送響應
       break;
     case 'CONTENT_SCRIPT_READY':
-      if (isDebugModeEnabled) console.log('[Background] Content script ready with features:', request.features);
+      console.log('[Background] Content script ready with features:', request.features);
       // 記錄內容腳本已準備就緒，可以執行相關邏輯
       port.postMessage({ messageId, response: { success: true } });
       break;
-      
+
     case 'API_BASE_URL_CHANGED':
-      if (isDebugModeEnabled) console.log('[Background] API Base URL changed to:', request.url);
+      console.log('[Background] API Base URL changed to:', request.url);
       apiModule.setApiBaseUrl(request.url);
       port.postMessage({ messageId, response: { success: true } });
       break;
-      
+
     case 'SUBTITLE_STYLE_UPDATED':
-      if (isDebugModeEnabled) console.log('[Background] Subtitle style updated:', request.config);
+      console.log('[Background] Subtitle style updated:', request.config);
       // 轉發消息到所有相關的 content scripts (通過 port)
       contentScriptPorts.forEach(contentPort => {
         try {

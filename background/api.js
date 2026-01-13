@@ -3,12 +3,10 @@
 
 // API Base URL，初始值將從 chrome.storage.sync 中載入
 let API_BASE_URL = 'https://subnfbackend.zeabur.app'; // 初始預設值
-let isDebugModeEnabled = false;
 
 // 從 chrome.storage.local 載入初始 API Base URL
 chrome.storage.local.get({ apiBaseUrl: 'https://subnfbackend.zeabur.app' }, (items) => {
   API_BASE_URL = items.apiBaseUrl;
-  if (isDebugModeEnabled) console.log('[API Module] Initial API Base URL loaded:', API_BASE_URL);
 });
 
 /**
@@ -18,7 +16,7 @@ chrome.storage.local.get({ apiBaseUrl: 'https://subnfbackend.zeabur.app' }, (ite
  * @param {Function} portSendResponse - 回應函數 (通過 port 發送)
  */
 export function handleMessage(request, sender, portSendResponse) {
-  if (isDebugModeEnabled) console.log('[API Module] Handling message (port):', request.type);
+  // Debug log removed - now managed by ConfigManager
 
   // 移除原有的超時保護和 wrappedSendResponse，由 background.js 的 port 處理
 
@@ -49,7 +47,7 @@ export function handleMessage(request, sender, portSendResponse) {
  * @param {Function} portSendResponse - 回應函數 (通過 port 發送)
  */
 async function handleSubmitTranslation(request, portSendResponse) {
-  if (isDebugModeEnabled) console.log('[API Module] Entering handleSubmitTranslation (port):', request);
+  // Debug log removed('[API Module] Entering handleSubmitTranslation (port):', request);
 
   // 從 request 中提取提交翻譯所需的數據
   const translationData = {
@@ -77,7 +75,7 @@ async function handleSubmitTranslation(request, portSendResponse) {
  * @param {Function} portSendResponse - 回應函數 (通過 port 發送)
  */
 async function handleProcessVote(request, portSendResponse) {
-  if (isDebugModeEnabled) console.log('[API Module] Processing vote (port):', request.payload);
+  // Debug log removed('[API Module] Processing vote (port):', request.payload);
 
   await handleGenericSubmitRequest(
     request.payload,
@@ -102,7 +100,7 @@ async function handleCheckSubtitle(request, portSendResponse) {
     return;
   }
 
-  if (isDebugModeEnabled) console.log(`[API Module] Fetching subtitles for videoId: ${videoId}, starting from timestamp: ${timestamp} (port)`);
+  // Debug log removed(`[API Module] Fetching subtitles for videoId: ${videoId}, starting from timestamp: ${timestamp} (port)`);
 
   try {
     // 向後端請求接下來 3 分鐘的字幕數據
@@ -127,7 +125,7 @@ async function handleCheckSubtitle(request, portSendResponse) {
 async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
   const url = `${API_BASE_URL}/translations?videoID=${encodeURIComponent(videoId)}&startTime=${startTime}&duration=${duration}`;
 
-  if (isDebugModeEnabled) console.log('[API Module] Fetching subtitles from API:', url);
+  // Debug log removed('[API Module] Fetching subtitles from API:', url);
 
   try {
     // 改用 sendToAPI 函數發送 GET 請求
@@ -135,7 +133,7 @@ async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
 
     if (jsonResponse && jsonResponse.success === true && Array.isArray(jsonResponse.data?.translations)) {
       const subtitles = jsonResponse.data.translations;
-      if (isDebugModeEnabled) console.log(`[API Module] API returned ${subtitles.length} subtitles.`);
+      // Debug log removed(`[API Module] API returned ${subtitles.length} subtitles.`);
       return subtitles.map(sub => ({
         videoID: sub.videoID,
         timestamp: sub.timestamp,
@@ -158,7 +156,7 @@ async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
         const retryResponse = await sendToAPI(url, null, 'GET');
         if (retryResponse && retryResponse.success === true && Array.isArray(retryResponse.data?.translations)) {
           const subtitles = retryResponse.data.translations;
-          if (isDebugModeEnabled) console.log(`[API Module] API returned ${subtitles.length} subtitles after JWT refresh.`);
+          // Debug log removed(`[API Module] API returned ${subtitles.length} subtitles after JWT refresh.`);
           return subtitles.map(sub => ({
             videoID: sub.videoID,
             timestamp: sub.timestamp,
@@ -191,16 +189,16 @@ async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
  * @param {string} dataTypeLabel - 數據類型標籤 (用於日誌)
  */
 async function handleGenericSubmitRequest(data, portSendResponse, apiCallFunction, addToQueueFunction, triggerSyncFunction, dataTypeLabel) {
-  if (isDebugModeEnabled) console.log(`[API Module] Entering handleGenericSubmitRequest for ${dataTypeLabel} (port)`);
+  // Debug log removed(`[API Module] Entering handleGenericSubmitRequest for ${dataTypeLabel} (port)`);
   try {
     // fullData 不再包含 userID，因為後端會從 JWT 中獲取
     const fullData = { ...data }; // 移除 userID
 
-    if (isDebugModeEnabled) console.log(`[API Module] Handling ${dataTypeLabel} submission (port):`, fullData);
+    // Debug log removed(`[API Module] Handling ${dataTypeLabel} submission (port):`, fullData);
     try {
-      if (isDebugModeEnabled) console.log(`[API Module] Attempting to send ${dataTypeLabel} directly to API (port):`, fullData);
+      // Debug log removed(`[API Module] Attempting to send ${dataTypeLabel} directly to API (port):`, fullData);
       const result = await apiCallFunction(fullData);
-      if (isDebugModeEnabled) console.log(`[API Module] ${dataTypeLabel} sent directly to API (port):`, result);
+      // Debug log removed(`[API Module] ${dataTypeLabel} sent directly to API (port):`, result);
       // 使用 portSendResponse 發送成功響應
       portSendResponse({ success: true, result });
     } catch (apiError) {
@@ -337,7 +335,7 @@ async function addToQueue(data, queueKey, dataTypeLabel) {
     }
     queue.push(data);
     await chrome.storage.local.set({ [queueKey]: queue });
-    if (isDebugModeEnabled) console.log(`[API Module] ${dataTypeLabel} added to queue. Queue size:`, queue.length);
+    // Debug log removed(`[API Module] ${dataTypeLabel} added to queue. Queue size:`, queue.length);
   } catch (error) {
     console.error(`[API Module] Error adding ${dataTypeLabel} to queue:`, error);
   }
@@ -367,7 +365,7 @@ async function sendVoteToAPI(voteData) {
     }
   }
 
-  if (isDebugModeEnabled) console.log('[API Module] Sending vote to API:', url, body);
+  // Debug log removed('[API Module] Sending vote to API:', url, body);
   const response = await sendToAPI(url, body);
   
   // 使用新格式：從 response.data 中提取投票結果
@@ -396,7 +394,7 @@ async function sendTranslationToAPI(translationData) {
     submissionReason: submissionReason || ''
   };
 
-  if (isDebugModeEnabled) console.log('[API Module] Sending translation to API:', url, body);
+  // Debug log removed('[API Module] Sending translation to API:', url, body);
   const response = await sendToAPI(url, body);
   
   // 使用新格式：從 response.data 中提取 translationID
@@ -415,9 +413,9 @@ async function sendToAPI(url, body, method = 'POST') { // 允許指定方法，�
   const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超時
   
   // debug message
-  if (isDebugModeEnabled) console.log(`[API Module] Sending request to URL:`, url);
-  if (isDebugModeEnabled) console.log(`[API Module] Request body:`, body);
-  if (isDebugModeEnabled) console.log(`[API Module] Request method:`, method);
+  // Debug log removed(`[API Module] Sending request to URL:`, url);
+  // Debug log removed(`[API Module] Request body:`, body);
+  // Debug log removed(`[API Module] Request method:`, method);
 
   try {
     const headers = {
@@ -429,9 +427,9 @@ async function sendToAPI(url, body, method = 'POST') { // 允許指定方法，�
     const { jwt } = await chrome.storage.local.get('jwt');
     if (jwt) {
       headers['Authorization'] = `Bearer ${jwt}`;
-      if (isDebugModeEnabled) console.log('[API Module] Attaching JWT to request headers.');
+      // Debug log removed('[API Module] Attaching JWT to request headers.');
     } else {
-      if (isDebugModeEnabled) console.log('[API Module] No JWT found in storage for this request.');
+      // Debug log removed('[API Module] No JWT found in storage for this request.');
     }
 
     const fetchOptions = {
@@ -461,7 +459,7 @@ async function sendToAPI(url, body, method = 'POST') { // 允許指定方法，�
         }
         errorDetails = errJson;
       } catch (e) {
-        if (isDebugModeEnabled) console.log('[API Module] Failed to parse API error response as JSON.');
+        // Debug log removed('[API Module] Failed to parse API error response as JSON.');
       }
       console.error('[API Module] API Error:', errorMsg, errorDetails);
       const error = new Error(errorMsg);
@@ -476,7 +474,7 @@ async function sendToAPI(url, body, method = 'POST') { // 允許指定方法，�
 
     try {
       const jsonResponse = await res.json();
-      if (isDebugModeEnabled) console.log('[API Module] API Success Response:', jsonResponse);
+      // Debug log removed('[API Module] API Success Response:', jsonResponse);
       return jsonResponse;
     } catch (e) {
       console.error('[API Module] Error parsing successful API response as JSON:', e);
@@ -498,13 +496,13 @@ async function sendToAPI(url, body, method = 'POST') { // 允許指定方法，�
  * 觸發投票同步
  */
 function triggerVoteSync() {
-  if (isDebugModeEnabled) console.log('[API Module] Triggering vote sync');
+  // Debug log removed('[API Module] Triggering vote sync');
   // 發送訊息到背景腳本，路由到 sync.js
   chrome.runtime.sendMessage({ type: 'TRIGGER_VOTE_SYNC' }, (response) => {
     if (chrome.runtime.lastError) {
       console.error('[API Module] Error triggering vote sync:', chrome.runtime.lastError.message);
     } else {
-      if (isDebugModeEnabled) console.log('[API Module] Vote sync triggered:', response);
+      // Debug log removed('[API Module] Vote sync triggered:', response);
     }
   });
 }
@@ -513,23 +511,15 @@ function triggerVoteSync() {
  * 觸發翻譯同步
  */
 function triggerTranslationSync() {
-  if (isDebugModeEnabled) console.log('[API Module] Triggering translation sync');
+  // Debug log removed('[API Module] Triggering translation sync');
   // 發送訊息到背景腳本，路由到 sync.js
   chrome.runtime.sendMessage({ type: 'TRIGGER_TRANSLATION_SYNC' }, (response) => {
     if (chrome.runtime.lastError) {
       console.error('[API Module] Error triggering translation sync:', chrome.runtime.lastError.message);
     } else {
-      if (isDebugModeEnabled) console.log('[API Module] Translation sync triggered:', response);
+      // Debug log removed('[API Module] Translation sync triggered:', response);
     }
   });
-}
-
-/**
- * 設置調試模式狀態
- * @param {boolean} debugMode - 調試模式是否啟用
- */
-export function setDebugMode(debugMode) {
-  isDebugModeEnabled = debugMode;
 }
 
 /**
@@ -538,7 +528,7 @@ export function setDebugMode(debugMode) {
  */
 export function setApiBaseUrl(url) {
   API_BASE_URL = url;
-  if (isDebugModeEnabled) console.log('[API Module] API Base URL updated:', API_BASE_URL);
+  // Debug log removed('[API Module] API Base URL updated:', API_BASE_URL);
 }
 
 /**
