@@ -294,6 +294,7 @@ export class StorageAdapter {
   /**
    * 批量寫入配置（優化版本）
    * 支援點記法鍵的批量寫入
+   * 使用深度合併避免 Chrome Storage API 淺合併導致的數據丟失
    *
    * @param {Object} items - 配置對象（使用點記法鍵）
    * @returns {Promise<void>}
@@ -319,8 +320,50 @@ export class StorageAdapter {
       this.setNestedValue(nested, key, value);
     }
 
-    // 寫入 storage
-    await this.set(nested);
+    // 提取需要更新的根鍵
+    const rootKeys = [...new Set(Object.keys(items).map(k => k.split('.')[0]))];
+
+    // 讀取現有配置（深度合併需要）
+    const existingData = await this.get(rootKeys);
+
+    // 深度合併現有配置和新配置
+    const mergedData = this.deepMerge(existingData, nested);
+
+    // 寫入合併後的數據
+    await this.set(mergedData);
+  }
+
+  /**
+   * 深度合併兩個對象
+   * 確保 Chrome Storage API 的淺合併不會丟失嵌套配置
+   *
+   * @private
+   * @param {Object} existing - 現有配置
+   * @param {Object} updates - 要更新的配置
+   * @returns {Object} 合併後的配置
+   */
+  deepMerge(existing, updates) {
+    const result = { ...existing };
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (
+        value !== null &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        key in result &&
+        result[key] !== null &&
+        typeof result[key] === 'object' &&
+        !Array.isArray(result[key])
+      ) {
+        // 遞歸合併嵌套對象
+        result[key] = this.deepMerge(result[key], value);
+      } else {
+        // 直接覆蓋（非對象或數組）
+        result[key] = value;
+      }
+    }
+
+    return result;
   }
 
   /**

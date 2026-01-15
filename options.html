@@ -60,28 +60,21 @@
         </div>
       </div>
       
-      <!-- 語言設定（雙語模式時顯示） -->
-      <div class="form-group dual-language-group" id="dualLanguageGroup" style="display: none;">
+      <!-- 主要語言設定（始終顯示） -->
+      <div class="form-group language-group">
         <h3>語言設定</h3>
         <div class="language-selects">
           <div class="select-group">
             <label for="primaryLanguageSelect">主要語言:</label>
             <select id="primaryLanguageSelect">
-              <option value="zh-Hant">繁體中文</option>
-              <option value="zh-Hans">简体中文</option>
-              <option value="en">English</option>
-              <option value="ja">日本語</option>
-              <option value="ko">한국어</option>
+              <!-- 由 JavaScript 動態生成 -->
             </select>
           </div>
-          <div class="select-group">
+          <!-- 次要語言選擇器（雙語模式時顯示） -->
+          <div class="select-group" id="secondaryLanguageGroup" style="display: none;">
             <label for="secondaryLanguageSelect">次要語言:</label>
             <select id="secondaryLanguageSelect">
-              <option value="en">English</option>
-              <option value="zh-Hant">繁體中文</option>
-              <option value="zh-Hans">简体中文</option>
-              <option value="ja">日本語</option>
-              <option value="ko">한국어</option>
+              <!-- 由 JavaScript 動態生成 -->
             </select>
           </div>
         </div>
@@ -156,6 +149,6 @@
       </div>
     </div>
   </div>
-  <script src="options.js"></script>
+  <script type="module" src="options.js"></script>
 </body>
 </html>
