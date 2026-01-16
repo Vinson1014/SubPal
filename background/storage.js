@@ -174,9 +174,10 @@ export function handleMessage(request, _sender, portSendResponse) {
       break;
 
     case 'GET_USER_ID':
-      getStorageItem(['userID'])
-        .then(({ userID }) => {
-          portSendResponse({ success: true, userID });
+      getStorageItem(['user'])
+        .then(({ user }) => {
+          const userId = user?.userId || '';
+          portSendResponse({ success: true, userId });
         })
         .catch(error => {
           console.error('[Storage] Error in GET_USER_ID:', error);
@@ -186,12 +187,18 @@ export function handleMessage(request, _sender, portSendResponse) {
 
     case 'SAVE_VIDEO_INFO':
       if (request.data) {
-        const videoInfo = {
-          currentVideoId: request.data.currentVideoId,
-          currentVideoTitle: request.data.currentVideoTitle,
-          currentVideoLanguage: request.data.currentVideoLanguage
-        };
-        setStorageItem(videoInfo)
+        // 使用新的嵌套鍵名格式 (video.currentVideoId 等)
+        // Chrome Storage set 是淺合併，需要先讀取再合併
+        getStorageItem(['video'])
+          .then(({ video = {} }) => {
+            const updatedVideo = {
+              ...video,
+              currentVideoId: request.data.currentVideoId,
+              currentVideoTitle: request.data.currentVideoTitle,
+              currentVideoLanguage: request.data.currentVideoLanguage
+            };
+            return setStorageItem({ video: updatedVideo });
+          })
           .then(() => {
             portSendResponse({ success: true });
           })

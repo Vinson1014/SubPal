@@ -603,33 +603,34 @@ export async function submitReplacementEvents(events) {
  */
 async function refreshJwtToken() {
   console.log('[API Module] Starting JWT token refresh...');
-  
+
   try {
-    // 獲取當前的 userID
-    const { userID } = await chrome.storage.local.get('userID');
-    
-    if (!userID) {
-      // 如果沒有 userID，生成一個新的
-      const newUserID = crypto.randomUUID();
-      await chrome.storage.local.set({ userID: newUserID });
-      console.log('[API Module] Generated new userID for JWT refresh:', newUserID);
-      
-      // 使用新的 userID 註冊
-      const response = await registerUser(newUserID);
+    // 獲取當前的 userId（新格式：user.userId）
+    const { user } = await chrome.storage.local.get(['user']);
+    const userId = user?.userId || '';
+
+    if (!userId) {
+      // 如果沒有 userId，生成一個新的
+      const newUserId = crypto.randomUUID();
+      await chrome.storage.local.set({ user: { userId: newUserId } });
+      console.log('[API Module] Generated new userId for JWT refresh:', newUserId);
+
+      // 使用新的 userId 註冊
+      const response = await registerUser(newUserId);
       if (response.token) {
         await chrome.storage.local.set({ jwt: response.token });
-        console.log('[API Module] JWT refreshed successfully with new userID.');
+        console.log('[API Module] JWT refreshed successfully with new userId.');
       } else {
         throw new Error(response.error || 'Failed to get new JWT token');
       }
     } else {
-      // 使用現有 userID 重新註冊
-      console.log('[API Module] Re-registering existing userID for JWT refresh:', userID);
-      const response = await registerUser(userID);
-      
+      // 使用現有 userId 重新註冊
+      console.log('[API Module] Re-registering existing userId for JWT refresh:', userId);
+      const response = await registerUser(userId);
+
       if (response.token) {
         await chrome.storage.local.set({ jwt: response.token });
-        console.log('[API Module] JWT refreshed successfully for existing userID.');
+        console.log('[API Module] JWT refreshed successfully for existing userId.');
       } else {
         throw new Error(response.error || 'Failed to refresh JWT token');
       }

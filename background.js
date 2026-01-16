@@ -34,6 +34,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   console.log(`[Background] onInstalled event. Instance ID: ${installedInstanceId}. 字幕助手擴充功能已安裝或更新`);
   await chrome.storage.local.set({ onInstalledSWInstanceId: installedInstanceId });
 
+  // 先執行配置遷移（舊鍵名 -> 新鍵名）
+  await migrateOldConfigKeys();
+
   // 執行用戶註冊/JWT獲取邏輯
   await ensureUserRegisteredAndJwtPresent();
   
@@ -71,7 +74,10 @@ chrome.runtime.onStartup.addListener(async () => {
   const startupInstanceId = serviceWorkerInstanceId; // 捕獲當前腳本執行上下文的實例 ID
   console.log(`[Background] onStartup event. Instance ID: ${startupInstanceId}. Extension startup, triggering initialization.`);
   await chrome.storage.local.set({ onStartupSWInstanceId: startupInstanceId });
-  
+
+  // 先執行配置遷移（舊鍵名 -> 新鍵名）
+  await migrateOldConfigKeys();
+
   // 執行用戶註冊/JWT獲取邏輯
   await ensureUserRegisteredAndJwtPresent();
   // 設置 JWT 刷新警報
@@ -79,25 +85,71 @@ chrome.runtime.onStartup.addListener(async () => {
 });
 
 /**
+ * 遷移舊配置鍵名到新鍵名
+ * 處理 userID -> user.userId, currentVideoId -> video.currentVideoId 的遷移
+ * 遷移成功後會移除舊鍵名
+ */
+async function migrateOldConfigKeys() {
+  const migrations = [
+    { oldKey: 'userID', newKey: 'user', newSubKey: 'userId' },
+    { oldKey: 'currentVideoId', newKey: 'video', newSubKey: 'currentVideoId' }
+  ];
+
+  const oldKeys = migrations.map(m => m.oldKey);
+  const oldData = await chrome.storage.local.get(oldKeys);
+
+  let migratedCount = 0;
+  const keysToRemove = [];
+
+  for (const { oldKey, newKey, newSubKey } of migrations) {
+    const oldValue = oldData[oldKey];
+    if (!oldValue) continue;
+
+    // 讀取新格式的現有值
+    const { [newKey]: existingObj = {} } = await chrome.storage.local.get([newKey]);
+
+    if (!existingObj[newSubKey]) {
+      // 新鍵為空，執行遷移
+      console.log(`[Background] 遷移配置: ${oldKey} -> ${newKey}.${newSubKey}`, oldValue);
+      await chrome.storage.local.set({ [newKey]: { ...existingObj, [newSubKey]: oldValue } });
+      migratedCount++;
+    }
+    keysToRemove.push(oldKey);
+  }
+
+  // 移除舊鍵名
+  if (keysToRemove.length > 0) {
+    await chrome.storage.local.remove(keysToRemove);
+    console.log(`[Background] 已移除舊鍵名:`, keysToRemove);
+  }
+
+  if (migratedCount > 0) {
+    console.log(`[Background] 已遷移 ${migratedCount} 個配置項`);
+  }
+}
+
+/**
  * 確保用戶已註冊並存在 JWT
  */
 async function ensureUserRegisteredAndJwtPresent() {
   console.log('[Background] Checking user registration and JWT presence...');
   try {
-    let { userID, jwt } = await chrome.storage.local.get(['userID', 'jwt']);
+    // 使用新格式：user.userId
+    const { user, jwt } = await chrome.storage.local.get(['user', 'jwt']);
+    let userId = user?.userId || '';
 
-    if (!userID) {
-      // 如果沒有 userID，生成一個新的
-      userID = crypto.randomUUID();
-      await chrome.storage.local.set({ userID });
-      console.log('[Background] Generated new userID:', userID);
+    if (!userId) {
+      // 如果沒有 userId，生成一個新的
+      userId = crypto.randomUUID();
+      await chrome.storage.local.set({ user: { userId } });
+      console.log('[Background] Generated new userId:', userId);
     }
 
     if (!jwt) {
       console.log('[Background] No JWT found, attempting to register user and get JWT...');
       // 調用後端 /users API 進行註冊並獲取 JWT
-      const response = await apiModule.registerUser(userID); // 使用 apiModule.registerUser
-      
+      const response = await apiModule.registerUser(userId);
+
       if (response.token) {
         await chrome.storage.local.set({ jwt: response.token });
         console.log('[Background] Successfully registered user and obtained JWT.');
@@ -107,7 +159,7 @@ async function ensureUserRegisteredAndJwtPresent() {
         console.error('[Background] Failed to register user or obtain JWT:', errorMessage, response);
       }
     } else {
-      console.log('[Background] UserID and JWT already present.');
+      console.log('[Background] userId and JWT already present.');
       // 可以選擇在這裡驗證 JWT 有效性，但通常由後續 API 請求的 401 響應觸發刷新
     }
   } catch (error) {
@@ -347,10 +399,10 @@ async function handlePopupApiRequest(request, sendResponse) {
         let result;
         switch (api) {
             case 'registerUser':
-                result = await apiModule.registerUser(params.userID);
+                result = await apiModule.registerUser(params.userId);
                 break;
             case 'fetchUserStats':
-                result = await apiModule.fetchUserStats(params.userID);
+                result = await apiModule.fetchUserStats(params.userId);
                 break;
             default:
                 throw new Error(`Unknown API request: ${api}`);
