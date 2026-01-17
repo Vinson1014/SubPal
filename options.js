@@ -509,7 +509,21 @@ function setupEventListeners() {
   // 恢復按鈕
   const restoreDataButton = document.getElementById('restoreDataButton');
   const restoreDataInput = document.getElementById('restoreDataInput');
+  const selectedFileName = document.getElementById('selectedFileName');
   if (restoreDataButton && restoreDataInput) {
+    // 監聽檔案選擇變化，顯示選中的檔案名
+    restoreDataInput.addEventListener('change', () => {
+      if (selectedFileName) {
+        if (restoreDataInput.files.length > 0) {
+          selectedFileName.textContent = restoreDataInput.files[0].name;
+          selectedFileName.classList.add('has-file');
+        } else {
+          selectedFileName.textContent = '';
+          selectedFileName.classList.remove('has-file');
+        }
+      }
+    });
+
     restoreDataButton.addEventListener('click', () => {
       if (restoreDataInput.files.length > 0) {
         restoreData(restoreDataInput.files[0]);
@@ -686,8 +700,12 @@ async function resetStyles() {
  */
 async function backupData() {
   try {
-    const keys = Object.keys(DEFAULT_CONFIG);
-    const result = await chrome.storage.local.get(keys);
+    // 提取根鍵（與 loadConfig 相同邏輯）
+    const flatKeys = Object.keys(DEFAULT_CONFIG);
+    const rootKeys = [...new Set(flatKeys.map(k => k.split('.')[0]))];
+
+    // 從 storage 讀取完整的嵌套結構
+    const result = await chrome.storage.local.get(rootKeys);
 
     const backupData = {
       version: '3.0',
@@ -803,6 +821,13 @@ function toRgba(hex, opacity) {
 
 document.addEventListener('DOMContentLoaded', async () => {
   console.log('[Options] 頁面載入中...');
+
+  // 顯示版本號（從 manifest.json 動態讀取）
+  const manifest = chrome.runtime.getManifest();
+  const versionElement = document.getElementById('appVersion');
+  if (versionElement && manifest.version) {
+    versionElement.textContent = `v${manifest.version}`;
+  }
 
   // 建立與 background script 的連接（用於清空隊列等操作）
   try {

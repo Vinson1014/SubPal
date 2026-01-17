@@ -250,6 +250,7 @@
                     <input type="file" id="restoreDataInput" accept=".json">
                     <span class="file-input-label">選擇檔案</span>
                   </label>
+                  <span class="selected-file-name" id="selectedFileName"></span>
                   <button type="button" id="restoreDataButton" class="btn btn-secondary">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                       <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
@@ -392,7 +393,7 @@
 
     <!-- Footer -->
     <footer class="app-footer">
-      <p>SubPal v1.0 &middot; 讓字幕更準確</p>
+      <p>SubPal <span id="appVersion"></span> &middot; 讓字幕更準確</p>
     </footer>
   </div>
 
