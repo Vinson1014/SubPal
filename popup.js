@@ -1,5 +1,6 @@
 // 引入配置管理系統
 import { configManager } from './content/system/config/config-manager.js';
+import { SUPPORTED_LANGUAGES } from './content/system/config/config-schema.js';
 
 // 狀態變數
 let isEnabled = true;
@@ -175,10 +176,197 @@ function showToast(msg) {
     const toast = document.getElementById('success-toast');
     if (!toast) return;
     toast.textContent = msg;
-    toast.style.display = 'block';
+    toast.classList.add('show');
     setTimeout(() => {
-        toast.style.display = 'none';
-    }, 1800);
+        toast.classList.remove('show');
+    }, 2000);
+}
+
+// ===== 字幕設定卡片 =====
+
+/**
+ * 填充語言選擇下拉選單
+ */
+function populateLanguageSelects() {
+    const primarySelect = document.getElementById('popup-primary-lang');
+    const secondarySelect = document.getElementById('popup-secondary-lang');
+
+    if (primarySelect) {
+        primarySelect.innerHTML = '';
+        for (const lang of SUPPORTED_LANGUAGES) {
+            primarySelect.add(new Option(lang.name, lang.code));
+        }
+    }
+
+    if (secondarySelect) {
+        secondarySelect.innerHTML = '';
+        for (const lang of SUPPORTED_LANGUAGES) {
+            secondarySelect.add(new Option(lang.name, lang.code));
+        }
+    }
+}
+
+/**
+ * 初始化字幕設定卡片
+ */
+function initSubtitleCard() {
+    // 填充語言選單
+    populateLanguageSelects();
+
+    // 獲取當前配置
+    const isDualMode = configManager.get('subtitle.dualModeEnabled');
+    const primaryLang = configManager.get('subtitle.primaryLanguage');
+    const secondaryLang = configManager.get('subtitle.secondaryLanguage');
+    const fontSize = configManager.get('subtitle.style.primary.fontSize');
+
+    // 更新 UI
+    updateSubtitleModeUI(isDualMode);
+
+    const primarySelect = document.getElementById('popup-primary-lang');
+    const secondarySelect = document.getElementById('popup-secondary-lang');
+    const fontSizeSlider = document.getElementById('popup-font-size');
+    const fontSizeValue = document.getElementById('popup-font-size-value');
+
+    if (primarySelect) primarySelect.value = primaryLang;
+    if (secondarySelect) secondarySelect.value = secondaryLang;
+    if (fontSizeSlider) fontSizeSlider.value = fontSize;
+    if (fontSizeValue) fontSizeValue.textContent = `${fontSize}px`;
+}
+
+/**
+ * 更新字幕模式 UI（單語/雙語切換）
+ */
+function updateSubtitleModeUI(isDualMode) {
+    const singleModeBtn = document.getElementById('single-mode-btn');
+    const dualModeBtn = document.getElementById('dual-mode-btn');
+    const secondaryRow = document.getElementById('secondary-lang-row');
+
+    if (singleModeBtn && dualModeBtn) {
+        singleModeBtn.classList.toggle('active', !isDualMode);
+        dualModeBtn.classList.toggle('active', isDualMode);
+    }
+
+    if (secondaryRow) {
+        secondaryRow.classList.toggle('hidden', !isDualMode);
+    }
+}
+
+/**
+ * 設置字幕設定卡片事件監聽器
+ */
+function setupSubtitleCardListeners() {
+    const singleModeBtn = document.getElementById('single-mode-btn');
+    const dualModeBtn = document.getElementById('dual-mode-btn');
+    const primarySelect = document.getElementById('popup-primary-lang');
+    const secondarySelect = document.getElementById('popup-secondary-lang');
+    const fontSizeSlider = document.getElementById('popup-font-size');
+    const fontSizeValue = document.getElementById('popup-font-size-value');
+    const openOptionsBtn = document.getElementById('open-subtitle-options');
+
+    // 單語模式按鈕
+    if (singleModeBtn) {
+        singleModeBtn.addEventListener('click', async () => {
+            try {
+                await configManager.set('subtitle.dualModeEnabled', false);
+                updateSubtitleModeUI(false);
+                showToast('已切換為單語字幕');
+            } catch (error) {
+                console.error('[Popup] 設置字幕模式失敗:', error);
+                showToast('設置失敗');
+            }
+        });
+    }
+
+    // 雙語模式按鈕
+    if (dualModeBtn) {
+        dualModeBtn.addEventListener('click', async () => {
+            try {
+                await configManager.set('subtitle.dualModeEnabled', true);
+                updateSubtitleModeUI(true);
+                showToast('已切換為雙語字幕');
+            } catch (error) {
+                console.error('[Popup] 設置字幕模式失敗:', error);
+                showToast('設置失敗');
+            }
+        });
+    }
+
+    // 主要語言選擇
+    if (primarySelect) {
+        primarySelect.addEventListener('change', async (e) => {
+            try {
+                await configManager.set('subtitle.primaryLanguage', e.target.value);
+                const langName = SUPPORTED_LANGUAGES.find(l => l.code === e.target.value)?.name || e.target.value;
+                showToast(`主要語言: ${langName}`);
+            } catch (error) {
+                console.error('[Popup] 設置主要語言失敗:', error);
+                showToast('設置失敗');
+            }
+        });
+    }
+
+    // 次要語言選擇
+    if (secondarySelect) {
+        secondarySelect.addEventListener('change', async (e) => {
+            try {
+                await configManager.set('subtitle.secondaryLanguage', e.target.value);
+                const langName = SUPPORTED_LANGUAGES.find(l => l.code === e.target.value)?.name || e.target.value;
+                showToast(`次要語言: ${langName}`);
+            } catch (error) {
+                console.error('[Popup] 設置次要語言失敗:', error);
+                showToast('設置失敗');
+            }
+        });
+    }
+
+    // 字幕大小滑塊
+    if (fontSizeSlider && fontSizeValue) {
+        fontSizeSlider.addEventListener('input', (e) => {
+            fontSizeValue.textContent = `${e.target.value}px`;
+        });
+
+        fontSizeSlider.addEventListener('change', async (e) => {
+            const size = parseInt(e.target.value);
+            try {
+                await configManager.set('subtitle.style.primary.fontSize', size);
+                showToast(`字幕大小: ${size}px`);
+            } catch (error) {
+                console.error('[Popup] 設置字幕大小失敗:', error);
+                showToast('設置失敗');
+            }
+        });
+    }
+
+    // 進階設定按鈕
+    if (openOptionsBtn) {
+        openOptionsBtn.addEventListener('click', () => {
+            chrome.runtime.openOptionsPage();
+        });
+    }
+
+    // 訂閱配置變更
+    configManager.subscribe('subtitle.dualModeEnabled', (key, newValue) => {
+        updateSubtitleModeUI(newValue);
+    });
+
+    configManager.subscribe('subtitle.primaryLanguage', (key, newValue) => {
+        if (primarySelect && primarySelect.value !== newValue) {
+            primarySelect.value = newValue;
+        }
+    });
+
+    configManager.subscribe('subtitle.secondaryLanguage', (key, newValue) => {
+        if (secondarySelect && secondarySelect.value !== newValue) {
+            secondarySelect.value = newValue;
+        }
+    });
+
+    configManager.subscribe('subtitle.style.primary.fontSize', (key, newValue) => {
+        if (fontSizeSlider && parseInt(fontSizeSlider.value) !== newValue) {
+            fontSizeSlider.value = newValue;
+            if (fontSizeValue) fontSizeValue.textContent = `${newValue}px`;
+        }
+    });
 }
 
 // ===== 事件綁定 =====
@@ -201,6 +389,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 5. 設置配置變更訂閱
     setupConfigSubscriptions();
+
+    // 6. 初始化字幕設定卡片
+    initSubtitleCard();
+    setupSubtitleCardListeners();
 
     // 複製 userID
     document.getElementById('copy-userid').addEventListener('click', copyUserId);

@@ -4,70 +4,93 @@
     <meta charset="UTF-8">
     <title>字幕助手 SubPal</title>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
+
         :root {
             --color-dark: #18181B;
+            --color-darker: #0f0f11;
             --color-gray: #A1A1AA;
+            --color-gray-light: #d4d4d8;
             --color-green: #14B8A6;
+            --color-green-dim: rgba(20, 184, 166, 0.15);
+            --color-green-glow: rgba(20, 184, 166, 0.3);
             --color-card-bg: #27272a;
+            --color-card-hover: #2f2f33;
+            --color-border: rgba(161, 161, 170, 0.12);
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 14px;
+            --transition-fast: 0.15s ease;
+            --transition-normal: 0.25s ease;
         }
-        
+
+        * {
+            box-sizing: border-box;
+        }
+
         body {
-            width: 320px;
-            padding: 14px 10px 10px 10px;
-            font-family: Arial, sans-serif;
+            width: 340px;
+            padding: 16px 14px 14px 14px;
+            font-family: 'Noto Sans TC', -apple-system, BlinkMacSystemFont, sans-serif;
             background: var(--color-dark);
             color: var(--color-gray);
+            margin: 0;
         }
 
         .header-container {
             display: flex;
             align-items: center;
             gap: 12px;
-            margin-bottom: 12px;
+            margin-bottom: 14px;
         }
 
         .status-bar {
             flex-grow: 1;
-            background: rgba(20, 184, 166, 0.15);
+            background: linear-gradient(135deg, rgba(20, 184, 166, 0.18) 0%, rgba(20, 184, 166, 0.08) 100%);
             color: var(--color-green);
-            padding: 8px 12px;
-            border-radius: 8px;
+            padding: 10px 14px;
+            border-radius: var(--radius-md);
             display: flex;
             align-items: center;
             justify-content: space-between;
-            font-weight: bold;
+            font-weight: 700;
+            border: 1px solid rgba(20, 184, 166, 0.2);
         }
         .status-bar-title {
-            font-size: 1.5em;
-            font-weight: bold;
-            letter-spacing: 1px;
+            font-size: 1.35em;
+            font-weight: 700;
+            letter-spacing: 0.5px;
         }
         .settings-btn {
-            background: none;
-            border: none;
+            background: var(--color-card-bg);
+            border: 1px solid var(--color-border);
             cursor: pointer;
-            width: 24px;
-            height: 24px;
+            width: 36px;
+            height: 36px;
             display: flex;
             align-items: center;
             justify-content: center;
             color: var(--color-gray);
-            transition: color 0.3s;
+            transition: all var(--transition-normal);
             padding: 0;
-            align-self: center; /* 垂直居中 */
+            border-radius: var(--radius-md);
         }
         .settings-btn:hover {
             color: var(--color-green);
+            background: var(--color-card-hover);
+            border-color: rgba(20, 184, 166, 0.3);
+            transform: rotate(45deg);
         }
         .settings-btn svg {
             width: 18px;
             height: 18px;
+            transition: transform var(--transition-normal);
         }
         .switch {
             position: relative;
             display: inline-block;
-            width: 40px;
-            height: 20px;
+            width: 42px;
+            height: 22px;
         }
         .switch input {
             opacity: 0;
@@ -81,112 +104,394 @@
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: #e74c3c; /* 關閉時紅色 */
-            transition: .4s;
-            border-radius: 20px;
+            background-color: #52525b;
+            transition: all var(--transition-normal);
+            border-radius: 22px;
         }
         .slider:before {
             position: absolute;
             content: "";
             height: 16px;
             width: 16px;
-            left: 2px;
-            bottom: 2px;
+            left: 3px;
+            bottom: 3px;
             background-color: white;
-            transition: .4s;
+            transition: all var(--transition-normal);
             border-radius: 50%;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
         }
         input:checked + .slider {
-            background-color: var(--color-green); /* 開啟時綠色 */
+            background: linear-gradient(135deg, var(--color-green) 0%, #0d9488 100%);
+            box-shadow: 0 0 12px var(--color-green-glow);
         }
         input:not(:checked) + .slider {
-            background-color: #e74c3c; /* 關閉時紅色 */
+            background-color: #52525b;
         }
         input:checked + .slider:before {
             transform: translateX(20px);
         }
         .card {
             background: var(--color-card-bg);
-            border-radius: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            border-radius: var(--radius-lg);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             padding: 16px;
-            margin-bottom: 16px;
+            margin-bottom: 14px;
+            border: 1px solid var(--color-border);
+            transition: all var(--transition-normal);
+        }
+        .card:hover {
+            border-color: rgba(161, 161, 170, 0.2);
         }
         .user-info {
             display: flex;
             align-items: center;
             gap: 8px;
-            margin-bottom: 8px;
+            margin-bottom: 10px;
             flex-wrap: wrap;
         }
         .user-id {
-            font-family: 'Consolas', monospace;
-            font-size: 1em;
-            background: rgba(161, 161, 170, 0.1);
-            padding: 2px 8px;
-            border-radius: 6px;
-            margin-right: 4px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.95em;
+            background: rgba(161, 161, 170, 0.08);
+            padding: 3px 10px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--color-border);
         }
         #copy-userid, #reset-userid {
-            background: rgba(161, 161, 170, 0.1);
-            border: none;
-            border-radius: 6px;
-            padding: 4px 8px;
+            background: rgba(161, 161, 170, 0.08);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-sm);
+            padding: 4px 10px;
             cursor: pointer;
-            transition: background 0.2s;
-            font-size: 0.95em;
+            transition: all var(--transition-fast);
+            font-size: 0.9em;
             color: var(--color-gray);
+            font-family: inherit;
         }
         #copy-userid:hover, #reset-userid:hover {
-            background: rgba(20, 184, 166, 0.2);
+            background: var(--color-green-dim);
+            border-color: rgba(20, 184, 166, 0.3);
+            color: var(--color-green);
         }
         .score-info, .contribution-info {
-            font-size: 1.1em;
+            font-size: 1.05em;
             margin-bottom: 6px;
+            line-height: 1.5;
+        }
+        .score-info b, .contribution-info b {
+            color: var(--color-green);
         }
         .contribution-info {
             margin-top: 4px;
         }
+
+        /* ========== 字幕設定卡片樣式 ========== */
+        .subtitle-card {
+            background: var(--color-card-bg);
+            border-radius: var(--radius-lg);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            padding: 16px;
+            margin-bottom: 14px;
+            border: 1px solid var(--color-border);
+        }
+
+        .subtitle-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 14px;
+        }
+
+        .subtitle-card-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 1.05em;
+            font-weight: 600;
+            color: var(--color-gray-light);
+        }
+
+        .subtitle-card-title svg {
+            width: 18px;
+            height: 18px;
+            color: var(--color-green);
+        }
+
+        .more-settings-link {
+            font-size: 0.8em;
+            color: var(--color-gray);
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            border-radius: var(--radius-sm);
+            transition: all var(--transition-fast);
+            cursor: pointer;
+            background: transparent;
+            border: none;
+            font-family: inherit;
+        }
+
+        .more-settings-link:hover {
+            background: var(--color-green-dim);
+            color: var(--color-green);
+        }
+
+        .more-settings-link svg {
+            width: 12px;
+            height: 12px;
+        }
+
+        /* 分段控制器 (單語/雙語切換) */
+        .segment-control {
+            display: flex;
+            background: var(--color-darker);
+            border-radius: var(--radius-md);
+            padding: 3px;
+            margin-bottom: 14px;
+            border: 1px solid var(--color-border);
+        }
+
+        .segment-btn {
+            flex: 1;
+            padding: 8px 12px;
+            border: none;
+            background: transparent;
+            color: var(--color-gray);
+            font-size: 0.9em;
+            font-weight: 500;
+            cursor: pointer;
+            border-radius: calc(var(--radius-md) - 2px);
+            transition: all var(--transition-normal);
+            font-family: inherit;
+            position: relative;
+        }
+
+        .segment-btn.active {
+            background: linear-gradient(135deg, var(--color-green) 0%, #0d9488 100%);
+            color: white;
+            box-shadow: 0 2px 8px var(--color-green-glow);
+        }
+
+        .segment-btn:not(.active):hover {
+            background: rgba(161, 161, 170, 0.1);
+        }
+
+        /* 語言選擇區域 */
+        .language-selectors {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+
+        .language-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .language-label {
+            font-size: 0.85em;
+            color: var(--color-gray);
+            min-width: 50px;
+            flex-shrink: 0;
+        }
+
+        .language-select-wrapper {
+            flex: 1;
+            position: relative;
+        }
+
+        .language-select {
+            width: 100%;
+            padding: 8px 32px 8px 12px;
+            background: var(--color-darker);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-md);
+            color: var(--color-gray-light);
+            font-size: 0.9em;
+            cursor: pointer;
+            appearance: none;
+            font-family: inherit;
+            transition: all var(--transition-fast);
+        }
+
+        .language-select:hover {
+            border-color: rgba(161, 161, 170, 0.3);
+        }
+
+        .language-select:focus {
+            outline: none;
+            border-color: var(--color-green);
+            box-shadow: 0 0 0 2px var(--color-green-dim);
+        }
+
+        .language-select-wrapper::after {
+            content: '';
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 0;
+            height: 0;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 5px solid var(--color-gray);
+            pointer-events: none;
+        }
+
+        .secondary-language-row {
+            transition: all var(--transition-normal);
+            overflow: hidden;
+        }
+
+        .secondary-language-row.hidden {
+            opacity: 0;
+            max-height: 0;
+            margin: 0;
+            padding: 0;
+        }
+
+        .secondary-language-row:not(.hidden) {
+            opacity: 1;
+            max-height: 50px;
+        }
+
+        /* 字幕大小控制 */
+        .font-size-control {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 12px;
+            background: var(--color-darker);
+            border-radius: var(--radius-md);
+            border: 1px solid var(--color-border);
+        }
+
+        .font-size-label {
+            font-size: 0.85em;
+            color: var(--color-gray);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+
+        .font-size-label svg {
+            width: 16px;
+            height: 16px;
+            color: var(--color-green);
+        }
+
+        .font-size-slider-wrapper {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .font-size-slider {
+            flex: 1;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 4px;
+            background: var(--color-border);
+            border-radius: 2px;
+            outline: none;
+        }
+
+        .font-size-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--color-green) 0%, #0d9488 100%);
+            cursor: pointer;
+            box-shadow: 0 2px 6px var(--color-green-glow);
+            transition: transform var(--transition-fast);
+        }
+
+        .font-size-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.15);
+        }
+
+        .font-size-slider::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--color-green) 0%, #0d9488 100%);
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 2px 6px var(--color-green-glow);
+        }
+
+        .font-size-value {
+            font-size: 0.85em;
+            color: var(--color-green);
+            font-weight: 600;
+            min-width: 38px;
+            text-align: right;
+        }
+
+        /* ========== 統計卡片樣式 ========== */
         .stats-card {
             background: var(--color-card-bg);
-            border-radius: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            border-radius: var(--radius-lg);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             padding: 16px;
-            margin-bottom: 16px;
+            margin-bottom: 14px;
+            border: 1px solid var(--color-border);
         }
         .stats-card h3 {
             margin: 0 0 12px 0;
-            font-size: 1.2em;
-            color: var(--color-gray);
+            font-size: 1.05em;
+            font-weight: 600;
+            color: var(--color-gray-light);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .stats-card h3 svg {
+            width: 16px;
+            height: 16px;
+            color: var(--color-green);
         }
         .stat-item {
             display: flex;
             justify-content: space-between;
             margin-bottom: 8px;
-            font-size: 0.95em;
+            font-size: 0.92em;
         }
         .stat-label {
             color: var(--color-gray);
         }
         .stat-value {
-            font-weight: bold;
+            font-weight: 600;
             color: var(--color-green);
         }
         .video-info {
-            margin-bottom: 10px;
-            font-size: 14px;
+            margin-bottom: 12px;
+            font-size: 0.9em;
             background: var(--color-card-bg);
-            padding: 8px 12px;
-            border-radius: 8px;
+            padding: 10px 14px;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--color-border);
+            color: var(--color-gray);
+        }
+        .video-info span {
+            color: var(--color-gray-light);
         }
         hr {
             border: none;
-            border-top: 1px solid rgba(161, 161, 170, 0.2);
-            margin: 8px 0;
+            border-top: 1px solid var(--color-border);
+            margin: 10px 0;
         }
         .toggle-section {
             background: var(--color-card-bg);
-            border-radius: 8px;
+            border-radius: var(--radius-md);
             padding: 12px 10px;
             margin-bottom: 12px;
         }
@@ -197,31 +502,39 @@
             margin-bottom: 6px;
         }
         .toggle-title {
-            font-size: 1.08em;
-            font-weight: bold;
+            font-size: 1.05em;
+            font-weight: 600;
             margin: 0;
         }
         .toggle-desc {
-            font-size: 12px;
+            font-size: 0.85em;
             color: var(--color-gray);
             margin-top: 2px;
         }
         .hidden {
-            display: none;
+            display: none !important;
         }
         .success-toast {
-            background: rgba(20, 184, 166, 0.2);
-            color: var(--color-green);
-            border-radius: 6px;
-            padding: 6px 10px;
-            font-size: 13px;
+            background: linear-gradient(135deg, rgba(20, 184, 166, 0.95) 0%, rgba(13, 148, 136, 0.95) 100%);
+            color: white;
+            border-radius: var(--radius-md);
+            padding: 10px 16px;
+            font-size: 0.9em;
+            font-weight: 500;
             position: fixed;
             left: 50%;
-            top: 10px;
-            transform: translateX(-50%);
+            top: 16px;
+            transform: translateX(-50%) translateY(-60px);
             z-index: 999;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            display: none;
+            box-shadow: 0 4px 16px var(--color-green-glow);
+            display: block;
+            opacity: 0;
+            transition: all var(--transition-normal);
+            pointer-events: none;
+        }
+        .success-toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
         }
     </style>
 </head>
@@ -258,14 +571,83 @@
             已自動替換：<b id="replace-count">**</b> 條字幕
         </div>
     </div>
+
+    <!-- 字幕設定卡片 -->
+    <div class="subtitle-card">
+        <div class="subtitle-card-header">
+            <div class="subtitle-card-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="4" width="20" height="16" rx="2"/>
+                    <path d="M7 15h4M15 15h2M7 11h2M13 11h4"/>
+                </svg>
+                字幕設定
+            </div>
+            <button class="more-settings-link" id="open-subtitle-options" title="更多設定">
+                進階
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="9 18 15 12 9 6"/>
+                </svg>
+            </button>
+        </div>
+
+        <!-- 單語/雙語模式切換 -->
+        <div class="segment-control">
+            <button class="segment-btn" id="single-mode-btn">單語字幕</button>
+            <button class="segment-btn active" id="dual-mode-btn">雙語字幕</button>
+        </div>
+
+        <!-- 語言選擇 -->
+        <div class="language-selectors">
+            <div class="language-row">
+                <span class="language-label">主要</span>
+                <div class="language-select-wrapper">
+                    <select class="language-select" id="popup-primary-lang">
+                        <!-- 由 JS 動態填充 -->
+                    </select>
+                </div>
+            </div>
+            <div class="language-row secondary-language-row" id="secondary-lang-row">
+                <span class="language-label">次要</span>
+                <div class="language-select-wrapper">
+                    <select class="language-select" id="popup-secondary-lang">
+                        <!-- 由 JS 動態填充 -->
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- 字幕大小 -->
+        <div class="font-size-control">
+            <div class="font-size-label">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="4 7 4 4 20 4 20 7"/>
+                    <line x1="9" y1="20" x2="15" y2="20"/>
+                    <line x1="12" y1="4" x2="12" y2="20"/>
+                </svg>
+                字幕大小
+            </div>
+            <div class="font-size-slider-wrapper">
+                <input type="range" class="font-size-slider" id="popup-font-size" min="20" max="80" value="55">
+                <span class="font-size-value" id="popup-font-size-value">55px</span>
+            </div>
+        </div>
+    </div>
+
     <div class="stats-card">
-        <h3>統計數據</h3>
+        <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="20" x2="18" y2="10"/>
+                <line x1="12" y1="20" x2="12" y2="4"/>
+                <line x1="6" y1="20" x2="6" y2="14"/>
+            </svg>
+            統計數據
+        </h3>
         <div class="stat-item">
-            <span class="stat-label">貢獻被顯示次數：</span>
+            <span class="stat-label">貢獻被顯示次數</span>
             <span class="stat-value" id="translation-views">0</span>
         </div>
         <div class="stat-item">
-            <span class="stat-label">獲得讚數：</span>
+            <span class="stat-label">獲得讚數</span>
             <span class="stat-value" id="upvotes-received">0</span>
         </div>
     </div>
