@@ -276,7 +276,9 @@ function updateStyleControls(type, styleConfig) {
   const fontSizeSlider = document.getElementById(`${type}FontSize`);
   const fontSizeValue = document.getElementById(`${type}FontSizeValue`);
   const textColorPicker = document.getElementById(`${type}TextColor`);
+  const textColorHex = document.getElementById(`${type}TextColorHex`);
   const backgroundColorPicker = document.getElementById(`${type}BackgroundColor`);
+  const backgroundColorHex = document.getElementById(`${type}BackgroundColorHex`);
   const backgroundOpacitySlider = document.getElementById(`${type}BackgroundOpacity`);
   const backgroundOpacityValue = document.getElementById(`${type}BackgroundOpacityValue`);
 
@@ -287,6 +289,9 @@ function updateStyleControls(type, styleConfig) {
 
   if (textColorPicker) {
     textColorPicker.value = styleConfig.textColor;
+    if (textColorHex) {
+      textColorHex.textContent = styleConfig.textColor;
+    }
   }
 
   if (backgroundColorPicker && backgroundOpacitySlider && backgroundOpacityValue) {
@@ -294,6 +299,9 @@ function updateStyleControls(type, styleConfig) {
     backgroundColorPicker.value = hex;
     backgroundOpacitySlider.value = opacity;
     backgroundOpacityValue.textContent = opacity.toFixed(2);
+    if (backgroundColorHex) {
+      backgroundColorHex.textContent = hex;
+    }
   }
 }
 
@@ -307,7 +315,7 @@ function updateSubtitleModeUI(isDualMode) {
   const secondaryPreview = document.getElementById('secondaryPreview');
 
   if (secondaryLanguageGroup) {
-    secondaryLanguageGroup.style.display = isDualMode ? 'block' : 'none';
+    secondaryLanguageGroup.style.display = isDualMode ? 'flex' : 'none';
   }
   if (secondaryStyleSection) {
     secondaryStyleSection.style.display = isDualMode ? 'block' : 'none';
@@ -390,6 +398,34 @@ function populateLanguageSelects() {
   console.log(`[Options] 已載入 ${SUPPORTED_LANGUAGES.length} 種語言選項`);
 }
 
+// ==================== Tab 切換邏輯 ====================
+
+/**
+ * 設置 Tab 導航切換
+ */
+function setupTabNavigation() {
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  const tabPanels = document.querySelectorAll('.tab-panel');
+
+  tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const targetTab = btn.dataset.tab;
+
+      // 更新按鈕狀態
+      tabBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      // 更新面板顯示
+      tabPanels.forEach(panel => {
+        panel.classList.remove('active');
+        if (panel.id === `${targetTab}-panel`) {
+          panel.classList.add('active');
+        }
+      });
+    });
+  });
+}
+
 // ==================== 事件監聽器設置 ====================
 
 /**
@@ -464,12 +500,6 @@ function setupEventListeners() {
     resetStylesBtn.addEventListener('click', resetStyles);
   }
 
-  // 套用樣式按鈕
-  const applyStylesBtn = document.getElementById('applyStyles');
-  if (applyStylesBtn) {
-    applyStylesBtn.addEventListener('click', applyStyles);
-  }
-
   // 備份按鈕
   const backupDataButton = document.getElementById('backupDataButton');
   if (backupDataButton) {
@@ -501,7 +531,9 @@ function setupStyleControlListeners(type, keyPrefix) {
   const fontSizeSlider = document.getElementById(`${type}FontSize`);
   const fontSizeValue = document.getElementById(`${type}FontSizeValue`);
   const textColorPicker = document.getElementById(`${type}TextColor`);
+  const textColorHex = document.getElementById(`${type}TextColorHex`);
   const backgroundColorPicker = document.getElementById(`${type}BackgroundColor`);
+  const backgroundColorHex = document.getElementById(`${type}BackgroundColorHex`);
   const backgroundOpacitySlider = document.getElementById(`${type}BackgroundOpacity`);
   const backgroundOpacityValue = document.getElementById(`${type}BackgroundOpacityValue`);
   const preview = document.getElementById(`${type}Preview`);
@@ -520,18 +552,24 @@ function setupStyleControlListeners(type, keyPrefix) {
   }
 
   if (textColorPicker) {
-    textColorPicker.addEventListener('change', async (e) => {
+    textColorPicker.addEventListener('input', (e) => {
       // 即時更新預覽
       if (preview) {
         preview.style.color = e.target.value;
       }
+      // 更新 hex 顯示
+      if (textColorHex) {
+        textColorHex.textContent = e.target.value;
+      }
+    });
+    textColorPicker.addEventListener('change', async (e) => {
       // 異步保存配置
       await saveConfig(`${keyPrefix}.textColor`, e.target.value);
     });
   }
 
   if (backgroundColorPicker && backgroundOpacitySlider && backgroundOpacityValue) {
-    const updateBackgroundColor = async () => {
+    const updateBackgroundColor = async (shouldSave = true) => {
       const hex = backgroundColorPicker.value;
       const opacity = parseFloat(backgroundOpacitySlider.value);
       const rgba = toRgba(hex, opacity);
@@ -539,16 +577,23 @@ function setupStyleControlListeners(type, keyPrefix) {
       if (preview) {
         preview.style.backgroundColor = rgba;
       }
+      // 更新 hex 顯示
+      if (backgroundColorHex) {
+        backgroundColorHex.textContent = hex;
+      }
       // 異步保存配置
-      await saveConfig(`${keyPrefix}.backgroundColor`, rgba);
+      if (shouldSave) {
+        await saveConfig(`${keyPrefix}.backgroundColor`, rgba);
+      }
     };
 
-    backgroundColorPicker.addEventListener('change', updateBackgroundColor);
+    backgroundColorPicker.addEventListener('input', () => updateBackgroundColor(false));
+    backgroundColorPicker.addEventListener('change', () => updateBackgroundColor(true));
 
     backgroundOpacitySlider.addEventListener('input', async (e) => {
       const opacity = parseFloat(e.target.value);
       backgroundOpacityValue.textContent = opacity.toFixed(2);
-      await updateBackgroundColor();
+      await updateBackgroundColor(true);
     });
   }
 }
@@ -632,13 +677,6 @@ async function resetStyles() {
   await saveConfigMultiple(defaultStyleConfig);
   await restoreOptionsUI();
   console.log('[Options] 樣式已重置為預設值');
-}
-
-/**
- * 套用樣式（顯示確認訊息）
- */
-function applyStyles() {
-  alert('字幕樣式已即時套用！\n\n配置會自動保存，Netflix 頁面會即時更新。');
 }
 
 // ==================== 備份/恢復功能 ====================
@@ -777,10 +815,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.warn('[Options] 無法連接到 background script:', error);
   }
 
+  // 設置 Tab 導航
+  setupTabNavigation();
+
   // 動態生成語言選項
   populateLanguageSelects();
 
-  // 設置事件監聽器
+  // 設置事件監聯器
   setupEventListeners();
 
   // 恢復 UI 狀態

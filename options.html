@@ -1,154 +1,401 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-Hant">
 <head>
   <meta charset="UTF-8">
-  <title>字幕助手 設定</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SubPal 設定</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="options.css">
 </head>
 <body>
-  <h1>字幕助手 設定</h1>
-  <div id="settings-container">
-    <div class="card">
-      <h2>Debug Mode</h2>
-      <div class="form-group debug-mode-group">
-        <label class="switch">
-          <input type="checkbox" id="debugModeCheckbox">
-          <span class="slider round"></span>
-        </label>
-        <label for="debugModeCheckbox" class="switch-label">啟用 Debug Mode</label>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo-section">
+        <img class="logo-icon-img" src="icons/icon48.png" alt="SubPal Logo">
+        <div class="logo-text">
+          <h1>SubPal</h1>
+          <span class="subtitle">字幕助手設定</span>
+        </div>
       </div>
-    </div>
+    </header>
 
-    <div class="card">
-      <h2>API Base URL</h2>
-      <div class="form-group">
-        <label for="apiBaseUrlInput">API Base URL:</label>
-        <input type="text" id="apiBaseUrlInput">
-        <span class="warning">除非您清楚知道自己在改什麼，否則這項設定不應該被更動</span>
-      </div>
-    </div>
+    <!-- Tab Navigation -->
+    <nav class="tab-navigation">
+      <button type="button" class="tab-btn active" data-tab="basic">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+        </svg>
+        <span>基礎設定</span>
+      </button>
+      <button type="button" class="tab-btn" data-tab="advanced">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+        <span>進階設定</span>
+      </button>
+    </nav>
 
-    <div class="card">
-      <h2>資料備份與恢復</h2>
-      <div class="form-group">
-        <button id="backupDataButton">備份資料</button>
-        <span>將 userID 和設定匯出為檔案</span>
-      </div>
-      <div class="form-group">
-        <label for="restoreDataInput">恢復資料:</label>
-        <input type="file" id="restoreDataInput" accept=".json">
-        <button id="restoreDataButton">恢復</button>
-        <span>從備份檔案匯入 userID 和設定</span>
-      </div>
-    </div>
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Basic Settings Tab -->
+      <div class="tab-panel active" id="basic-panel">
+        <!-- Subtitle Style Card -->
+        <section class="settings-card subtitle-card">
+          <div class="card-header">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+              </svg>
+            </div>
+            <div class="card-title">
+              <h2>字幕樣式</h2>
+              <p>自訂字幕的外觀與顯示方式</p>
+            </div>
+          </div>
 
-    <div class="card subtitle-customization-card">
-      <h2>字幕自定義設定</h2>
-      
-      <!-- 模式切換 -->
-      <div class="form-group subtitle-mode-group">
-        <h3>字幕模式</h3>
-        <div class="radio-group">
-          <label class="radio-option">
-            <input type="radio" name="subtitleMode" value="single" id="singleMode">
-            <span class="radio-label">單語模式</span>
-          </label>
-          <label class="radio-option">
-            <input type="radio" name="subtitleMode" value="dual" id="dualMode">
-            <span class="radio-label">雙語模式</span>
-          </label>
-        </div>
-      </div>
-      
-      <!-- 主要語言設定（始終顯示） -->
-      <div class="form-group language-group">
-        <h3>語言設定</h3>
-        <div class="language-selects">
-          <div class="select-group">
-            <label for="primaryLanguageSelect">主要語言:</label>
-            <select id="primaryLanguageSelect">
-              <!-- 由 JavaScript 動態生成 -->
-            </select>
-          </div>
-          <!-- 次要語言選擇器（雙語模式時顯示） -->
-          <div class="select-group" id="secondaryLanguageGroup" style="display: none;">
-            <label for="secondaryLanguageSelect">次要語言:</label>
-            <select id="secondaryLanguageSelect">
-              <!-- 由 JavaScript 動態生成 -->
-            </select>
-          </div>
-        </div>
-      </div>
-      
-      <!-- 主要語言樣式 -->
-      <div class="form-group primary-style-section">
-        <h3>主要語言樣式</h3>
-        <div class="style-controls">
-          <div class="control-group">
-            <label for="primaryFontSize">字體大小: <span id="primaryFontSizeValue">55</span>px</label>
-            <input type="range" id="primaryFontSize" min="12" max="100" value="55" step="1">
-          </div>
-          <div class="control-group">
-            <label for="primaryTextColor">文字顏色:</label>
-            <input type="color" id="primaryTextColor" value="#ffffff">
-          </div>
-          <div class="control-group">
-            <label for="primaryBackgroundColor">背景顏色:</label>
-            <input type="color" id="primaryBackgroundColor" value="#000000">
-          </div>
-          <div class="control-group">
-            <label for="primaryBackgroundOpacity">背景透明度: <span id="primaryBackgroundOpacityValue">0.8</span></label>
-            <input type="range" id="primaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05">
-          </div>
-        </div>
-      </div>
-      
-      <!-- 次要語言樣式（雙語模式時顯示） -->
-      <div class="form-group secondary-style-section" id="secondaryStyleSection" style="display: none;">
-        <h3>次要語言樣式</h3>
-        <div class="style-controls">
-          <div class="control-group">
-            <label for="secondaryFontSize">字體大小: <span id="secondaryFontSizeValue">24</span>px</label>
-            <input type="range" id="secondaryFontSize" min="12" max="100" value="24" step="1">
-          </div>
-          <div class="control-group">
-            <label for="secondaryTextColor">文字顏色:</label>
-            <input type="color" id="secondaryTextColor" value="#ffff00">
-          </div>
-          <div class="control-group">
-            <label for="secondaryBackgroundColor">背景顏色:</label>
-            <input type="color" id="secondaryBackgroundColor" value="#000000">
-          </div>
-          <div class="control-group">
-            <label for="secondaryBackgroundOpacity">背景透明度: <span id="secondaryBackgroundOpacityValue">0.8</span></label>
-            <input type="range" id="secondaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05">
-          </div>
-        </div>
-      </div>
-      
-      <!-- 即時預覽 -->
-      <div class="form-group preview-group">
-        <h3>即時預覽</h3>
-        <div class="preview-container">
-          <div class="preview-subtitle primary-preview" id="primaryPreview">主要語言預覽文字</div>
-          <div class="preview-subtitle secondary-preview" id="secondaryPreview" style="display: none;">次要語言預覽文字</div>
-        </div>
-        <div class="preview-controls">
-          <button id="resetStyles" class="btn btn-outline">重置樣式</button>
-          <button id="applyStyles" class="btn btn-primary">套用設定</button>
-        </div>
-      </div>
-    </div>
+          <div class="card-body">
+            <!-- Subtitle Mode Toggle -->
+            <div class="setting-group">
+              <label class="setting-label">字幕模式</label>
+              <div class="mode-toggle">
+                <label class="mode-option">
+                  <input type="radio" name="subtitleMode" value="single" id="singleMode">
+                  <span class="mode-box">
+                    <span class="mode-icon">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <rect x="3" y="10" width="18" height="4" rx="1"/>
+                      </svg>
+                    </span>
+                    <span class="mode-name">單語模式</span>
+                    <span class="mode-desc">僅顯示主要語言</span>
+                  </span>
+                </label>
+                <label class="mode-option">
+                  <input type="radio" name="subtitleMode" value="dual" id="dualMode">
+                  <span class="mode-box">
+                    <span class="mode-icon">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <rect x="3" y="7" width="18" height="4" rx="1"/>
+                        <rect x="3" y="13" width="14" height="3" rx="1"/>
+                      </svg>
+                    </span>
+                    <span class="mode-name">雙語模式</span>
+                    <span class="mode-desc">同時顯示兩種語言</span>
+                  </span>
+                </label>
+              </div>
+            </div>
 
-    <div class="card">
-      <h2>待同步數據</h2>
-      <div id="pending-data-container">
-        <p>投票隊列: <span id="voteQueueCount">0</span> 個待同步項目 <button id="clearVoteQueueButton">清空</button></p>
-        <p>翻譯隊列: <span id="translationQueueCount">0</span> 個待同步項目 <button id="clearTranslationQueueButton">清空</button></p>
-        <p>替換事件隊列: <span id="replacementEventsQueueCount">0</span> 個待同步項目 <button id="clearReplacementEventsQueueButton">清空</button></p>
+            <!-- Language Selection -->
+            <div class="setting-group">
+              <label class="setting-label">語言設定</label>
+              <div class="language-grid">
+                <div class="select-wrapper">
+                  <label for="primaryLanguageSelect">主要語言</label>
+                  <select id="primaryLanguageSelect"></select>
+                </div>
+                <div class="select-wrapper" id="secondaryLanguageGroup" style="display: none;">
+                  <label for="secondaryLanguageSelect">次要語言</label>
+                  <select id="secondaryLanguageSelect"></select>
+                </div>
+              </div>
+            </div>
+
+            <!-- Primary Style Controls -->
+            <div class="setting-group style-section">
+              <label class="setting-label">主要語言樣式</label>
+              <div class="style-grid">
+                <div class="style-control">
+                  <div class="control-header">
+                    <span>字體大小</span>
+                    <span class="control-value" id="primaryFontSizeValue">55</span><span class="control-unit">px</span>
+                  </div>
+                  <input type="range" id="primaryFontSize" min="12" max="100" value="55" step="1">
+                </div>
+                <div class="style-control color-control">
+                  <div class="control-header">
+                    <span>文字顏色</span>
+                  </div>
+                  <div class="color-picker-wrapper">
+                    <input type="color" id="primaryTextColor" value="#ffffff">
+                    <span class="color-hex" id="primaryTextColorHex">#ffffff</span>
+                  </div>
+                </div>
+                <div class="style-control color-control">
+                  <div class="control-header">
+                    <span>背景顏色</span>
+                  </div>
+                  <div class="color-picker-wrapper">
+                    <input type="color" id="primaryBackgroundColor" value="#000000">
+                    <span class="color-hex" id="primaryBackgroundColorHex">#000000</span>
+                  </div>
+                </div>
+                <div class="style-control">
+                  <div class="control-header">
+                    <span>背景透明度</span>
+                    <span class="control-value" id="primaryBackgroundOpacityValue">0.75</span>
+                  </div>
+                  <input type="range" id="primaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05">
+                </div>
+              </div>
+            </div>
+
+            <!-- Secondary Style Controls (Hidden by default) -->
+            <div class="setting-group style-section" id="secondaryStyleSection" style="display: none;">
+              <label class="setting-label">次要語言樣式</label>
+              <div class="style-grid">
+                <div class="style-control">
+                  <div class="control-header">
+                    <span>字體大小</span>
+                    <span class="control-value" id="secondaryFontSizeValue">24</span><span class="control-unit">px</span>
+                  </div>
+                  <input type="range" id="secondaryFontSize" min="12" max="100" value="24" step="1">
+                </div>
+                <div class="style-control color-control">
+                  <div class="control-header">
+                    <span>文字顏色</span>
+                  </div>
+                  <div class="color-picker-wrapper">
+                    <input type="color" id="secondaryTextColor" value="#ffff00">
+                    <span class="color-hex" id="secondaryTextColorHex">#ffff00</span>
+                  </div>
+                </div>
+                <div class="style-control color-control">
+                  <div class="control-header">
+                    <span>背景顏色</span>
+                  </div>
+                  <div class="color-picker-wrapper">
+                    <input type="color" id="secondaryBackgroundColor" value="#000000">
+                    <span class="color-hex" id="secondaryBackgroundColorHex">#000000</span>
+                  </div>
+                </div>
+                <div class="style-control">
+                  <div class="control-header">
+                    <span>背景透明度</span>
+                    <span class="control-value" id="secondaryBackgroundOpacityValue">0.75</span>
+                  </div>
+                  <input type="range" id="secondaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05">
+                </div>
+              </div>
+            </div>
+
+            <!-- Live Preview -->
+            <div class="setting-group preview-section">
+              <label class="setting-label">即時預覽</label>
+              <div class="preview-container">
+                <div class="preview-bg"></div>
+                <div class="preview-content">
+                  <div class="preview-subtitle primary-preview" id="primaryPreview">這是主要語言的字幕預覽</div>
+                  <div class="preview-subtitle secondary-preview" id="secondaryPreview" style="display: none;">This is secondary subtitle preview</div>
+                </div>
+              </div>
+              <div class="preview-actions">
+                <button type="button" id="resetStyles" class="btn btn-ghost">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                    <path d="M3 3v5h5"/>
+                  </svg>
+                  <span>重置樣式</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Backup & Restore Card -->
+        <section class="settings-card">
+          <div class="card-header">
+            <div class="card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+            </div>
+            <div class="card-title">
+              <h2>資料備份與恢復</h2>
+              <p>匯出或匯入您的設定檔</p>
+            </div>
+          </div>
+
+          <div class="card-body">
+            <div class="backup-actions">
+              <div class="backup-item">
+                <div class="backup-info">
+                  <h4>匯出設定</h4>
+                  <p>將 UserID 和所有設定匯出為 JSON 檔案</p>
+                </div>
+                <button type="button" id="backupDataButton" class="btn btn-secondary">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                  <span>備份資料</span>
+                </button>
+              </div>
+              <div class="backup-divider"></div>
+              <div class="backup-item">
+                <div class="backup-info">
+                  <h4>匯入設定</h4>
+                  <p>從備份檔案恢復您的設定</p>
+                </div>
+                <div class="restore-controls">
+                  <label class="file-input-wrapper">
+                    <input type="file" id="restoreDataInput" accept=".json">
+                    <span class="file-input-label">選擇檔案</span>
+                  </label>
+                  <button type="button" id="restoreDataButton" class="btn btn-secondary">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                      <polyline points="7 10 12 15 17 10"/>
+                      <line x1="12" y1="15" x2="12" y2="3"/>
+                    </svg>
+                    <span>恢復</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
-    </div>
+
+      <!-- Advanced Settings Tab -->
+      <div class="tab-panel" id="advanced-panel">
+        <!-- Debug Mode Card -->
+        <section class="settings-card">
+          <div class="card-header">
+            <div class="card-icon warning">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+              </svg>
+            </div>
+            <div class="card-title">
+              <h2>Debug Mode</h2>
+              <p>開發者除錯工具</p>
+            </div>
+          </div>
+
+          <div class="card-body">
+            <div class="toggle-setting">
+              <div class="toggle-info">
+                <h4>啟用 Debug Mode</h4>
+                <p>開啟後會在 Console 輸出詳細的除錯資訊</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="debugModeCheckbox">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- API Settings Card -->
+        <section class="settings-card">
+          <div class="card-header">
+            <div class="card-icon warning">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+              </svg>
+            </div>
+            <div class="card-title">
+              <h2>API 設定</h2>
+              <p>後端伺服器連線設定</p>
+            </div>
+          </div>
+
+          <div class="card-body">
+            <div class="input-setting">
+              <label for="apiBaseUrlInput">API Base URL</label>
+              <div class="input-with-warning">
+                <input type="text" id="apiBaseUrlInput" placeholder="https://example.com">
+                <div class="warning-badge">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                  </svg>
+                  <span>除非您清楚知道這項設定的作用，否則請勿修改</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Pending Data Card -->
+        <section class="settings-card">
+          <div class="card-header">
+            <div class="card-icon warning">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7"/>
+                <ellipse cx="12" cy="7" rx="8" ry="4"/>
+                <path d="M4 12c0 2.21 3.582 4 8 4s8-1.79 8-4"/>
+              </svg>
+            </div>
+            <div class="card-title">
+              <h2>待同步數據</h2>
+              <p>管理尚未同步至伺服器的本地資料</p>
+            </div>
+          </div>
+
+          <div class="card-body">
+            <div class="queue-list">
+              <div class="queue-item">
+                <div class="queue-info">
+                  <span class="queue-name">投票隊列</span>
+                  <span class="queue-count"><span id="voteQueueCount">0</span> 個待同步項目</span>
+                </div>
+                <button type="button" id="clearVoteQueueButton" class="btn btn-danger btn-sm">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <polyline points="3 6 5 6 21 6"/>
+                    <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+                  </svg>
+                  <span>清空</span>
+                </button>
+              </div>
+              <div class="queue-item">
+                <div class="queue-info">
+                  <span class="queue-name">翻譯隊列</span>
+                  <span class="queue-count"><span id="translationQueueCount">0</span> 個待同步項目</span>
+                </div>
+                <button type="button" id="clearTranslationQueueButton" class="btn btn-danger btn-sm">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <polyline points="3 6 5 6 21 6"/>
+                    <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+                  </svg>
+                  <span>清空</span>
+                </button>
+              </div>
+              <div class="queue-item">
+                <div class="queue-info">
+                  <span class="queue-name">替換事件隊列</span>
+                  <span class="queue-count"><span id="replacementEventsQueueCount">0</span> 個待同步項目</span>
+                </div>
+                <button type="button" id="clearReplacementEventsQueueButton" class="btn btn-danger btn-sm">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <polyline points="3 6 5 6 21 6"/>
+                    <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+                  </svg>
+                  <span>清空</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>SubPal v1.0 &middot; 讓字幕更準確</p>
+    </footer>
   </div>
+
   <script type="module" src="options.js"></script>
 </body>
 </html>
