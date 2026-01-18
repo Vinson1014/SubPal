@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>字幕助手教學 - SubPal Tutorial</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="options.css">
     <link rel="stylesheet" href="tutorial.css">
 </head>
 <body>
@@ -109,177 +113,100 @@
                 <h2>設定你的專屬字幕樣式</h2>
                 <p>選擇單語或雙語模式，並調整字幕的外觀設定</p>
             </div>
-            
-            <div class="tutorial-subtitle-customization">
-                <!-- 左右排版主要容器 -->
-                <div class="tutorial-layout-container">
-                    <!-- 左側面板：預覽區域 -->
-                    <div class="tutorial-left-panel">
-                        <div class="tutorial-preview-section">
-                            <div class="preview-header">
-                                <h3 class="preview-title">
-                                    <span class="preview-icon">👁️</span>
-                                    即時預覽
-                                </h3>
-                                <button id="tutorialResetStyles" class="tutorial-reset-btn">
-                                    <span class="btn-icon">🔄</span>
-                                    <span class="btn-text">重置</span>
-                                </button>
+
+            <div class="subtitle-customizer">
+                <!-- 左側：即時預覽（模擬影片畫面） -->
+                <div class="customizer-preview">
+                    <div class="preview-screen">
+                        <div class="preview-video-bg">
+                            <div class="video-gradient"></div>
+                            <div class="video-play-icon">▶</div>
+                        </div>
+                        <div class="preview-subtitles">
+                            <div class="preview-sub primary" id="tutorialPrimaryPreview">這是主要語言的字幕預覽</div>
+                            <div class="preview-sub secondary" id="tutorialSecondaryPreview" style="display: none;">This is the secondary subtitle</div>
+                        </div>
+                    </div>
+                    <button type="button" id="tutorialResetStyles" class="reset-link">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                        重置為預設值
+                    </button>
+                </div>
+
+                <!-- 右側：設定面板 -->
+                <div class="customizer-panel">
+                    <!-- 模式 & 語言：同一行 -->
+                    <div class="panel-row top-row">
+                        <div class="mode-switcher">
+                            <span class="row-label">模式</span>
+                            <div class="pill-switch">
+                                <input type="radio" name="tutorialSubtitleMode" value="single" id="tutorialSingleMode" checked>
+                                <label for="tutorialSingleMode">單語</label>
+                                <input type="radio" name="tutorialSubtitleMode" value="dual" id="tutorialDualMode">
+                                <label for="tutorialDualMode">雙語</label>
+                                <span class="pill-bg"></span>
                             </div>
-                            <div class="tutorial-preview-container">
-                                <div class="tutorial-preview-subtitle primary-preview" id="tutorialPrimaryPreview">
-                                    主要語言預覽文字
-                                </div>
-                                <div class="tutorial-preview-subtitle secondary-preview" id="tutorialSecondaryPreview" style="display: none;">
-                                    次要語言預覽文字
-                                </div>
+                        </div>
+                        <div class="lang-selectors">
+                            <div class="lang-item">
+                                <label>主要</label>
+                                <select id="tutorialPrimaryLanguageSelect"></select>
+                            </div>
+                            <div class="lang-item" id="tutorialSecondaryLanguageGroup">
+                                <label>次要</label>
+                                <select id="tutorialSecondaryLanguageSelect" disabled></select>
                             </div>
                         </div>
                     </div>
-                    
-                    <!-- 右側面板：所有設定 -->
-                    <div class="tutorial-right-panel">
-                        <!-- 模式選擇器 -->
-                        <div class="tutorial-mode-selector">
-                            <h3 class="section-title">
-                                <span class="section-icon">🎯</span>
-                                字幕模式
-                            </h3>
-                            <div class="mode-toggle-group">
-                                <input type="radio" name="tutorialSubtitleMode" value="single" id="tutorialSingleMode" checked>
-                                <input type="radio" name="tutorialSubtitleMode" value="dual" id="tutorialDualMode">
-                                <div class="mode-toggle-slider">
-                                    <label for="tutorialSingleMode" class="mode-option single-mode">
-                                        <span class="mode-icon">🔤</span>
-                                        <span class="mode-text">單語模式</span>
-                                    </label>
-                                    <label for="tutorialDualMode" class="mode-option dual-mode">
-                                        <span class="mode-icon">🌏</span>
-                                        <span class="mode-text">雙語模式</span>
-                                    </label>
+
+                    <!-- 樣式面板：主要 + 次要並排 -->
+                    <div class="style-panels">
+                        <!-- 主要語言樣式 -->
+                        <div class="style-panel" id="tutorialPrimaryPanel">
+                            <div class="panel-header">主要語言</div>
+                            <div class="ctrl-row">
+                                <label>字體大小</label>
+                                <input type="range" id="tutorialPrimaryFontSize" min="12" max="100" value="55">
+                                <span class="val"><span id="tutorialPrimaryFontSizeValue">55</span>px</span>
+                            </div>
+                            <div class="ctrl-row colors">
+                                <div class="color-ctrl">
+                                    <label>文字</label>
+                                    <input type="color" id="tutorialPrimaryTextColor" value="#ffffff">
+                                </div>
+                                <div class="color-ctrl">
+                                    <label>背景</label>
+                                    <input type="color" id="tutorialPrimaryBackgroundColor" value="#000000">
+                                </div>
+                                <div class="opacity-ctrl">
+                                    <label>透明度</label>
+                                    <input type="range" id="tutorialPrimaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05">
+                                    <span class="val" id="tutorialPrimaryBackgroundOpacityValue">0.75</span>
                                 </div>
                             </div>
                         </div>
-                        
-                        <!-- 語言設定（雙語模式時顯示） -->
-                        <div class="tutorial-language-section" id="tutorialDualLanguageGroup" style="display: none;">
-                            <h3 class="section-title">
-                                <span class="section-icon">🌐</span>
-                                語言設定
-                            </h3>
-                            <div class="language-selector-grid">
-                                <div class="language-selector">
-                                    <label class="language-label">主要語言</label>
-                                    <select id="tutorialPrimaryLanguageSelect" class="language-select">
-                                        <option value="zh-Hant">繁體中文</option>
-                                        <option value="zh-Hans">简体中文</option>
-                                        <option value="en">English</option>
-                                        <option value="ja">日本語</option>
-                                        <option value="ko">한국어</option>
-                                    </select>
-                                </div>
-                                <div class="language-selector">
-                                    <label class="language-label">次要語言</label>
-                                    <select id="tutorialSecondaryLanguageSelect" class="language-select">
-                                        <option value="en">English</option>
-                                        <option value="zh-Hant">繁體中文</option>
-                                        <option value="zh-Hans">简体中文</option>
-                                        <option value="ja">日本語</option>
-                                        <option value="ko">한국어</option>
-                                    </select>
-                                </div>
+
+                        <!-- 次要語言樣式 -->
+                        <div class="style-panel disabled" id="tutorialSecondaryPanel">
+                            <div class="panel-header">次要語言</div>
+                            <div class="ctrl-row">
+                                <label>字體大小</label>
+                                <input type="range" id="tutorialSecondaryFontSize" min="12" max="100" value="24" disabled>
+                                <span class="val"><span id="tutorialSecondaryFontSizeValue">24</span>px</span>
                             </div>
-                        </div>
-                        
-                        <!-- 樣式自定義面板 -->
-                        <div class="tutorial-style-panels">
-                            <!-- 主要語言樣式 -->
-                            <div class="style-panel primary-panel">
-                                <h3 class="panel-title">
-                                    <span class="panel-icon">🎨</span>
-                                    主要語言樣式
-                                </h3>
-                                <div class="style-grid">
-                                    <div class="style-item">
-                                        <div class="style-header">
-                                            <span class="style-label">字體大小</span>
-                                            <span class="style-value" id="tutorialPrimaryFontSizeValue">55px</span>
-                                        </div>
-                                        <input type="range" id="tutorialPrimaryFontSize" min="12" max="100" value="55" step="1" class="style-slider">
-                                    </div>
-                                    
-                                    <div class="style-item">
-                                        <div class="style-header">
-                                            <span class="style-label">文字顏色</span>
-                                        </div>
-                                        <div class="color-input-wrapper">
-                                            <input type="color" id="tutorialPrimaryTextColor" value="#ffffff" class="color-input">
-                                            <div class="color-preview" data-color="#ffffff"></div>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="style-item">
-                                        <div class="style-header">
-                                            <span class="style-label">背景顏色</span>
-                                        </div>
-                                        <div class="color-input-wrapper">
-                                            <input type="color" id="tutorialPrimaryBackgroundColor" value="#000000" class="color-input">
-                                            <div class="color-preview" data-color="#000000"></div>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="style-item">
-                                        <div class="style-header">
-                                            <span class="style-label">背景透明度</span>
-                                            <span class="style-value" id="tutorialPrimaryBackgroundOpacityValue">0.75</span>
-                                        </div>
-                                        <input type="range" id="tutorialPrimaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05" class="style-slider opacity-slider">
-                                    </div>
+                            <div class="ctrl-row colors">
+                                <div class="color-ctrl">
+                                    <label>文字</label>
+                                    <input type="color" id="tutorialSecondaryTextColor" value="#ffff00" disabled>
                                 </div>
-                            </div>
-                            
-                            <!-- 次要語言樣式（雙語模式時顯示） -->
-                            <div class="style-panel secondary-panel" id="tutorialSecondaryStyleSection" style="display: none;">
-                                <h3 class="panel-title">
-                                    <span class="panel-icon">🎭</span>
-                                    次要語言樣式
-                                </h3>
-                                <div class="style-grid">
-                                    <div class="style-item">
-                                        <div class="style-header">
-                                            <span class="style-label">字體大小</span>
-                                            <span class="style-value" id="tutorialSecondaryFontSizeValue">24px</span>
-                                        </div>
-                                        <input type="range" id="tutorialSecondaryFontSize" min="12" max="100" value="24" step="1" class="style-slider">
-                                    </div>
-                                    
-                                    <div class="style-item">
-                                        <div class="style-header">
-                                            <span class="style-label">文字顏色</span>
-                                        </div>
-                                        <div class="color-input-wrapper">
-                                            <input type="color" id="tutorialSecondaryTextColor" value="#ffff00" class="color-input">
-                                            <div class="color-preview" data-color="#ffff00"></div>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="style-item">
-                                        <div class="style-header">
-                                            <span class="style-label">背景顏色</span>
-                                        </div>
-                                        <div class="color-input-wrapper">
-                                            <input type="color" id="tutorialSecondaryBackgroundColor" value="#000000" class="color-input">
-                                            <div class="color-preview" data-color="#000000"></div>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="style-item">
-                                        <div class="style-header">
-                                            <span class="style-label">背景透明度</span>
-                                            <span class="style-value" id="tutorialSecondaryBackgroundOpacityValue">0.75</span>
-                                        </div>
-                                        <input type="range" id="tutorialSecondaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05" class="style-slider opacity-slider">
-                                    </div>
+                                <div class="color-ctrl">
+                                    <label>背景</label>
+                                    <input type="color" id="tutorialSecondaryBackgroundColor" value="#000000" disabled>
+                                </div>
+                                <div class="opacity-ctrl">
+                                    <label>透明度</label>
+                                    <input type="range" id="tutorialSecondaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05" disabled>
+                                    <span class="val" id="tutorialSecondaryBackgroundOpacityValue">0.75</span>
                                 </div>
                             </div>
                         </div>
@@ -431,6 +358,6 @@
         </div>
     </div>
 
-    <script src="tutorial.js"></script>
+    <script type="module" src="tutorial.js"></script>
 </body>
 </html>

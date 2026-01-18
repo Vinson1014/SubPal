@@ -1,4 +1,139 @@
 // 教學頁面 JavaScript 邏輯
+// 使用 config-schema.js 作為配置的單一真相來源
+
+import {
+    SUPPORTED_LANGUAGES,
+    getDefaultValues
+} from './content/system/config/config-schema.js';
+
+// ==================== 配置管理（與 options.js 相同邏輯） ====================
+
+const DEFAULT_CONFIG = getDefaultValues();
+
+/**
+ * 從嵌套對象中獲取值（支援點記法）
+ */
+function getNestedValue(obj, path) {
+    const keys = path.split('.');
+    let value = obj;
+    for (const key of keys) {
+        if (value && typeof value === 'object' && key in value) {
+            value = value[key];
+        } else {
+            return undefined;
+        }
+    }
+    return value;
+}
+
+/**
+ * 載入所有配置
+ */
+async function loadConfig() {
+    const flatKeys = Object.keys(DEFAULT_CONFIG);
+    const rootKeys = [...new Set(flatKeys.map(k => k.split('.')[0]))];
+    const result = await chrome.storage.local.get(rootKeys);
+    const config = {};
+    for (const flatKey of flatKeys) {
+        const value = getNestedValue(result, flatKey);
+        config[flatKey] = value !== undefined ? value : DEFAULT_CONFIG[flatKey];
+    }
+    return config;
+}
+
+/**
+ * 將扁平化鍵轉換為嵌套對象結構
+ */
+function flatToNested(flatItems) {
+    const nested = {};
+    for (const [key, value] of Object.entries(flatItems)) {
+        const keys = key.split('.');
+        const lastKey = keys.pop();
+        let current = nested;
+        for (const k of keys) {
+            if (!(k in current)) {
+                current[k] = {};
+            }
+            current = current[k];
+        }
+        current[lastKey] = value;
+    }
+    return nested;
+}
+
+/**
+ * 深度合併兩個對象
+ */
+function deepMerge(existing, updates) {
+    const result = { ...existing };
+    for (const [key, value] of Object.entries(updates)) {
+        if (
+            value !== null &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            key in result &&
+            result[key] !== null &&
+            typeof result[key] === 'object' &&
+            !Array.isArray(result[key])
+        ) {
+            result[key] = deepMerge(result[key], value);
+        } else {
+            result[key] = value;
+        }
+    }
+    return result;
+}
+
+/**
+ * 保存單個配置項
+ */
+async function saveConfig(key, value) {
+    const nested = flatToNested({ [key]: value });
+    const rootKey = key.split('.')[0];
+    const existing = await chrome.storage.local.get([rootKey]);
+    const merged = deepMerge(existing, nested);
+    await chrome.storage.local.set(merged);
+    console.log(`[Tutorial] 配置已保存: ${key} =`, value);
+}
+
+/**
+ * 批量保存配置
+ */
+async function saveConfigMultiple(items) {
+    const nested = flatToNested(items);
+    const rootKeys = [...new Set(Object.keys(items).map(k => k.split('.')[0]))];
+    const existing = await chrome.storage.local.get(rootKeys);
+    const merged = deepMerge(existing, nested);
+    await chrome.storage.local.set(merged);
+    console.log(`[Tutorial] 批量保存 ${Object.keys(items).length} 個配置`);
+}
+
+/**
+ * RGBA 轉 Hex + Opacity
+ */
+function parseRgba(rgba) {
+    const match = rgba.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+    if (!match) {
+        return { hex: '#000000', opacity: 1 };
+    }
+    const r = parseInt(match[1]).toString(16).padStart(2, '0');
+    const g = parseInt(match[2]).toString(16).padStart(2, '0');
+    const b = parseInt(match[3]).toString(16).padStart(2, '0');
+    const opacity = match[4] ? parseFloat(match[4]) : 1;
+    return { hex: `#${r}${g}${b}`, opacity };
+}
+
+/**
+ * Hex + Opacity 轉 RGBA
+ */
+function toRgba(hex, opacity) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${opacity})`;
+}
+
+// ==================== Tutorial Manager Class ====================
 
 class TutorialManager {
     constructor() {
@@ -6,46 +141,24 @@ class TutorialManager {
         this.totalSteps = 5;
         this.highlightTargets = [];
         this.animationTimeouts = [];
-        
+
         // UI Manager 相關
         this.subtitleContainer = null;
         this.interactionButtons = null;
         this.isHovering = false;
         this.hoverTimer = null;
-        
+
         // 提交表單狀態
         this.isSubmitFormOpen = false;
-        
+
         // 統一的定時器管理
         this.highlightTimer = null;
         this.hoverGuideTimer = null;
-        
-        // 字幕樣式設定相關（符合 SubtitleStyleManager 格式）
-        this.subtitleStyleConfig = {
-            mode: 'single',
-            primary: {
-                fontSize: 55,
-                textColor: '#ffffff',
-                backgroundColor: 'rgba(0, 0, 0, 0.75)'
-            },
-            secondary: {
-                fontSize: 24,
-                textColor: '#ffff00',
-                backgroundColor: 'rgba(0, 0, 0, 0.75)'
-            }
-        };
-        
-        // 雙語字幕語言設定（符合 DualSubtitleConfig 格式）
-        this.dualSubtitleSettings = {
-            dualSubtitleEnabled: true,
-            primaryLanguage: 'zh-Hant',
-            secondaryLanguage: 'en'
-        };
-        
+
         // popup檢測相關
         this.popupDetectionInterval = null;
         this.popupDetected = localStorage.getItem('subpal-tutorial-popup-detected') === 'true';
-        
+
         this.init();
     }
     
@@ -1178,577 +1291,337 @@ class TutorialManager {
     // showCompletionMessage() 和 hideCompletionMessage() 方法已被移除
     // 現在直接透過第五頁的按鈕執行相應動作
     
-    // === 字幕樣式自定義功能 ===
-    
+    // === 字幕樣式自定義功能（使用新的 config 系統） ===
+
     // 初始化字幕樣式自定義功能
-    initSubtitleStyleCustomization() {
+    async initSubtitleStyleCustomization() {
         console.log('[Tutorial] 初始化字幕樣式自定義功能');
-        
+
+        // 動態生成語言選項
+        this.populateLanguageSelects();
+
         // 設置事件監聽器
         this.setupSubtitleStyleListeners();
-        
-        // 載入保存的設定並確保完全同步
-        this.loadSubtitleStyleSettings(() => {
-            // 在載入完成後進行完整同步
-            this.performFullSync();
-        });
+
+        // 載入配置並恢復 UI
+        await this.restoreSubtitleUI();
     }
-    
-    // 執行完整的UI和預覽同步
-    performFullSync() {
-        console.log('[Tutorial] 執行完整同步');
-        
-        // 確保所有DOM元素都已準備好
-        setTimeout(() => {
-            // 1. 更新UI配置
-            this.updateUIFromConfig();
-            
-            // 2. 確保樣式面板模式正確設置
-            const stylePanels = document.querySelector('.tutorial-style-panels');
-            if (stylePanels) {
-                if (this.subtitleStyleConfig.mode === 'single') {
-                    stylePanels.classList.add('single-mode');
-                } else {
-                    stylePanels.classList.remove('single-mode');
-                }
+
+    // 動態生成語言選項
+    populateLanguageSelects() {
+        const primarySelect = document.getElementById('tutorialPrimaryLanguageSelect');
+        const secondarySelect = document.getElementById('tutorialSecondaryLanguageSelect');
+
+        if (primarySelect) {
+            primarySelect.innerHTML = '';
+            for (const lang of SUPPORTED_LANGUAGES) {
+                primarySelect.add(new Option(lang.name, lang.code));
             }
-            
-            // 3. 強制更新預覽，確保與設定一致
-            this.updateSubtitlePreview();
-            
-            console.log('[Tutorial] 同步完成', this.subtitleStyleConfig);
-        }, 150);
+        }
+
+        if (secondarySelect) {
+            secondarySelect.innerHTML = '';
+            for (const lang of SUPPORTED_LANGUAGES) {
+                secondarySelect.add(new Option(lang.name, lang.code));
+            }
+        }
+
+        console.log(`[Tutorial] 已載入 ${SUPPORTED_LANGUAGES.length} 種語言選項`);
     }
-    
-    // 載入字幕樣式和語言設定
-    loadSubtitleStyleSettings(callback) {
+
+    // 恢復 UI 狀態（從新的 config 系統載入）
+    async restoreSubtitleUI() {
         try {
-            // 嘗試從chrome.storage載入設定
-            if (typeof chrome !== 'undefined' && chrome.storage) {
-                chrome.storage.local.get([
-                    'subtitleStyleConfig', 
-                    'dualSubtitleEnabled', 
-                    'primaryLanguage', 
-                    'secondaryLanguage'
-                ], (result) => {
-                    // 載入字幕樣式設定
-                    if (result.subtitleStyleConfig) {
-                        this.subtitleStyleConfig = { ...this.subtitleStyleConfig, ...result.subtitleStyleConfig };
-                        console.log('[Tutorial] 載入儲存的樣式設定:', result.subtitleStyleConfig);
-                    } else {
-                        console.log('[Tutorial] 沒有儲存的樣式設定，使用預設值');
-                    }
-                    
-                    // 載入語言設定
-                    this.dualSubtitleSettings = {
-                        dualSubtitleEnabled: result.dualSubtitleEnabled !== undefined ? result.dualSubtitleEnabled : true,
-                        primaryLanguage: result.primaryLanguage || 'zh-Hant',
-                        secondaryLanguage: result.secondaryLanguage || 'en'
-                    };
-                    console.log('[Tutorial] 載入語言設定:', this.dualSubtitleSettings);
-                    
-                    // 執行回調
-                    if (callback) callback();
-                });
-            } else {
-                // 非Chrome環境，使用預設值
-                console.log('[Tutorial] 非Chrome環境，使用預設值');
-                if (callback) callback();
+            const config = await loadConfig();
+            console.log('[Tutorial] 載入配置:', config);
+
+            // 字幕模式
+            const isDualMode = config['subtitle.dualModeEnabled'];
+            const singleModeRadio = document.getElementById('tutorialSingleMode');
+            const dualModeRadio = document.getElementById('tutorialDualMode');
+            if (singleModeRadio && dualModeRadio) {
+                singleModeRadio.checked = !isDualMode;
+                dualModeRadio.checked = isDualMode;
             }
+
+            // 語言設定
+            const primaryLanguageSelect = document.getElementById('tutorialPrimaryLanguageSelect');
+            const secondaryLanguageSelect = document.getElementById('tutorialSecondaryLanguageSelect');
+            if (primaryLanguageSelect) {
+                primaryLanguageSelect.value = config['subtitle.primaryLanguage'];
+            }
+            if (secondaryLanguageSelect) {
+                secondaryLanguageSelect.value = config['subtitle.secondaryLanguage'];
+            }
+
+            // 主要字幕樣式
+            this.updateStyleControls('tutorialPrimary', {
+                fontSize: config['subtitle.style.primary.fontSize'],
+                textColor: config['subtitle.style.primary.textColor'],
+                backgroundColor: config['subtitle.style.primary.backgroundColor']
+            });
+
+            // 次要字幕樣式
+            this.updateStyleControls('tutorialSecondary', {
+                fontSize: config['subtitle.style.secondary.fontSize'],
+                textColor: config['subtitle.style.secondary.textColor'],
+                backgroundColor: config['subtitle.style.secondary.backgroundColor']
+            });
+
+            // 更新 UI 顯示狀態
+            this.updateSubtitleModeUI(isDualMode);
+            this.updatePreview(config);
+
         } catch (error) {
-            console.log('[Tutorial] 無法載入設定，使用預設值:', error);
-            // 錯誤情況下也要執行回調
-            if (callback) callback();
+            console.error('[Tutorial] 載入配置失敗:', error);
         }
     }
-    
-    // 從配置更新UI元素
-    updateUIFromConfig() {
-        const config = this.subtitleStyleConfig;
-        
-        // 更新模式選擇
-        const singleMode = document.getElementById('tutorialSingleMode');
-        const dualMode = document.getElementById('tutorialDualMode');
-        if (singleMode && dualMode) {
-            singleMode.checked = config.mode === 'single';
-            dualMode.checked = config.mode === 'dual';
+
+    // 更新樣式控制項
+    updateStyleControls(prefix, styleConfig) {
+        const fontSizeSlider = document.getElementById(`${prefix}FontSize`);
+        const fontSizeValue = document.getElementById(`${prefix}FontSizeValue`);
+        const textColorPicker = document.getElementById(`${prefix}TextColor`);
+        const textColorHex = document.getElementById(`${prefix}TextColorHex`);
+        const backgroundColorPicker = document.getElementById(`${prefix}BackgroundColor`);
+        const backgroundColorHex = document.getElementById(`${prefix}BackgroundColorHex`);
+        const backgroundOpacitySlider = document.getElementById(`${prefix}BackgroundOpacity`);
+        const backgroundOpacityValue = document.getElementById(`${prefix}BackgroundOpacityValue`);
+
+        if (fontSizeSlider && fontSizeValue) {
+            fontSizeSlider.value = styleConfig.fontSize;
+            fontSizeValue.textContent = styleConfig.fontSize;
         }
-        
-        // 更新主要語言樣式
-        const primaryFontSize = document.getElementById('tutorialPrimaryFontSize');
-        const primaryFontSizeValue = document.getElementById('tutorialPrimaryFontSizeValue');
-        const primaryTextColor = document.getElementById('tutorialPrimaryTextColor');
-        const primaryBackgroundColor = document.getElementById('tutorialPrimaryBackgroundColor');
-        const primaryBackgroundOpacity = document.getElementById('tutorialPrimaryBackgroundOpacity');
-        const primaryBackgroundOpacityValue = document.getElementById('tutorialPrimaryBackgroundOpacityValue');
-        
-        if (primaryFontSize) {
-            primaryFontSize.value = config.primary.fontSize || 55;
-            if (primaryFontSizeValue) primaryFontSizeValue.textContent = config.primary.fontSize || 55;
+
+        if (textColorPicker) {
+            textColorPicker.value = styleConfig.textColor;
+            if (textColorHex) {
+                textColorHex.textContent = styleConfig.textColor;
+            }
         }
-        if (primaryTextColor) {
-            primaryTextColor.value = config.primary.textColor || '#ffffff';
+
+        if (backgroundColorPicker && backgroundOpacitySlider && backgroundOpacityValue) {
+            const { hex, opacity } = parseRgba(styleConfig.backgroundColor);
+            backgroundColorPicker.value = hex;
+            backgroundOpacitySlider.value = opacity;
+            backgroundOpacityValue.textContent = opacity.toFixed(2);
+            if (backgroundColorHex) {
+                backgroundColorHex.textContent = hex;
+            }
         }
-        if (primaryBackgroundColor && primaryBackgroundOpacity) {
-            // 從 RGBA 格式解析出 HEX 和透明度
-            const { hex, opacity } = this.parseRgbaColor(config.primary.backgroundColor);
-            primaryBackgroundColor.value = hex;
-            primaryBackgroundOpacity.value = opacity;
-            if (primaryBackgroundOpacityValue) primaryBackgroundOpacityValue.textContent = opacity.toFixed(2);
-        }
-        
-        // 更新次要語言樣式
-        const secondaryFontSize = document.getElementById('tutorialSecondaryFontSize');
-        const secondaryFontSizeValue = document.getElementById('tutorialSecondaryFontSizeValue');
-        const secondaryTextColor = document.getElementById('tutorialSecondaryTextColor');
-        const secondaryBackgroundColor = document.getElementById('tutorialSecondaryBackgroundColor');
-        const secondaryBackgroundOpacity = document.getElementById('tutorialSecondaryBackgroundOpacity');
-        const secondaryBackgroundOpacityValue = document.getElementById('tutorialSecondaryBackgroundOpacityValue');
-        
-        if (secondaryFontSize) {
-            secondaryFontSize.value = config.secondary.fontSize || 24;
-            if (secondaryFontSizeValue) secondaryFontSizeValue.textContent = config.secondary.fontSize || 24;
-        }
-        if (secondaryTextColor) {
-            secondaryTextColor.value = config.secondary.textColor || '#ffff00';
-        }
-        if (secondaryBackgroundColor && secondaryBackgroundOpacity) {
-            // 從 RGBA 格式解析出 HEX 和透明度
-            const { hex, opacity } = this.parseRgbaColor(config.secondary.backgroundColor);
-            secondaryBackgroundColor.value = hex;
-            secondaryBackgroundOpacity.value = opacity;
-            if (secondaryBackgroundOpacityValue) secondaryBackgroundOpacityValue.textContent = opacity.toFixed(2);
-        }
-        
-        // 更新語言選擇器
-        const primaryLanguageSelect = document.getElementById('tutorialPrimaryLanguageSelect');
+    }
+
+    // 更新字幕模式 UI
+    updateSubtitleModeUI(isDualMode) {
         const secondaryLanguageSelect = document.getElementById('tutorialSecondaryLanguageSelect');
-        
-        if (primaryLanguageSelect) {
-            primaryLanguageSelect.value = this.dualSubtitleSettings.primaryLanguage;
-        }
+        const secondaryPreview = document.getElementById('tutorialSecondaryPreview');
+        const secondaryPanel = document.getElementById('tutorialSecondaryPanel');
+
+        // 控制次要語言選擇器的 disabled 狀態
         if (secondaryLanguageSelect) {
-            secondaryLanguageSelect.value = this.dualSubtitleSettings.secondaryLanguage;
+            secondaryLanguageSelect.disabled = !isDualMode;
         }
-        
-        // 更新雙語模式相關元素的顯示
-        this.toggleDualLanguageSettings(config.mode === 'dual');
+
+        // 控制次要語言預覽的顯示
+        if (secondaryPreview) {
+            secondaryPreview.style.display = isDualMode ? 'block' : 'none';
+        }
+
+        // 控制次要語言樣式面板的 disabled 狀態
+        if (secondaryPanel) {
+            secondaryPanel.classList.toggle('disabled', !isDualMode);
+            // 同時控制面板內所有輸入控制項的 disabled 狀態
+            const inputs = secondaryPanel.querySelectorAll('input');
+            inputs.forEach(input => {
+                input.disabled = !isDualMode;
+            });
+        }
+    }
+
+    // 更新預覽
+    async updatePreview(config = null) {
+        if (!config) {
+            config = await loadConfig();
+        }
+
+        const primaryPreview = document.getElementById('tutorialPrimaryPreview');
+        const secondaryPreview = document.getElementById('tutorialSecondaryPreview');
+
+        if (primaryPreview) {
+            this.applyPreviewStyles(primaryPreview, {
+                fontSize: config['subtitle.style.primary.fontSize'],
+                textColor: config['subtitle.style.primary.textColor'],
+                backgroundColor: config['subtitle.style.primary.backgroundColor']
+            });
+        }
+
+        if (secondaryPreview && config['subtitle.dualModeEnabled']) {
+            this.applyPreviewStyles(secondaryPreview, {
+                fontSize: config['subtitle.style.secondary.fontSize'],
+                textColor: config['subtitle.style.secondary.textColor'],
+                backgroundColor: config['subtitle.style.secondary.backgroundColor']
+            });
+        }
+    }
+
+    // 應用預覽樣式
+    applyPreviewStyles(element, styleConfig) {
+        if (!element || !styleConfig) return;
+
+        Object.assign(element.style, {
+            fontSize: `${styleConfig.fontSize}px`,
+            color: styleConfig.textColor,
+            backgroundColor: styleConfig.backgroundColor,
+            fontFamily: 'Arial, sans-serif',
+            textAlign: 'center',
+            borderRadius: '4px',
+            textShadow: '1px 1px 1px rgba(0, 0, 0, 0.5)',
+            padding: '8px 16px',
+            display: 'inline-block',
+            minWidth: '120px',
+            margin: '2px 5px'
+        });
     }
     
     // 設置字幕樣式事件監聽器
     setupSubtitleStyleListeners() {
-        // 模式切換監聽器
-        const singleMode = document.getElementById('tutorialSingleMode');
-        const dualMode = document.getElementById('tutorialDualMode');
-        
-        if (singleMode) {
-            singleMode.addEventListener('change', (e) => {
-                if (e.target.checked) {
-                    this.subtitleStyleConfig.mode = 'single';
-                    this.toggleDualLanguageSettings(false);
-                    this.updateSubtitlePreview();
-                    this.autoSaveStyles();
+        // 模式切換
+        const singleModeRadio = document.getElementById('tutorialSingleMode');
+        const dualModeRadio = document.getElementById('tutorialDualMode');
+
+        if (singleModeRadio) {
+            singleModeRadio.addEventListener('change', async () => {
+                if (singleModeRadio.checked) {
+                    await saveConfig('subtitle.dualModeEnabled', false);
+                    this.updateSubtitleModeUI(false);
                 }
             });
         }
-        
-        if (dualMode) {
-            dualMode.addEventListener('change', (e) => {
-                if (e.target.checked) {
-                    this.subtitleStyleConfig.mode = 'dual';
-                    this.toggleDualLanguageSettings(true);
-                    this.updateSubtitlePreview();
-                    this.autoSaveStyles();
+
+        if (dualModeRadio) {
+            dualModeRadio.addEventListener('change', async () => {
+                if (dualModeRadio.checked) {
+                    await saveConfig('subtitle.dualModeEnabled', true);
+                    this.updateSubtitleModeUI(true);
                 }
             });
         }
-        
-        // 主要語言樣式監聽器
-        this.setupStyleControlListeners('primary');
-        
-        // 次要語言樣式監聽器
-        this.setupStyleControlListeners('secondary');
-        
-        // 語言選擇器監聽器
-        this.setupLanguageSelectors();
-        
-        // 重置按鈕
-        const resetBtn = document.getElementById('tutorialResetStyles');
-        if (resetBtn) {
-            resetBtn.addEventListener('click', () => {
-                this.resetSubtitleStyles();
-            });
-        }
-        
-        // 移除原本的儲存按鈕監聽器，改為自動儲存
-        // 設置自動儲存機制
-        this.setupAutoSave();
-    }
-    
-    // 設置語言選擇器監聽器
-    setupLanguageSelectors() {
+
+        // 語言選擇器
         const primaryLanguageSelect = document.getElementById('tutorialPrimaryLanguageSelect');
         const secondaryLanguageSelect = document.getElementById('tutorialSecondaryLanguageSelect');
-        
+
         if (primaryLanguageSelect) {
-            primaryLanguageSelect.addEventListener('change', (e) => {
-                this.dualSubtitleSettings.primaryLanguage = e.target.value;
-                console.log('[Tutorial] 主要語言已更新:', e.target.value);
-                this.autoSaveLanguageSettings();
+            primaryLanguageSelect.addEventListener('change', async (e) => {
+                await saveConfig('subtitle.primaryLanguage', e.target.value);
             });
         }
-        
+
         if (secondaryLanguageSelect) {
-            secondaryLanguageSelect.addEventListener('change', (e) => {
-                this.dualSubtitleSettings.secondaryLanguage = e.target.value;
-                console.log('[Tutorial] 次要語言已更新:', e.target.value);
-                this.autoSaveLanguageSettings();
+            secondaryLanguageSelect.addEventListener('change', async (e) => {
+                await saveConfig('subtitle.secondaryLanguage', e.target.value);
             });
         }
-    }
-    
-    // 自動儲存語言設定
-    autoSaveLanguageSettings() {
-        // 清除之前的延遲儲存
-        if (this.languageSaveTimeout) {
-            clearTimeout(this.languageSaveTimeout);
-        }
-        
-        // 設置新的延遲儲存（500ms後儲存）
-        this.languageSaveTimeout = setTimeout(() => {
-            this.saveLanguageSettings();
-        }, 500);
-    }
-    
-    // 儲存語言設定
-    saveLanguageSettings() {
-        try {
-            if (typeof chrome !== 'undefined' && chrome.storage) {
-                chrome.storage.local.set({
-                    dualSubtitleEnabled: this.dualSubtitleSettings.dualSubtitleEnabled,
-                    primaryLanguage: this.dualSubtitleSettings.primaryLanguage,
-                    secondaryLanguage: this.dualSubtitleSettings.secondaryLanguage
-                }, () => {
-                    if (chrome.runtime.lastError) {
-                        console.error('[Tutorial] 儲存語言設定失敗:', chrome.runtime.lastError);
-                    } else {
-                        console.log('[Tutorial] 語言設定已儲存:', this.dualSubtitleSettings);
-                    }
-                });
-            }
-        } catch (error) {
-            console.error('[Tutorial] 儲存語言設定時發生錯誤:', error);
+
+        // 主要字幕樣式控制項
+        this.setupStyleControlListeners('tutorialPrimary', 'subtitle.style.primary');
+
+        // 次要字幕樣式控制項
+        this.setupStyleControlListeners('tutorialSecondary', 'subtitle.style.secondary');
+
+        // 重置樣式按鈕
+        const resetStylesBtn = document.getElementById('tutorialResetStyles');
+        if (resetStylesBtn) {
+            resetStylesBtn.addEventListener('click', () => this.resetStyles());
         }
     }
     
-    // 設置特定樣式控制項的監聽器
-    setupStyleControlListeners(type) {
-        const prefix = type === 'primary' ? 'tutorialPrimary' : 'tutorialSecondary';
-        
-        // 字體大小
-        const fontSize = document.getElementById(`${prefix}FontSize`);
+    // 設置樣式控制項監聽器
+    setupStyleControlListeners(prefix, keyPrefix) {
+        const fontSizeSlider = document.getElementById(`${prefix}FontSize`);
         const fontSizeValue = document.getElementById(`${prefix}FontSizeValue`);
-        if (fontSize) {
-            fontSize.addEventListener('input', (e) => {
-                const value = e.target.value;
-                this.subtitleStyleConfig[type].fontSize = parseInt(value);
-                if (fontSizeValue) fontSizeValue.textContent = value;
-                this.updateSubtitlePreview();
-                this.autoSaveStyles();
-            });
-        }
-        
-        // 文字顏色
-        const textColor = document.getElementById(`${prefix}TextColor`);
-        if (textColor) {
-            textColor.addEventListener('change', (e) => {
-                this.subtitleStyleConfig[type].textColor = e.target.value;
-                this.updateSubtitlePreview();
-                this.autoSaveStyles();
-            });
-        }
-        
-        // 背景顏色
-        const backgroundColor = document.getElementById(`${prefix}BackgroundColor`);
-        if (backgroundColor) {
-            backgroundColor.addEventListener('change', (e) => {
-                // 獲取當前的透明度
-                const { opacity } = this.parseRgbaColor(this.subtitleStyleConfig[type].backgroundColor);
-                // 更新為新的RGBA格式
-                this.subtitleStyleConfig[type].backgroundColor = this.hexToRgba(e.target.value, opacity);
-                this.updateSubtitlePreview();
-                this.autoSaveStyles();
-            });
-        }
-        
-        // 背景透明度
-        const backgroundOpacity = document.getElementById(`${prefix}BackgroundOpacity`);
+        const textColorPicker = document.getElementById(`${prefix}TextColor`);
+        const textColorHex = document.getElementById(`${prefix}TextColorHex`);
+        const backgroundColorPicker = document.getElementById(`${prefix}BackgroundColor`);
+        const backgroundColorHex = document.getElementById(`${prefix}BackgroundColorHex`);
+        const backgroundOpacitySlider = document.getElementById(`${prefix}BackgroundOpacity`);
         const backgroundOpacityValue = document.getElementById(`${prefix}BackgroundOpacityValue`);
-        if (backgroundOpacity) {
-            backgroundOpacity.addEventListener('input', (e) => {
-                const value = parseFloat(e.target.value);
-                // 獲取當前的HEX顏色
-                const { hex } = this.parseRgbaColor(this.subtitleStyleConfig[type].backgroundColor);
-                // 更新為新的RGBA格式
-                this.subtitleStyleConfig[type].backgroundColor = this.hexToRgba(hex, value);
-                if (backgroundOpacityValue) backgroundOpacityValue.textContent = value.toFixed(2);
-                this.updateSubtitlePreview();
-                this.autoSaveStyles();
+        const preview = document.getElementById(`${prefix}Preview`);
+
+        if (fontSizeSlider && fontSizeValue) {
+            fontSizeSlider.addEventListener('input', async (e) => {
+                const size = parseInt(e.target.value);
+                fontSizeValue.textContent = size;
+                if (preview) {
+                    preview.style.fontSize = `${size}px`;
+                }
+                await saveConfig(`${keyPrefix}.fontSize`, size);
             });
         }
-    }
-    
-    // 設置自動儲存機制
-    setupAutoSave() {
-        // 設置延遲儲存以避免頻繁儲存
-        this.autoSaveTimeout = null;
-        this.languageSaveTimeout = null;
-        
-        // 監聽頁面離開事件，確保儲存設定
-        window.addEventListener('beforeunload', () => {
-            this.saveSubtitleStyles();
-            this.saveLanguageSettings();
-        });
-        
-        // 監聽步驟切換，當離開步驟3時儲存設定
-        const nextBtn = document.getElementById('next-btn');
-        const prevBtn = document.getElementById('prev-btn');
-        
-        if (nextBtn) {
-            nextBtn.addEventListener('click', () => {
-                if (this.currentStep === 3) {
-                    this.saveSubtitleStyles();
-                    this.saveLanguageSettings();
+
+        if (textColorPicker) {
+            textColorPicker.addEventListener('input', (e) => {
+                if (preview) {
+                    preview.style.color = e.target.value;
+                }
+                if (textColorHex) {
+                    textColorHex.textContent = e.target.value;
                 }
             });
+            textColorPicker.addEventListener('change', async (e) => {
+                await saveConfig(`${keyPrefix}.textColor`, e.target.value);
+            });
         }
-        
-        if (prevBtn) {
-            prevBtn.addEventListener('click', () => {
-                if (this.currentStep === 3) {
-                    this.saveSubtitleStyles();
-                    this.saveLanguageSettings();
+
+        if (backgroundColorPicker && backgroundOpacitySlider && backgroundOpacityValue) {
+            const updateBackgroundColor = async (shouldSave = true) => {
+                const hex = backgroundColorPicker.value;
+                const opacity = parseFloat(backgroundOpacitySlider.value);
+                const rgba = toRgba(hex, opacity);
+                if (preview) {
+                    preview.style.backgroundColor = rgba;
                 }
+                if (backgroundColorHex) {
+                    backgroundColorHex.textContent = hex;
+                }
+                if (shouldSave) {
+                    await saveConfig(`${keyPrefix}.backgroundColor`, rgba);
+                }
+            };
+
+            backgroundColorPicker.addEventListener('input', () => updateBackgroundColor(false));
+            backgroundColorPicker.addEventListener('change', () => updateBackgroundColor(true));
+
+            backgroundOpacitySlider.addEventListener('input', async (e) => {
+                const opacity = parseFloat(e.target.value);
+                backgroundOpacityValue.textContent = opacity.toFixed(2);
+                await updateBackgroundColor(true);
             });
         }
     }
-    
-    // 延遲自動儲存方法
-    autoSaveStyles() {
-        // 清除之前的延遲儲存
-        if (this.autoSaveTimeout) {
-            clearTimeout(this.autoSaveTimeout);
+
+    // 重置樣式為預設值
+    async resetStyles() {
+        if (!confirm('確定要重置所有樣式設定嗎？')) {
+            return;
         }
-        
-        // 設置新的延遲儲存（1秒後儲存）
-        this.autoSaveTimeout = setTimeout(() => {
-            this.saveSubtitleStyles();
-        }, 1000);
-    }
-    
-    // 切換雙語設定的顯示/隱藏
-    toggleDualLanguageSettings(show) {
-        const dualLanguageGroup = document.getElementById('tutorialDualLanguageGroup');
-        const secondaryStyleSection = document.getElementById('tutorialSecondaryStyleSection');
-        const secondaryPreview = document.getElementById('tutorialSecondaryPreview');
-        const stylePanels = document.querySelector('.tutorial-style-panels');
-        
-        if (dualLanguageGroup) {
-            dualLanguageGroup.style.display = show ? 'block' : 'none';
-        }
-        if (secondaryStyleSection) {
-            secondaryStyleSection.style.display = show ? 'block' : 'none';
-        }
-        if (secondaryPreview) {
-            secondaryPreview.style.display = show ? 'block' : 'none';
-        }
-        
-        // 控制樣式面板的佈局類別
-        if (stylePanels) {
-            if (show) {
-                stylePanels.classList.remove('single-mode');
-            } else {
-                stylePanels.classList.add('single-mode');
-            }
-        }
-        
-        // 添加動畫效果
-        if (show && dualLanguageGroup) {
-            dualLanguageGroup.style.animation = 'slideDown 0.3s ease-out';
-        }
-        if (show && secondaryStyleSection) {
-            secondaryStyleSection.style.animation = 'slideDown 0.3s ease-out';
-        }
-    }
-    
-    // 更新字幕預覽
-    updateSubtitlePreview() {
-        const primaryPreview = document.getElementById('tutorialPrimaryPreview');
-        const secondaryPreview = document.getElementById('tutorialSecondaryPreview');
-        
-        console.log('[Tutorial] 更新預覽，當前配置:', this.subtitleStyleConfig);
-        
-        // 更新主要語言預覽
-        if (primaryPreview) {
-            const primaryStyle = this.subtitleStyleConfig.primary;
-            
-            // 強制應用樣式（backgroundColor 已經是 RGBA 格式）
-            primaryPreview.style.setProperty('font-size', `${primaryStyle.fontSize}px`, 'important');
-            primaryPreview.style.setProperty('color', primaryStyle.textColor, 'important');
-            primaryPreview.style.setProperty('background-color', primaryStyle.backgroundColor, 'important');
-            primaryPreview.style.setProperty('display', 'block', 'important');
-            
-            console.log('[Tutorial] 主要預覽樣式:', {
-                fontSize: `${primaryStyle.fontSize}px`,
-                color: primaryStyle.textColor,
-                backgroundColor: primaryStyle.backgroundColor
-            });
-        }
-        
-        // 更新次要語言預覽（根據模式顯示/隱藏）
-        if (secondaryPreview) {
-            if (this.subtitleStyleConfig.mode === 'dual') {
-                const secondaryStyle = this.subtitleStyleConfig.secondary;
-                
-                // 強制應用樣式（backgroundColor 已經是 RGBA 格式）
-                secondaryPreview.style.setProperty('font-size', `${secondaryStyle.fontSize}px`, 'important');
-                secondaryPreview.style.setProperty('color', secondaryStyle.textColor, 'important');
-                secondaryPreview.style.setProperty('background-color', secondaryStyle.backgroundColor, 'important');
-                secondaryPreview.style.setProperty('display', 'block', 'important');
-                
-                console.log('[Tutorial] 次要預覽樣式:', {
-                    fontSize: `${secondaryStyle.fontSize}px`,
-                    color: secondaryStyle.textColor,
-                    backgroundColor: secondaryStyle.backgroundColor
-                });
-            } else {
-                secondaryPreview.style.setProperty('display', 'none', 'important');
-            }
-        }
-    }
-    
-    // 將HEX顏色轉換為RGBA
-    // 從 RGBA 格式解析出 HEX 顏色和透明度
-    parseRgbaColor(rgba) {
-        if (!rgba || !rgba.startsWith('rgba(')) {
-            // 如果是HEX格式，返回預設透明度
-            if (rgba && rgba.startsWith('#')) {
-                return { hex: rgba, opacity: 0.75 };
-            }
-            return { hex: '#000000', opacity: 0.75 };
-        }
-        
-        // 解析 rgba(r, g, b, a) 格式
-        const match = rgba.match(/rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)/);
-        if (match) {
-            const r = parseInt(match[1]);
-            const g = parseInt(match[2]);
-            const b = parseInt(match[3]);
-            const a = parseFloat(match[4]);
-            
-            // 轉換為HEX
-            const hex = '#' + [r, g, b].map(x => {
-                const hex = x.toString(16);
-                return hex.length === 1 ? '0' + hex : hex;
-            }).join('');
-            
-            return { hex, opacity: a };
-        }
-        
-        return { hex: '#000000', opacity: 0.75 };
-    }
-    
-    // 確保顏色是HEX格式（向後相容）
-    ensureHexColor(color) {
-        const parsed = this.parseRgbaColor(color);
-        return parsed.hex;
-    }
-    
-    // 將HEX顏色轉換為RGBA
-    hexToRgba(hex, alpha) {
-        if (!hex || !hex.startsWith('#')) {
-            console.error('[Tutorial] 無效的HEX顏色:', hex);
-            return 'rgba(0, 0, 0, 0.75)'; // 預設值
-        }
-        
-        const r = parseInt(hex.slice(1, 3), 16);
-        const g = parseInt(hex.slice(3, 5), 16);
-        const b = parseInt(hex.slice(5, 7), 16);
-        
-        return `rgba(${r}, ${g}, ${b}, ${alpha != null ? alpha : 0.75})`;
-    }
-    
-    // 重置字幕樣式
-    resetSubtitleStyles() {
-        this.subtitleStyleConfig = {
-            mode: 'single',
-            primary: {
-                fontSize: 55,
-                textColor: '#ffffff',
-                backgroundColor: 'rgba(0, 0, 0, 0.75)'
-            },
-            secondary: {
-                fontSize: 24,
-                textColor: '#ffff00',
-                backgroundColor: 'rgba(0, 0, 0, 0.75)'
-            }
+
+        const defaultStyleConfig = {
+            'subtitle.dualModeEnabled': DEFAULT_CONFIG['subtitle.dualModeEnabled'],
+            'subtitle.primaryLanguage': DEFAULT_CONFIG['subtitle.primaryLanguage'],
+            'subtitle.secondaryLanguage': DEFAULT_CONFIG['subtitle.secondaryLanguage'],
+            'subtitle.style.primary.fontSize': DEFAULT_CONFIG['subtitle.style.primary.fontSize'],
+            'subtitle.style.primary.textColor': DEFAULT_CONFIG['subtitle.style.primary.textColor'],
+            'subtitle.style.primary.backgroundColor': DEFAULT_CONFIG['subtitle.style.primary.backgroundColor'],
+            'subtitle.style.secondary.fontSize': DEFAULT_CONFIG['subtitle.style.secondary.fontSize'],
+            'subtitle.style.secondary.textColor': DEFAULT_CONFIG['subtitle.style.secondary.textColor'],
+            'subtitle.style.secondary.backgroundColor': DEFAULT_CONFIG['subtitle.style.secondary.backgroundColor']
         };
-        
-        // 重置語言設定
-        this.dualSubtitleSettings = {
-            dualSubtitleEnabled: true,
-            primaryLanguage: 'zh-Hant',
-            secondaryLanguage: 'en'
-        };
-        
-        // 同步UI和預覽
-        this.updateUIFromConfig();
-        this.updateSubtitlePreview();
-        
-        // 自動儲存重置後的設定
-        this.autoSaveStyles();
-        this.autoSaveLanguageSettings();
-        
+
+        await saveConfigMultiple(defaultStyleConfig);
+        await this.restoreSubtitleUI();
         this.showSuccessMessage('樣式已重置為預設值');
-    }
-    
-    // 儲存字幕樣式設定
-    saveSubtitleStyles() {
-        try {
-            if (typeof chrome !== 'undefined' && chrome.storage) {
-                // 儲存符合 SubtitleStyleManager 格式的配置
-                const configToSave = {
-                    mode: this.subtitleStyleConfig.mode,
-                    primary: {
-                        fontSize: this.subtitleStyleConfig.primary.fontSize,
-                        textColor: this.subtitleStyleConfig.primary.textColor,
-                        backgroundColor: this.subtitleStyleConfig.primary.backgroundColor
-                    },
-                    secondary: {
-                        fontSize: this.subtitleStyleConfig.secondary.fontSize,
-                        textColor: this.subtitleStyleConfig.secondary.textColor,
-                        backgroundColor: this.subtitleStyleConfig.secondary.backgroundColor
-                    }
-                };
-                
-                chrome.storage.local.set({ subtitleStyleConfig: configToSave }, () => {
-                    if (chrome.runtime.lastError) {
-                        console.error('[Tutorial] 儲存設定失敗:', chrome.runtime.lastError);
-                        this.showSuccessMessage('設定儲存失敗，請稍後重試');
-                    } else {
-                        console.log('[Tutorial] 字幕樣式設定已儲存');
-                        this.showSuccessMessage('字幕樣式設定已儲存！');
-                    }
-                });
-            } else {
-                console.log('[Tutorial] Chrome storage不可用，使用localStorage');
-                localStorage.setItem('tutorial-subtitle-style', JSON.stringify(this.subtitleStyleConfig));
-                this.showSuccessMessage('字幕樣式設定已儲存！');
-            }
-        } catch (error) {
-            console.error('[Tutorial] 儲存設定時發生錯誤:', error);
-            this.showSuccessMessage('設定儲存失敗，請稍後重試');
-        }
+        console.log('[Tutorial] 樣式已重置為預設值');
     }
 }
 
