@@ -135,7 +135,18 @@ export function handleMessage(request, _sender, portSendResponse) {
 
   switch (request.type) {
     case 'GET_SETTINGS':
-      const keys = request.keys || ['debugMode', 'isEnabled', 'subtitleStyle', 'subtitleStyleConfig', 'dualSubtitleEnabled', 'primaryLanguage', 'secondaryLanguage'];
+      // deprecated: 以下鍵名已遷移至 config-schema.js 的點記法結構
+      // 保留僅為向後相容，content script 應使用 ConfigManager
+      const keys = request.keys || [
+        'debugMode',
+        'isEnabled',
+        // --- deprecated 鍵名 (保留相容性) ---
+        'subtitleStyle',         // → 使用 subtitle.style.primary.fontSize 等
+        'subtitleStyleConfig',   // → 使用 subtitle.style.*
+        'dualSubtitleEnabled',   // → 使用 subtitle.dualModeEnabled
+        'primaryLanguage',       // → 使用 subtitle.primaryLanguage
+        'secondaryLanguage'      // → 使用 subtitle.secondaryLanguage
+      ];
       getStorageItem(keys)
         .then(result => {
           portSendResponse({ success: true, ...result });

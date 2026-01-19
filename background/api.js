@@ -1,13 +1,15 @@
 // background/api.js
 // 負責處理與後端 API 相關的操作的模組
 
-// API Base URL，初始值將從 chrome.storage.sync 中載入
-let API_BASE_URL = 'https://subnfbackend.zeabur.app'; // 初始預設值
-
-// 從 chrome.storage.local 載入初始 API Base URL
-chrome.storage.local.get({ apiBaseUrl: 'https://subnfbackend.zeabur.app' }, (items) => {
-  API_BASE_URL = items.apiBaseUrl;
-});
+/**
+ * 獲取 API Base URL（從新配置系統讀取）
+ * @returns {Promise<string>} - API Base URL
+ */
+async function getApiBaseUrl() {
+  const result = await chrome.storage.local.get(['api']);
+  console.log('[API Module] Retrieved API Base URL from storage:', result.api?.baseUrl);
+  return result.api?.baseUrl || 'https://subnfbackend.zeabur.app';
+}
 
 /**
  * 處理 API 相關的訊息 (通過 port)
@@ -123,7 +125,8 @@ async function handleCheckSubtitle(request, portSendResponse) {
  * @returns {Promise<Array>} - 字幕數據列表
  */
 async function fetchSubtitlesFromAPI(videoId, startTime, duration) {
-  const url = `${API_BASE_URL}/translations?videoID=${encodeURIComponent(videoId)}&startTime=${startTime}&duration=${duration}`;
+  const apiBaseUrl = await getApiBaseUrl();
+  const url = `${apiBaseUrl}/translations?videoID=${encodeURIComponent(videoId)}&startTime=${startTime}&duration=${duration}`;
 
   // Debug log removed('[API Module] Fetching subtitles from API:', url);
 
@@ -352,14 +355,15 @@ async function sendVoteToAPI(voteData) {
     throw new Error('Missing or invalid parameters for API call');
   }
 
+  const apiBaseUrl = await getApiBaseUrl();
   let url;
   let body = { videoID, timestamp, voteType }; // 移除 userID
   if (originalSubtitle) body.originalSubtitle = originalSubtitle;
 
   if (translationID) {
-    url = `${API_BASE_URL}/translations/${translationID}/vote`;
+    url = `${apiBaseUrl}/translations/${translationID}/vote`;
   } else {
-    url = `${API_BASE_URL}/votes`;
+    url = `${apiBaseUrl}/votes`;
     if (!body.originalSubtitle) {
       console.warn("[API Module] Missing originalSubtitle for vote without translationID. API call might fail.");
     }
@@ -383,7 +387,8 @@ async function sendTranslationToAPI(translationData) {
     throw new Error('Missing or invalid parameters for translation API call');
   }
 
-  const url = `${API_BASE_URL}/translations`;
+  const apiBaseUrl = await getApiBaseUrl();
+  const url = `${apiBaseUrl}/translations`;
   const body = {
     // contributorUserID 將由後端從 JWT 中獲取
     videoID: videoId,
@@ -523,21 +528,13 @@ function triggerTranslationSync() {
 }
 
 /**
- * 設置 API Base URL
- * @param {string} url - 新的 API Base URL
- */
-export function setApiBaseUrl(url) {
-  API_BASE_URL = url;
-  // Debug log removed('[API Module] API Base URL updated:', API_BASE_URL);
-}
-
-/**
  * 註冊用戶並獲取 JWT
  * @param {string} userID - 用戶 ID
  * @returns {Promise<Object>} - 包含 success 和 token 的響應
  */
 export async function registerUser(userID) {
-  const url = `${API_BASE_URL}/users`;
+  const apiBaseUrl = await getApiBaseUrl();
+  const url = `${apiBaseUrl}/users`;
   return await sendToAPI(url, { userID }, 'POST');
 }
 
@@ -547,8 +544,9 @@ export async function registerUser(userID) {
  * @returns {Promise<Object>} - 包含用戶統計數據的響應
  */
 export async function fetchUserStats(userID) {
-  const url = `${API_BASE_URL}/users/${userID}`;
-  
+  const apiBaseUrl = await getApiBaseUrl();
+  const url = `${apiBaseUrl}/users/${userID}`;
+
   try {
     return await sendToAPI(url, null, 'GET');
   } catch (error) {
@@ -575,8 +573,9 @@ export async function fetchUserStats(userID) {
  * @returns {Promise<Object>} - API 回應結果
  */
 export async function submitReplacementEvents(events) {
-  const url = `${API_BASE_URL}/replacement-events`;
-  
+  const apiBaseUrl = await getApiBaseUrl();
+  const url = `${apiBaseUrl}/replacement-events`;
+
   try {
     return await sendToAPI(url, { events }, 'POST');
   } catch (error) {
@@ -586,7 +585,9 @@ export async function submitReplacementEvents(events) {
       try {
         await refreshJwtToken();
         // 重新嘗試請求
-        return await sendToAPI(url, { events }, 'POST');
+        const retryApiBaseUrl = await getApiBaseUrl();
+        const retryUrl = `${retryApiBaseUrl}/replacement-events`;
+        return await sendToAPI(retryUrl, { events }, 'POST');
       } catch (refreshError) {
         console.error('[API Module] JWT refresh failed during submitReplacementEvents:', refreshError);
         throw new Error('認證已過期且刷新失敗，請重新啟動擴展。');

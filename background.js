@@ -477,12 +477,6 @@ function handleCoreMessagePort(messageId, request, port) {
       port.postMessage({ messageId, response: { success: true } });
       break;
 
-    case 'API_BASE_URL_CHANGED':
-      console.log('[Background] API Base URL changed to:', request.url);
-      apiModule.setApiBaseUrl(request.url);
-      port.postMessage({ messageId, response: { success: true } });
-      break;
-
     case 'SUBTITLE_STYLE_UPDATED':
       console.log('[Background] Subtitle style updated:', request.config);
       // 轉發消息到所有相關的 content scripts (通過 port)
@@ -535,7 +529,6 @@ function routeMessageToModulePort(messageId, request, port) {
     'TRIGGER_TRANSLATION_SYNC': 'sync',
     'REPORT_REPLACEMENT_EVENTS': 'storage',
     'CLEAR_QUEUE': 'storage', // 新增 CLEAR_QUEUE 消息類型
-    'API_BASE_URL_CHANGED': 'core', // 添加 API_BASE_URL_CHANGED 消息路由
     'SUBTITLE_STYLE_UPDATED': 'core' // 添加字幕樣式更新消息路由
   };
 
