@@ -483,6 +483,259 @@ export class StorageAdapter {
     this.log('StorageAdapter 資源已清理');
   }
 
+  // ==================== 隊列操作方法 ====================
+
+  /**
+   * 取得指定類型的待同步隊列
+   *
+   * @param {string} queueType - 隊列類型 ('vote' 或 'translation')
+   * @returns {Promise<Array>} 隊列陣列
+   *
+   * @example
+   * const voteQueue = await adapter.getQueue('vote');
+   */
+  async getQueue(queueType) {
+    if (!queueType || !['vote', 'translation'].includes(queueType)) {
+      throw new Error('queueType 必須是 "vote" 或 "translation"');
+    }
+
+    const storageKey = `${queueType}Queue`;
+    const result = await this.get(storageKey);
+    return result[storageKey] || [];
+  }
+
+  /**
+   * 新增項目到隊列
+   *
+   * @param {string} queueType - 隊列類型 ('vote' 或 'translation')
+   * @param {Object} item - 項目物件
+   * @returns {Promise<void>}
+   *
+   * @example
+   * await adapter.appendToQueue('vote', {
+   *   id: 'uuid-v4',
+   *   videoId: 'abc123',
+   *   timestamp: 123456,
+   *   voteType: 'upvote',
+   *   status: 'pending',
+   *   createdAt: Date.now()
+   * });
+   */
+  async appendToQueue(queueType, item) {
+    if (!queueType || !['vote', 'translation'].includes(queueType)) {
+      throw new Error('queueType 必須是 "vote" 或 "translation"');
+    }
+
+    if (!item || typeof item !== 'object') {
+      throw new Error('item 必須是一個對象');
+    }
+
+    const storageKey = `${queueType}Queue`;
+    const queue = await this.getQueue(queueType);
+
+    // 新增項目到隊列
+    queue.push(item);
+
+    // 維持最大長度限制 (100)
+    const MAX_QUEUE_LENGTH = 100;
+    if (queue.length > MAX_QUEUE_LENGTH) {
+      queue.shift(); // 移除最舊項目
+      this.warn(`${storageKey} 超過最大長度限制，已移除最舊項目`);
+    }
+
+    await this.set({ [storageKey]: queue });
+    this.log(`新增項目到 ${storageKey}:`, item.id);
+  }
+
+  /**
+   * 更新隊列中指定項目的屬性
+   *
+   * @param {string} queueType - 隊列類型
+   * @param {string} itemId - 項目 ID
+   * @param {Object} updates - 更新物件
+   * @returns {Promise<boolean>} 是否找到並更新
+   *
+   * @example
+   * const updated = await adapter.updateQueueItem('vote', 'uuid-v4', {
+   *   status: 'syncing'
+   * });
+   */
+  async updateQueueItem(queueType, itemId, updates) {
+    if (!queueType || !['vote', 'translation'].includes(queueType)) {
+      throw new Error('queueType 必須是 "vote" 或 "translation"');
+    }
+
+    if (!itemId || typeof itemId !== 'string') {
+      throw new Error('itemId 必須是字串');
+    }
+
+    if (!updates || typeof updates !== 'object') {
+      throw new Error('updates 必須是對象');
+    }
+
+    const storageKey = `${queueType}Queue`;
+    const queue = await this.getQueue(queueType);
+
+    const itemIndex = queue.findIndex(item => item.id === itemId);
+    if (itemIndex === -1) {
+      this.warn(`找不到項目: ${itemId} in ${storageKey}`);
+      return false;
+    }
+
+    // 更新項目屬性
+    queue[itemIndex] = { ...queue[itemIndex], ...updates };
+
+    await this.set({ [storageKey]: queue });
+    this.log(`更新 ${storageKey} 項目:`, itemId, updates);
+    return true;
+  }
+
+  /**
+   * 從隊列中移除指定項目
+   *
+   * @param {string} queueType - 隊列類型
+   * @param {string} itemId - 項目 ID
+   * @returns {Promise<boolean>} 是否找到並移除
+   *
+   * @example
+   * const removed = await adapter.removeFromQueue('vote', 'uuid-v4');
+   */
+  async removeFromQueue(queueType, itemId) {
+    if (!queueType || !['vote', 'translation'].includes(queueType)) {
+      throw new Error('queueType 必須是 "vote" 或 "translation"');
+    }
+
+    if (!itemId || typeof itemId !== 'string') {
+      throw new Error('itemId 必須是字串');
+    }
+
+    const storageKey = `${queueType}Queue`;
+    const queue = await this.getQueue(queueType);
+
+    const initialLength = queue.length;
+    const filteredQueue = queue.filter(item => item.id !== itemId);
+
+    if (filteredQueue.length === initialLength) {
+      this.warn(`找不到項目: ${itemId} in ${storageKey}`);
+      return false;
+    }
+
+    await this.set({ [storageKey]: filteredQueue });
+    this.log(`從 ${storageKey} 移除項目:`, itemId);
+    return true;
+  }
+
+  /**
+   * 清空指定隊列
+   *
+   * @param {string} queueType - 隊列類型
+   * @returns {Promise<void>}
+   *
+   * @example
+   * await adapter.clearQueue('vote');
+   */
+  async clearQueue(queueType) {
+    if (!queueType || !['vote', 'translation'].includes(queueType)) {
+      throw new Error('queueType 必須是 "vote" 或 "translation"');
+    }
+
+    const storageKey = `${queueType}Queue`;
+    await this.set({ [storageKey]: [] });
+    this.log(`清空 ${storageKey}`);
+  }
+
+  // ==================== 歷史記錄操作方法 ====================
+
+  /**
+   * 取得已完成記錄的歷史
+   *
+   * @param {string} historyType - 歷史類型 ('vote' 或 'translation')
+   * @param {number} limit - 數量限制 (預設 100)
+   * @returns {Promise<Array>} 歷史記錄陣列
+   *
+   * @example
+   * const voteHistory = await adapter.getHistory('vote', 50);
+   */
+  async getHistory(historyType, limit = 100) {
+    if (!historyType || !['vote', 'translation'].includes(historyType)) {
+      throw new Error('historyType 必須是 "vote" 或 "translation"');
+    }
+
+    if (typeof limit !== 'number' || limit <= 0) {
+      throw new Error('limit 必須是正整數');
+    }
+
+    const storageKey = `${historyType}History`;
+    const result = await this.get(storageKey);
+    const history = result[storageKey] || [];
+
+    // 回傳最近 N 筆
+    return history.slice(0, limit);
+  }
+
+  /**
+   * 新增項目到歷史記錄
+   *
+   * @param {string} historyType - 歷史類型 ('vote' 或 'translation')
+   * @param {Object} item - 項目物件
+   * @returns {Promise<void>}
+   *
+   * @example
+   * await adapter.addToHistory('vote', {
+   *   id: 'uuid-v4',
+   *   videoId: 'abc123',
+   *   timestamp: 123456,
+   *   voteType: 'upvote',
+   *   status: 'completed',
+   *   syncedAt: Date.now()
+   * });
+   */
+  async addToHistory(historyType, item) {
+    if (!historyType || !['vote', 'translation'].includes(historyType)) {
+      throw new Error('historyType 必須是 "vote" 或 "translation"');
+    }
+
+    if (!item || typeof item !== 'object') {
+      throw new Error('item 必須是一個對象');
+    }
+
+    const storageKey = `${historyType}History`;
+    const result = await this.get(storageKey);
+    const history = result[storageKey] || [];
+
+    // 新增至陣列開頭（最新的在前）
+    history.unshift(item);
+
+    // 維持最大長度限制 (100)
+    const MAX_HISTORY_LENGTH = 100;
+    if (history.length > MAX_HISTORY_LENGTH) {
+      history.pop(); // 移除最舊項目
+      this.warn(`${storageKey} 超過最大長度限制，已移除最舊項目`);
+    }
+
+    await this.set({ [storageKey]: history });
+    this.log(`新增項目到 ${storageKey}:`, item.id);
+  }
+
+  /**
+   * 清空指定歷史記錄
+   *
+   * @param {string} historyType - 歷史類型 ('vote' 或 'translation')
+   * @returns {Promise<void>}
+   *
+   * @example
+   * await adapter.clearHistory('vote');
+   */
+  async clearHistory(historyType) {
+    if (!historyType || !['vote', 'translation'].includes(historyType)) {
+      throw new Error('historyType 必須是 "vote" 或 "translation"');
+    }
+
+    const storageKey = `${historyType}History`;
+    await this.set({ [storageKey]: [] });
+    this.log(`清空 ${storageKey}`);
+  }
+
   // ==================== 日誌方法 ====================
 
   /**
@@ -512,6 +765,31 @@ export class StorageAdapter {
   error(...args) {
     console.error('[StorageAdapter]', ...args);
   }
+}
+
+// ==================== UUID v4 工具函數 ====================
+
+/**
+ * 生成符合 UUID v4 格式的唯一 ID
+ *
+ * @returns {string} UUID v4 字串
+ *
+ * @example
+ * const id = generateUUID();
+ * console.log(id); // "550e8400-e29b-41d4-a716-446655440000"
+ */
+export function generateUUID() {
+  // 優先使用原生 crypto.randomUUID()
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  // 備用實作（基於 RFC 4122）
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
 }
 
 /**
