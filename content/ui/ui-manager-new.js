@@ -56,8 +56,8 @@ class UIManager {
     
     // 核心模組
     this.subtitleReplacer = null;
-    this.translationManager = null;
-    this.voteManager = null;
+    this.translationBridge = null;
+    this.voteBridge = null;
   }
 
   async initialize() {
@@ -90,18 +90,18 @@ class UIManager {
       this.subtitleReplacer = new SubtitleReplacer();
       await this.subtitleReplacer.initialize();
       
-      // 動態導入並初始化翻譯管理器
-      const { translationManager } = await import('../core/translation-manager.js');
-      this.translationManager = translationManager;
-      if (!this.translationManager.isInitialized) {
-        await this.translationManager.initialize();
+      // 動態導入並初始化翻譯橋接器
+      const { translationBridge } = await import('../core/translation-bridge.js');
+      this.translationBridge = translationBridge;
+      if (!this.translationBridge.isInitialized) {
+        await this.translationBridge.initialize();
       }
-      
-      // 動態導入並初始化投票管理器  
-      const { voteManager } = await import('../core/vote-manager.js');
-      this.voteManager = voteManager;
-      if (!this.voteManager.isInitialized) {
-        await this.voteManager.initialize();
+
+      // 動態導入並初始化投票橋接器
+      const { voteBridge } = await import('../core/vote-bridge.js');
+      this.voteBridge = voteBridge;
+      if (!this.voteBridge.isInitialized) {
+        await this.voteBridge.initialize();
       }
       
       // 設置組件間的事件關聯
@@ -610,20 +610,20 @@ class UIManager {
     
     try {
       const voteParams = {
-        videoID: this.currentSubtitle.videoId || 'unknown',
+        videoId: this.currentSubtitle.videoId || 'unknown',
         timestamp: this.currentSubtitle.timestamp || Date.now() / 1000,
         originalSubtitle: this.currentSubtitle.original || this.currentSubtitle.text,
         voteType: 'upvote',
         translationID: this.currentSubtitle.translationID || null
       };
-      
-      const result = await this.voteManager.vote(voteParams, this.currentSubtitle);
-      
-      if (result.success) {
-        this.showToast('點讚成功！', 'success');
-        this.log('投票成功:', result);
+
+      const result = await this.voteBridge.enqueue(voteParams);
+
+      if (result && result.itemId) {
+        this.showToast('點讚已加入隊列', 'success');
+        this.log('投票已加入隊列:', result);
       } else {
-        this.showToast(result.message || '點讚失敗', result.queued ? 'warning' : 'error');
+        this.showToast('點讚失敗', 'error');
       }
     } catch (error) {
       console.error('處理點讚時出錯:', error);
@@ -634,28 +634,28 @@ class UIManager {
   // 處理倒讚點擊
   async handleDislikeClick() {
     this.log('處理倒讚點擊');
-    
+
     if (!this.currentSubtitle) {
       console.error('沒有當前字幕數據');
       return;
     }
-    
+
     try {
       const voteParams = {
-        videoID: this.currentSubtitle.videoId || 'unknown',
+        videoId: this.currentSubtitle.videoId || 'unknown',
         timestamp: this.currentSubtitle.timestamp || Date.now() / 1000,
         originalSubtitle: this.currentSubtitle.original || this.currentSubtitle.text,
         voteType: 'downvote',
         translationID: this.currentSubtitle.translationID || null
       };
-      
-      const result = await this.voteManager.vote(voteParams, this.currentSubtitle);
-      
-      if (result.success) {
-        this.showToast('點倒讚成功！', 'success');
-        this.log('投票成功:', result);
+
+      const result = await this.voteBridge.enqueue(voteParams);
+
+      if (result && result.itemId) {
+        this.showToast('點倒讚已加入隊列', 'success');
+        this.log('投票已加入隊列:', result);
       } else {
-        this.showToast(result.message || '點倒讚失敗', result.queued ? 'warning' : 'error');
+        this.showToast('點倒讚失敗', 'error');
       }
     } catch (error) {
       console.error('處理點倒讚時出錯:', error);
@@ -666,20 +666,16 @@ class UIManager {
   // 處理提交完成
   async handleSubmissionComplete(submissionData) {
     this.log('處理提交完成', submissionData);
-    
+
     try {
-      // 使用新的翻譯管理器
-      const result = await this.translationManager.submitTranslation(submissionData);
-      
-      if (result.success) {
-        if (result.queued) {
-          this.showToast(`翻譯已加入隊列，排隊位置：${result.queuePosition}`, 'info');
-        } else {
-          this.showToast('翻譯提交成功！', 'success');
-        }
-        this.log('翻譯提交成功:', result);
+      // 使用翻譯橋接器
+      const result = await this.translationBridge.enqueue(submissionData);
+
+      if (result && result.itemId) {
+        this.showToast('翻譯已加入隊列', 'success');
+        this.log('翻譯已加入隊列:', result);
       } else {
-        this.showToast(result.message || '翻譯提交失敗', 'error');
+        this.showToast('翻譯提交失敗', 'error');
       }
     } catch (error) {
       console.error('提交翻譯時出錯:', error);
