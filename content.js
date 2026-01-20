@@ -22,6 +22,14 @@
   let messageCounter = 0; // 用於生成唯一訊息 ID 的計數器
   let backgroundPort = null; // 長連接 port
   let configManager = null; // ConfigManager 實例
+  let submissionQueueManager = null; // SubmissionQueueManager 實例
+
+  // 隊列消息類型常數
+  const QUEUE_MESSAGE_TYPES = [
+    'VOTE_ENQUEUE', 'VOTE_GET_HISTORY', 'VOTE_GET_STATUS', 'VOTE_RETRY',
+    'TRANSLATION_ENQUEUE', 'TRANSLATION_GET_HISTORY', 'TRANSLATION_RETRY',
+    'GET_ALL_PENDING', 'GET_QUEUE_STATS'
+  ];
 
   // 初始化 ConfigManager
   async function initializeConfigManager() {
@@ -62,6 +70,28 @@
       return true;
     } catch (error) {
       console.error('[Content Script] ConfigManager 初始化失敗:', error);
+      return false;
+    }
+  }
+
+  // 初始化 SubmissionQueueManager
+  async function initializeQueueManagers() {
+    try {
+      debugLog('開始初始化 SubmissionQueueManager...');
+
+      // 動態導入 SubmissionQueueManager
+      const { SubmissionQueueManager } = await import(chrome.runtime.getURL('content/core/submission-queue-manager.js'));
+
+      // 創建實例
+      submissionQueueManager = new SubmissionQueueManager({ debug: debugMode });
+
+      // 初始化
+      await submissionQueueManager.initialize();
+
+      debugLog('SubmissionQueueManager 初始化完成');
+      return true;
+    } catch (error) {
+      console.error('[Content Script] SubmissionQueueManager 初始化失敗:', error);
       return false;
     }
   }
@@ -256,6 +286,102 @@
     }
   }
 
+  // 處理隊列相關訊息
+  async function handleQueueMessage(messageId, message) {
+    if (!submissionQueueManager) {
+      debugLog('SubmissionQueueManager 尚未初始化，回應錯誤');
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            error: 'SubmissionQueueManager not initialized'
+          }
+        }
+      }));
+      return;
+    }
+
+    const { type, payload } = message;
+
+    try {
+      let result;
+
+      switch (type) {
+        // 投票消息
+        case 'VOTE_ENQUEUE':
+          result = await submissionQueueManager.enqueueVote(payload);
+          break;
+
+        case 'VOTE_GET_HISTORY':
+          result = await submissionQueueManager.getVoteHistory(payload?.limit);
+          result = { history: result };
+          break;
+
+        case 'VOTE_GET_STATUS':
+          result = await submissionQueueManager.getVoteStatus(payload.itemId);
+          break;
+
+        case 'VOTE_RETRY':
+          result = await submissionQueueManager.retryVote(payload.itemId);
+          result = { success: result };
+          break;
+
+        // 翻譯消息
+        case 'TRANSLATION_ENQUEUE':
+          result = await submissionQueueManager.enqueueTranslation(payload);
+          break;
+
+        case 'TRANSLATION_GET_HISTORY':
+          result = await submissionQueueManager.getTranslationHistory(payload?.limit);
+          result = { history: result };
+          break;
+
+        case 'TRANSLATION_RETRY':
+          result = await submissionQueueManager.retryTranslation(payload.itemId);
+          result = { success: result };
+          break;
+
+        // 通用消息
+        case 'GET_ALL_PENDING':
+          result = await submissionQueueManager.getAllPending();
+          break;
+
+        case 'GET_QUEUE_STATS':
+          result = await submissionQueueManager.getStats();
+          break;
+
+        default:
+          window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+            detail: {
+              messageId: messageId,
+              response: {
+                error: `未知的消息類型: ${type}`
+              }
+            }
+          }));
+          return;
+      }
+
+      // 回應成功
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: result
+        }
+      }));
+    } catch (error) {
+      debugLog('處理隊列消息失敗:', error);
+      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+        detail: {
+          messageId: messageId,
+          response: {
+            error: error.message
+          }
+        }
+      }));
+    }
+  }
+
   // 建立到 background script 的長連接
   function connectToBackground() {
     backgroundPort = chrome.runtime.connect({ name: "subtitle-assistant-channel" });
@@ -364,6 +490,13 @@
       return;
     }
 
+    // 檢查是否為隊列相關訊息（由 content script 處理，不轉發到 background）
+    if (QUEUE_MESSAGE_TYPES.includes(message.type)) {
+      debugLog('處理隊列訊息:', message.type);
+      handleQueueMessage(messageId, message);
+      return;
+    }
+
     // 檢查是否為內部消息（不需要發送到 background）
     const internalMessages = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED'];
 
@@ -448,14 +581,29 @@
   // 建立初始連接
   connectToBackground();
 
-  // 初始化 ConfigManager
-  initializeConfigManager().then(success => {
-    if (success) {
-      debugLog('ConfigManager 初始化成功');
-    } else {
-      console.error('[Content Script] ConfigManager 初始化失敗');
+  // 初始化所有 Managers
+  async function initializeAllManagers() {
+    try {
+      // 先初始化 ConfigManager
+      const configSuccess = await initializeConfigManager();
+      if (!configSuccess) {
+        console.error('[Content Script] ConfigManager 初始化失敗');
+      }
+
+      // 再初始化 SubmissionQueueManager
+      const queueSuccess = await initializeQueueManagers();
+      if (!queueSuccess) {
+        console.error('[Content Script] SubmissionQueueManager 初始化失敗');
+      }
+
+      debugLog('All managers initialized.');
+    } catch (error) {
+      console.error('[Content Script] Managers 初始化過程中發生錯誤:', error);
     }
-  });
+  }
+
+  // 執行初始化
+  initializeAllManagers();
 
   debugLog('Message bridge initialized.');
 })();
