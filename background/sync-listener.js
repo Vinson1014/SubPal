@@ -11,6 +11,8 @@
  * @module sync-listener
  */
 
+import * as syncModule from './sync.js';
+
 // ==================== 配置常數 ====================
 
 const DEBOUNCE_DELAY = 500; // 防抖延遲時間（毫秒）
@@ -59,7 +61,7 @@ function debouncedTriggerSync(triggerFn, timerType) {
 
 /**
  * 觸發投票同步
- * 檢查待同步的投票項目並發送同步消息
+ * 檢查待同步的投票項目並直接調用同步函數
  */
 async function triggerVoteSync() {
   try {
@@ -69,14 +71,9 @@ async function triggerVoteSync() {
     if (pendingItems.length > 0) {
       log(`發現 ${pendingItems.length} 個待同步的投票，觸發同步`);
 
-      // 觸發投票同步 (由 sync.js 處理)
-      // 使用內部消息，不需要等待回應
-      chrome.runtime.sendMessage({
-        type: 'SYNC_VOTES',
-        payload: { count: pendingItems.length }
-      }).catch(error => {
-        // Service Worker 可能尚未啟動，這是正常的
-        warn('發送 SYNC_VOTES 消息失敗（可能 Service Worker 尚未啟動）:', error.message);
+      // 直接調用 sync 模組的同步函數（避免消息傳遞問題）
+      syncModule.triggerVoteSync().catch(error => {
+        logError('觸發投票同步失敗:', error);
       });
     } else {
       log('投票隊列中沒有待同步項目');
@@ -88,7 +85,7 @@ async function triggerVoteSync() {
 
 /**
  * 觸發翻譯同步
- * 檢查待同步的翻譯項目並發送同步消息
+ * 檢查待同步的翻譯項目並直接調用同步函數
  */
 async function triggerTranslationSync() {
   try {
@@ -98,12 +95,9 @@ async function triggerTranslationSync() {
     if (pendingItems.length > 0) {
       log(`發現 ${pendingItems.length} 個待同步的翻譯，觸發同步`);
 
-      // 觸發翻譯同步 (由 sync.js 處理)
-      chrome.runtime.sendMessage({
-        type: 'SYNC_TRANSLATIONS',
-        payload: { count: pendingItems.length }
-      }).catch(error => {
-        warn('發送 SYNC_TRANSLATIONS 消息失敗（可能 Service Worker 尚未啟動）:', error.message);
+      // 直接調用 sync 模組的同步函數（避免消息傳遞問題）
+      syncModule.triggerTranslationSync().catch(error => {
+        logError('觸發翻譯同步失敗:', error);
       });
     } else {
       log('翻譯隊列中沒有待同步項目');

@@ -1,14 +1,345 @@
 // background/sync.js
-// 負責處理資料同步相關操作的模組
+// 負責處理資料同步相關操作的模組 - Queue 系統版本
 
 import * as apiModule from './api.js';
 
+// 常量定義
+const MAX_RETRIES = 3;
+const MAX_HISTORY_LENGTH = 100;
+const VOTE_QUEUE_KEY = 'voteQueue';
+const VOTE_HISTORY_KEY = 'voteHistory';
+const TRANSLATION_QUEUE_KEY = 'translationQueue';
+const TRANSLATION_HISTORY_KEY = 'translationHistory';
+
+// 同步狀態標誌
 let isSyncingVotes = false;
 let isSyncingTranslations = false;
 
-const VOTE_QUEUE_KEY = 'voteQueue';
-const TRANSLATION_QUEUE_KEY = 'translationQueue';
-const MAX_QUEUE_SIZE = 100;
+// ==================== Storage 輔助函數 ====================
+
+/**
+ * 獲取隊列中狀態為 pending 的項目
+ * @param {string} queueType - 隊列類型 (voteQueue 或 translationQueue)
+ * @returns {Promise<Array>} - pending 狀態的項目列表
+ */
+async function getPendingItems(queueType) {
+  const result = await chrome.storage.local.get(queueType);
+  const queue = result[queueType] || [];
+  return queue.filter(item => item.status === 'pending');
+}
+
+/**
+ * 更新隊列項目的狀態
+ * @param {string} queueType - 隊列類型
+ * @param {string} itemId - 項目 ID
+ * @param {string} status - 新狀態 (pending, syncing, completed, failed)
+ * @param {string|null} error - 錯誤訊息
+ * @returns {Promise<Object|null>} - 更新後的項目
+ */
+async function updateItemStatus(queueType, itemId, status, error = null) {
+  const result = await chrome.storage.local.get(queueType);
+  const queue = result[queueType] || [];
+  const updatedQueue = queue.map(item => {
+    if (item.id === itemId) {
+      return {
+        ...item,
+        status,
+        error,
+        syncedAt: status === 'completed' ? Date.now() : null
+      };
+    }
+    return item;
+  });
+  await chrome.storage.local.set({ [queueType]: updatedQueue });
+  return updatedQueue.find(item => item.id === itemId) || null;
+}
+
+/**
+ * 更新隊列項目的重試次數
+ * @param {string} queueType - 隊列類型
+ * @param {string} itemId - 項目 ID
+ * @param {number} retryCount - 重試次數
+ */
+async function updateQueueItemRetryCount(queueType, itemId, retryCount) {
+  const result = await chrome.storage.local.get(queueType);
+  const queue = result[queueType] || [];
+  const updatedQueue = queue.map(item => {
+    if (item.id === itemId) {
+      return { ...item, retryCount };
+    }
+    return item;
+  });
+  await chrome.storage.local.set({ [queueType]: updatedQueue });
+}
+
+/**
+ * 將完成的項目從隊列移至歷史記錄
+ * @param {string} queueType - 隊列類型
+ * @param {string} itemId - 項目 ID
+ * @param {string} historyType - 歷史記錄類型
+ */
+async function moveToHistory(queueType, itemId, historyType) {
+  const storageData = await chrome.storage.local.get([queueType, historyType]);
+  const queue = storageData[queueType] || [];
+  const history = storageData[historyType] || [];
+
+  const itemIndex = queue.findIndex(item => item.id === itemId);
+  if (itemIndex === -1) return;
+
+  const [item] = queue.splice(itemIndex, 1);
+  const completedItem = {
+    ...item,
+    status: 'completed',
+    syncedAt: Date.now()
+  };
+
+  // 移除敏感或不需要的欄位
+  delete completedItem.retryCount;
+  delete completedItem.error;
+
+  // 加到歷史記錄開頭
+  history.unshift(completedItem);
+
+  // 限制歷史記錄長度
+  if (history.length > MAX_HISTORY_LENGTH) {
+    history.splice(MAX_HISTORY_LENGTH);
+  }
+
+  await chrome.storage.local.set({
+    [queueType]: queue,
+    [historyType]: history
+  });
+}
+
+/**
+ * 獲取同步狀態統計
+ * @returns {Promise<Object>} - 同步狀態資訊
+ */
+async function getSyncStatus() {
+  const storageData = await chrome.storage.local.get([
+    VOTE_QUEUE_KEY,
+    TRANSLATION_QUEUE_KEY
+  ]);
+
+  const voteQueue = storageData[VOTE_QUEUE_KEY] || [];
+  const translationQueue = storageData[TRANSLATION_QUEUE_KEY] || [];
+
+  return {
+    pendingVotes: voteQueue.filter(item => item.status === 'pending').length,
+    syncingVotes: voteQueue.filter(item => item.status === 'syncing').length,
+    failedVotes: voteQueue.filter(item => item.status === 'failed').length,
+    pendingTranslations: translationQueue.filter(item => item.status === 'pending').length,
+    syncingTranslations: translationQueue.filter(item => item.status === 'syncing').length,
+    failedTranslations: translationQueue.filter(item => item.status === 'failed').length,
+    isSyncingVotes,
+    isSyncingTranslations
+  };
+}
+
+// ==================== 同步主函數 ====================
+
+/**
+ * 同步待處理的投票隊列
+ */
+async function syncPendingVotes() {
+  if (isSyncingVotes) return;
+  isSyncingVotes = true;
+  console.log('[Sync] Starting vote sync...');
+
+  try {
+    const pendingItems = await getPendingItems(VOTE_QUEUE_KEY);
+
+    if (pendingItems.length === 0) {
+      console.log('[Sync] Vote queue is empty.');
+      return;
+    }
+
+    console.log(`[Sync] Syncing ${pendingItems.length} pending votes...`);
+
+    for (const item of pendingItems) {
+      try {
+        await updateItemStatus(VOTE_QUEUE_KEY, item.id, 'syncing');
+        await sendVoteToAPI(item);
+        await moveToHistory(VOTE_QUEUE_KEY, item.id, VOTE_HISTORY_KEY);
+        console.log(`[Sync] Vote ${item.id} synced successfully`);
+      } catch (error) {
+        const retryCount = item.retryCount || 0;
+
+        if (retryCount < MAX_RETRIES) {
+          await updateItemStatus(VOTE_QUEUE_KEY, item.id, 'pending', null);
+          await updateQueueItemRetryCount(VOTE_QUEUE_KEY, item.id, retryCount + 1);
+          console.warn(`[Sync] Vote ${item.id} retry ${retryCount + 1}/${MAX_RETRIES}: ${error.message}`);
+        } else {
+          await updateItemStatus(VOTE_QUEUE_KEY, item.id, 'failed', error.message);
+          console.error(`[Sync] Vote ${item.id} failed after ${MAX_RETRIES} retries: ${error.message}`);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('[Sync] Error during vote sync:', error);
+  } finally {
+    isSyncingVotes = false;
+  }
+}
+
+/**
+ * 同步待處理的翻譯隊列
+ */
+async function syncPendingTranslations() {
+  if (isSyncingTranslations) return;
+  isSyncingTranslations = true;
+  console.log('[Sync] Starting translation sync...');
+
+  try {
+    const pendingItems = await getPendingItems(TRANSLATION_QUEUE_KEY);
+
+    if (pendingItems.length === 0) {
+      console.log('[Sync] Translation queue is empty.');
+      return;
+    }
+
+    console.log(`[Sync] Syncing ${pendingItems.length} pending translations...`);
+
+    for (const item of pendingItems) {
+      try {
+        await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'syncing');
+        await sendTranslationToAPI(item);
+        await moveToHistory(TRANSLATION_QUEUE_KEY, item.id, TRANSLATION_HISTORY_KEY);
+        console.log(`[Sync] Translation ${item.id} synced successfully`);
+      } catch (error) {
+        const retryCount = item.retryCount || 0;
+
+        if (retryCount < MAX_RETRIES) {
+          await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'pending', null);
+          await updateQueueItemRetryCount(TRANSLATION_QUEUE_KEY, item.id, retryCount + 1);
+          console.warn(`[Sync] Translation ${item.id} retry ${retryCount + 1}/${MAX_RETRIES}: ${error.message}`);
+        } else {
+          await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'failed', error.message);
+          console.error(`[Sync] Translation ${item.id} failed after ${MAX_RETRIES} retries: ${error.message}`);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('[Sync] Error during translation sync:', error);
+  } finally {
+    isSyncingTranslations = false;
+  }
+}
+
+/**
+ * 重試所有失敗的投票
+ */
+async function retryFailedVotes() {
+  const result = await chrome.storage.local.get(VOTE_QUEUE_KEY);
+  const queue = result[VOTE_QUEUE_KEY] || [];
+  const failedItems = queue.filter(item => item.status === 'failed');
+
+  for (const item of failedItems) {
+    await updateItemStatus(VOTE_QUEUE_KEY, item.id, 'pending', null);
+    await updateQueueItemRetryCount(VOTE_QUEUE_KEY, item.id, 0);
+  }
+
+  console.log(`[Sync] Retrying ${failedItems.length} failed votes`);
+  await syncPendingVotes();
+}
+
+/**
+ * 重試所有失敗的翻譯
+ */
+async function retryFailedTranslations() {
+  const result = await chrome.storage.local.get(TRANSLATION_QUEUE_KEY);
+  const queue = result[TRANSLATION_QUEUE_KEY] || [];
+  const failedItems = queue.filter(item => item.status === 'failed');
+
+  for (const item of failedItems) {
+    await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'pending', null);
+    await updateQueueItemRetryCount(TRANSLATION_QUEUE_KEY, item.id, 0);
+  }
+
+  console.log(`[Sync] Retrying ${failedItems.length} failed translations`);
+  await syncPendingTranslations();
+}
+
+// ==================== API 調用函數 ====================
+
+/**
+ * 發送單個投票到後端 API
+ * @param {object} voteData - 投票數據
+ */
+async function sendVoteToAPI(voteData) {
+  console.log('[Sync] Sending vote to API:', voteData.id);
+
+  try {
+    // 直接調用 API 模組的 submitVote 函數
+    const result = await apiModule.submitVote({
+      videoID: voteData.videoId,
+      timestamp: voteData.timestamp,
+      voteType: voteData.voteType,
+      translationID: voteData.translationID || null,
+      originalSubtitle: voteData.originalSubtitle || null
+    });
+
+    console.log('[Sync] Vote submitted successfully:', result);
+    return { success: true };
+  } catch (error) {
+    console.error('[Sync] Error submitting vote:', error);
+    throw error;
+  }
+}
+
+/**
+ * 發送單個翻譯提交到後端 API
+ * @param {object} translationData - 翻譯數據
+ */
+async function sendTranslationToAPI(translationData) {
+  console.log('[Sync] Sending translation to API:', translationData.id);
+
+  try {
+    // 直接調用 API 模組的 submitTranslation 函數
+    const result = await apiModule.submitTranslation({
+      videoId: translationData.videoId,
+      timestamp: translationData.timestamp,
+      original: translationData.original,
+      translation: translationData.translation,
+      submissionReason: translationData.submissionReason || '',
+      languageCode: translationData.languageCode
+    });
+
+    console.log('[Sync] Translation submitted successfully:', result);
+    return { success: true };
+  } catch (error) {
+    console.error('[Sync] Error submitting translation:', error);
+    throw error;
+  }
+}
+
+// ==================== 觸發函數（供外部調用）====================
+
+/**
+ * 觸發投票同步
+ */
+export async function triggerVoteSync() {
+  if (!isSyncingVotes) {
+    console.log('[Sync] Triggering vote sync');
+    await syncPendingVotes();
+  } else {
+    console.log('[Sync] Vote sync already in progress');
+  }
+}
+
+/**
+ * 觸發翻譯同步
+ */
+export async function triggerTranslationSync() {
+  if (!isSyncingTranslations) {
+    console.log('[Sync] Triggering translation sync');
+    await syncPendingTranslations();
+  } else {
+    console.log('[Sync] Translation sync already in progress');
+  }
+}
+
+// ==================== 消息處理器 ====================
 
 /**
  * 處理資料同步相關的訊息 (通過 port)
@@ -17,255 +348,67 @@ const MAX_QUEUE_SIZE = 100;
  * @param {Function} portSendResponse - 回應函數 (通過 port 發送)
  */
 export function handleMessage(request, sender, portSendResponse) {
-  // Debug log removed - now managed by ConfigManager
-
   switch (request.type) {
-    case 'SYNC_DATA':
-      // 處理資料同步邏輯
-      handleSyncData(request, portSendResponse);
-      break; // 使用 break 代替 return
+    case 'SYNC_VOTES':
+      syncPendingVotes().then(() => {
+        portSendResponse({ success: true, message: 'Vote sync triggered' });
+      }).catch(error => {
+        portSendResponse({ success: false, error: error.message });
+      });
+      break;
+
+    case 'SYNC_TRANSLATIONS':
+      syncPendingTranslations().then(() => {
+        portSendResponse({ success: true, message: 'Translation sync triggered' });
+      }).catch(error => {
+        portSendResponse({ success: false, error: error.message });
+      });
+      break;
+
     case 'GET_SYNC_STATUS':
-      // 處理獲取同步狀態邏輯
-      handleGetSyncStatus(request, portSendResponse);
-      break; // 使用 break 代替 return
+      getSyncStatus().then(status => {
+        portSendResponse({ success: true, status });
+      }).catch(error => {
+        portSendResponse({ success: false, error: error.message });
+      });
+      break;
+
+    case 'RETRY_FAILED_VOTES':
+      retryFailedVotes().then(() => {
+        portSendResponse({ success: true, message: 'Failed votes retry triggered' });
+      }).catch(error => {
+        portSendResponse({ success: false, error: error.message });
+      });
+      break;
+
+    case 'RETRY_FAILED_TRANSLATIONS':
+      retryFailedTranslations().then(() => {
+        portSendResponse({ success: true, message: 'Failed translations retry triggered' });
+      }).catch(error => {
+        portSendResponse({ success: false, error: error.message });
+      });
+      break;
+
     case 'TRIGGER_VOTE_SYNC':
-      // 觸發投票同步
       triggerVoteSync();
       portSendResponse({ success: true, message: 'Vote sync triggered' });
-      break; // 使用 break 代替 return false
+      break;
+
     case 'TRIGGER_TRANSLATION_SYNC':
-      // 觸發翻譯同步
       triggerTranslationSync();
       portSendResponse({ success: true, message: 'Translation sync triggered' });
-      break; // 使用 break 代替 return false
+      break;
+
     default:
-      portSendResponse({ success: false, error: `Unhandled message type in sync module (port): ${request.type}` });
-      break; // 使用 break 代替 return false
+      portSendResponse({
+        success: false,
+        error: `Unhandled message type in sync module: ${request.type}`
+      });
+      break;
   }
 }
 
-/**
- * 處理資料同步的邏輯 (通過 port)
- * @param {Object} request - 接收到的訊息請求
- * @param {Function} portSendResponse - 回應函數 (通過 port 發送)
- */
-function handleSyncData(request, portSendResponse) {
-  // Debug log removed('[Sync Module] Syncing data (port):', request.data);
-  // 根據請求數據決定同步類型
-  if (request.data.type === 'vote') {
-    syncPendingVotes().then(() => {
-      portSendResponse({ success: true, message: 'Votes synced successfully' });
-    }).catch(error => {
-      console.error('[Sync Module] Error syncing votes (port):', error);
-      portSendResponse({ success: false, error: error.message });
-    });
-  } else if (request.data.type === 'translation') {
-    syncPendingTranslations().then(() => {
-      portSendResponse({ success: true, message: 'Translations synced successfully' });
-    }).catch(error => {
-      console.error('[Sync Module] Error syncing translations (port):', error);
-      portSendResponse({ success: false, error: error.message });
-    });
-  } else {
-    portSendResponse({ success: false, error: 'Invalid sync data type' });
-  }
-  // 移除原有的 return true
-}
-
-/**
- * 處理獲取同步狀態的邏輯 (通過 port)
- * @param {Object} request - 接收到的訊息請求
- * @param {Function} portSendResponse - 回應函數 (通過 port 發送)
- */
-async function handleGetSyncStatus(request, portSendResponse) {
-  // Debug log removed('[Sync Module] Getting sync status (port)');
-  try {
-    const voteQueue = await chrome.storage.local.get(VOTE_QUEUE_KEY);
-    const translationQueue = await chrome.storage.local.get(TRANSLATION_QUEUE_KEY);
-    portSendResponse({
-      success: true,
-      status: {
-        lastSync: new Date().toISOString(),
-        pendingVotes: voteQueue[VOTE_QUEUE_KEY] ? voteQueue[VOTE_QUEUE_KEY].length : 0,
-        pendingTranslations: translationQueue[TRANSLATION_QUEUE_KEY] ? translationQueue[TRANSLATION_QUEUE_KEY].length : 0,
-        isSyncingVotes: isSyncingVotes,
-        isSyncingTranslations: isSyncingTranslations
-      }
-    });
-  } catch (error) {
-    console.error('[Sync Module] Error getting sync status (port):', error);
-    portSendResponse({ success: false, error: error.message });
-  }
-  // 移除原有的 return true
-}
-
-/**
- * 觸發投票同步
- */
-function triggerVoteSync() {
-  triggerSync(isSyncingVotes, syncPendingVotes, 'Vote');
-}
-
-/**
- * 觸發翻譯同步
- */
-function triggerTranslationSync() {
-  triggerSync(isSyncingTranslations, syncPendingTranslations, 'Translation');
-}
-
-/**
- * 通用觸發同步函數 (非阻塞)
- * @param {boolean} isSyncingFlag - 是否正在同步的標誌
- * @param {function} syncFunction - 實際執行同步的函數
- * @param {string} dataTypeLabel
- */
-function triggerSync(isSyncingFlag, syncFunction, dataTypeLabel) {
-  if (!isSyncingFlag) {
-    // Debug log removed(`[Sync Module] Triggering ${dataTypeLabel} sync.`);
-    syncFunction(); // 異步執行
-  } else {
-    // Debug log removed(`[Sync Module] ${dataTypeLabel} sync already in progress.`);
-  }
-}
-
-/**
- * 同步待處理的投票隊列
- */
-async function syncPendingVotes() {
-  await syncPendingItems(
-    VOTE_QUEUE_KEY,
-    isSyncingVotes,
-    sendVoteToAPI,
-    'Vote',
-    (flag) => { isSyncingVotes = flag; }
-  );
-}
-
-/**
- * 同步待處理的翻譯隊列
- */
-async function syncPendingTranslations() {
-  await syncPendingItems(
-    TRANSLATION_QUEUE_KEY,
-    isSyncingTranslations,
-    sendTranslationToAPI,
-    'Translation',
-    (flag) => { isSyncingTranslations = flag; }
-  );
-}
-
-/**
- * 通用同步待處理隊列的函數
- * @param {string} queueKey
- * @param {boolean} isSyncingFlag
- * @param {function} apiCallFunction
- * @param {string} dataTypeLabel
- * @param {function} setSyncingFlag - 用於更新同步狀態的函數
- */
-async function syncPendingItems(queueKey, isSyncingFlag, apiCallFunction, dataTypeLabel, setSyncingFlag) {
-  if (isSyncingFlag) return;
-  setSyncingFlag(true);
-  // Debug log removed(`[Sync Module] Starting ${dataTypeLabel} sync...`);
-
-  try {
-    const { [queueKey]: queue = [] } = await chrome.storage.local.get(queueKey);
-    if (queue.length === 0) {
-      // Debug log removed(`[Sync Module] ${dataTypeLabel} queue is empty.`);
-      setSyncingFlag(false);
-      return;
-    }
-
-    // Debug log removed(`[Sync Module] Syncing ${queue.length} pending ${dataTypeLabel}s...`);
-    const remainingItems = [];
-    let successCount = 0;
-
-    for (const itemData of queue) {
-      try {
-        await apiCallFunction(itemData); // Assuming itemData includes userID
-        successCount++;
-        // Debug log removed(`[Sync Module] Synced ${dataTypeLabel}:`, itemData);
-      } catch (error) {
-        console.warn(`[Sync Module] Failed to sync ${dataTypeLabel}, keeping in queue:`, error.message, itemData);
-        remainingItems.push(itemData);
-      }
-    }
-
-    // 更新隊列
-    await chrome.storage.local.set({ [queueKey]: remainingItems });
-    // Debug log removed(`[Sync Module] ${dataTypeLabel} sync finished. Synced: ${successCount}, Remaining: ${remainingItems.length}`);
-
-  } catch (error) {
-    console.error(`[Sync Module] Error during ${dataTypeLabel} sync:`, error);
-  } finally {
-    setSyncingFlag(false);
-  }
-}
-
-/**
- * 發送單個投票到後端 API
- * @param {object} voteData - 包含 userID 的完整投票數據
- */
-async function sendVoteToAPI(voteData) {
-  // Debug log removed('[Sync Module] Sending vote to API via direct apiModule call:', voteData);
-  try {
-    // 模擬一個 sendResponse 函數，因為 apiModule.handleProcessVote 期望這個參數
-    // 這裡我們不需要實際的 portSendResponse，因為 sync 模組是直接呼叫
-    // 我們只需要確保 apiModule.handleProcessVote 內部邏輯能正常執行並返回結果
-    const dummySendResponse = (response) => {
-      // Debug log removed('[Sync Module] Dummy sendResponse received for vote:', response);
-      // 這裡可以根據 response 判斷成功或失敗，並拋出錯誤
-      if (!response.success) {
-        throw new Error(response.error || 'Failed to process vote via API module');
-      }
-    };
-
-    // 直接呼叫 apiModule.handleProcessVote
-    // 構造一個符合 apiModule.handleProcessVote 期望的 request 對象
-    const request = { type: 'PROCESS_VOTE', payload: voteData };
-    // sender 參數可以為空對象或 null，因為是內部呼叫
-    await apiModule.handleMessage(request, {}, dummySendResponse);
-    // Debug log removed('[Sync Module] Vote processed successfully by apiModule.');
-    return { success: true }; // 假設成功處理
-  } catch (error) {
-    console.error('[Sync Module] Error processing vote via apiModule:', error);
-    throw error; // 重新拋出錯誤，讓 syncPendingItems 捕獲
-  }
-}
-
-/**
- * 發送單個翻譯提交到後端 API
- * @param {object} translationData - 包含 userID 的完整翻譯數據
- */
-async function sendTranslationToAPI(translationData) {
-  // Debug log removed('[Sync Module] Sending translation to API via direct apiModule call:', translationData);
-  try {
-    const dummySendResponse = (response) => {
-      // Debug log removed('[Sync Module] Dummy sendResponse received for translation:', response);
-      if (!response.success) {
-        throw new Error(response.error || 'Failed to submit translation via API module');
-      }
-    };
-
-    // 直接呼叫 apiModule.handleSubmitTranslation
-    // 構造一個符合 apiModule.handleSubmitTranslation 期望的 request 對象
-    const request = {
-      type: 'SUBMIT_TRANSLATION',
-      videoId: translationData.videoId,
-      timestamp: translationData.timestamp,
-      original: translationData.original,
-      translation: translationData.translation,
-      submissionReason: translationData.submissionReason,
-      languageCode: translationData.languageCode
-    };
-    // sender 參數可以為空對象或 null
-    await apiModule.handleMessage(request, {}, dummySendResponse);
-    // Debug log removed('[Sync Module] Translation submitted successfully by apiModule.');
-    return { success: true }; // 假設成功處理
-  } catch (error) {
-    console.error('[Sync Module] Error submitting translation via apiModule:', error);
-    throw error; // 重新拋出錯誤，讓 syncPendingItems 捕獲
-  }
-}
+// ==================== 替換事件同步（保留舊功能）====================
 
 /**
  * 發送替換事件到後端 API
@@ -273,7 +416,6 @@ async function sendTranslationToAPI(translationData) {
  * @returns {Promise<Object>} - API 回應結果
  */
 async function sendReplacementEventsToAPI(events) {
-  // 使用 apiModule.submitReplacementEvents 函數發送請求
   return await apiModule.submitReplacementEvents(events);
 }
 
@@ -281,32 +423,26 @@ async function sendReplacementEventsToAPI(events) {
  * 同步待處理的替換事件列表
  */
 async function syncPendingReplacementEvents() {
-  // Debug log removed('[Sync Module] Starting replacement events sync...');
-  
+  console.log('[Sync] Starting replacement events sync...');
+
   try {
     const { replacementEvents = [] } = await chrome.storage.local.get(['replacementEvents']);
     if (replacementEvents.length === 0) {
-      // Debug log removed('[Sync Module] Replacement events queue is empty.');
+      console.log('[Sync] Replacement events queue is empty.');
       return;
     }
 
-    // Debug log removed(`[Sync Module] Syncing ${replacementEvents.length} pending replacement events...`);
-    
-    try {
-      // 嘗試發送所有事件到 API
-      const result = await sendReplacementEventsToAPI(replacementEvents);
-      
-      // 成功發送後清空本地存儲的事件
-      await chrome.storage.local.set({ replacementEvents: [] });
-      console.log(`[Sync Module] Successfully synced ${replacementEvents.length} replacement events and cleared local storage.`);
-      
-    } catch (error) {
-      console.warn('[Sync Module] Failed to sync replacement events, keeping in storage:', error.message);
-      // 失敗時保留事件，等待下次同步
-    }
+    console.log(`[Sync] Syncing ${replacementEvents.length} pending replacement events...`);
 
+    try {
+      const result = await sendReplacementEventsToAPI(replacementEvents);
+      await chrome.storage.local.set({ replacementEvents: [] });
+      console.log(`[Sync] Successfully synced ${replacementEvents.length} replacement events and cleared local storage.`);
+    } catch (error) {
+      console.warn('[Sync] Failed to sync replacement events, keeping in storage:', error.message);
+    }
   } catch (error) {
-    console.error('[Sync Module] Error during replacement events sync:', error);
+    console.error('[Sync] Error during replacement events sync:', error);
   }
 }
 
@@ -314,32 +450,62 @@ async function syncPendingReplacementEvents() {
  * 觸發替換事件同步
  */
 function triggerReplacementEventsSync() {
-  // Debug log removed('[Sync Module] Triggering replacement events sync');
-  syncPendingReplacementEvents(); // 異步執行
+  console.log('[Sync] Triggering replacement events sync');
+  syncPendingReplacementEvents();
 }
 
-// 定期觸發同步 (例如每 5 分鐘)
+// ==================== 初始化 ====================
+
+/**
+ * Service Worker 啟動時初始化同步
+ */
+async function initializeSync() {
+  console.log('[Sync] Initializing sync service...');
+
+  try {
+    const status = await getSyncStatus();
+    console.log('[Sync] Current status:', status);
+
+    if (status.pendingVotes > 0 || status.failedVotes > 0) {
+      await syncPendingVotes();
+    }
+
+    if (status.pendingTranslations > 0 || status.failedTranslations > 0) {
+      await syncPendingTranslations();
+    }
+
+    console.log('[Sync] Initialization complete');
+  } catch (error) {
+    console.error('[Sync] Initialization failed:', error);
+  }
+}
+
+// 模組載入時初始化
+initializeSync();
+
+// ==================== 定期同步（Alarms）====================
+
 // 創建三個獨立的 alarm
 chrome.alarms.create('syncVotesAlarm', { periodInMinutes: 5 });
 chrome.alarms.create('syncTranslationsAlarm', { periodInMinutes: 5 });
-chrome.alarms.create('syncReplacementEventsAlarm', { periodInMinutes: 15 }); // 每15分鐘同步替換事件
+chrome.alarms.create('syncReplacementEventsAlarm', { periodInMinutes: 15 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'syncVotesAlarm') {
-    // Debug log removed('[Sync Module] Periodic vote sync triggered by alarm.');
+    console.log('[Sync] Periodic vote sync triggered by alarm');
     triggerVoteSync();
   } else if (alarm.name === 'syncTranslationsAlarm') {
-    // Debug log removed('[Sync Module] Periodic translation sync triggered by alarm.');
+    console.log('[Sync] Periodic translation sync triggered by alarm');
     triggerTranslationSync();
   } else if (alarm.name === 'syncReplacementEventsAlarm') {
-    // Debug log removed('[Sync Module] Periodic replacement events sync triggered by alarm.');
+    console.log('[Sync] Periodic replacement events sync triggered by alarm');
     triggerReplacementEventsSync();
   }
 });
 
 // 擴充功能啟動時觸發所有同步
 chrome.runtime.onStartup.addListener(() => {
-  // Debug log removed('[Sync Module] Extension startup, triggering all syncs.');
+  console.log('[Sync] Extension startup, triggering all syncs');
   triggerVoteSync();
   triggerTranslationSync();
   triggerReplacementEventsSync();

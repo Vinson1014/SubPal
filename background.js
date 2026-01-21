@@ -27,6 +27,7 @@ chrome.storage.local.get(['previousSWInstanceIdForRestartCheck'], (result) => {
 import * as storageModule from './background/storage.js';
 import * as apiModule from './background/api.js';
 import * as syncModule from './background/sync.js';
+import './background/sync-listener.js'; // 載入同步監聽器，自動註冊 storage 變化監聽
 
 // 擴充功能安裝/更新事件
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -505,6 +506,37 @@ function handleCoreMessagePort(messageId, request, port) {
 
 
 /**
+ * 處理 CHECK_SUBTITLE 請求
+ * @param {Object} request - 消息請求對象
+ * @param {Function} portSendResponse - 回應函數
+ */
+async function handleCheckSubtitle(request, portSendResponse) {
+  const { videoId, timestamp } = request;
+
+  if (!videoId || typeof timestamp !== 'number') {
+    console.error('[Background] CHECK_SUBTITLE error: Missing videoId or timestamp');
+    portSendResponse({ success: false, error: '缺少 videoId 或 timestamp' });
+    return;
+  }
+
+  console.log('[Background] Fetching subtitles for:', videoId, timestamp);
+
+  try {
+    const subtitles = await apiModule.fetchSubtitles({
+      videoId: videoId,
+      startTime: timestamp,
+      duration: 180 // 3分鐘
+    });
+
+    console.log(`[Background] Successfully fetched ${subtitles.length} subtitles`);
+    portSendResponse({ success: true, subtitles: subtitles });
+  } catch (error) {
+    console.error('[Background] Error fetching subtitles:', error);
+    portSendResponse({ success: false, error: `獲取字幕失敗: ${error.message}` });
+  }
+}
+
+/**
  * 將訊息路由到對應模組 (通過 port)
  * @param {string} messageId - 消息 ID
  * @param {object} request - 請求對象
@@ -520,8 +552,7 @@ function routeMessageToModulePort(messageId, request, port) {
     'SAVE_VIDEO_INFO': 'storage',
     'GET_USER_LANGUAGE': 'storage',
     'SAVE_USER_LANGUAGE': 'storage',
-    'SUBMIT_TRANSLATION': 'api',
-    'PROCESS_VOTE': 'api',
+    // SUBMIT_TRANSLATION 和 PROCESS_VOTE 已改由 Queue System 處理
     'CHECK_SUBTITLE': 'api',
     'SYNC_DATA': 'sync',
     'GET_SYNC_STATUS': 'sync',
@@ -552,9 +583,13 @@ function routeMessageToModulePort(messageId, request, port) {
         break;
       case 'api':
         console.log('[Background] Handling in api module (port):', request.type);
-        // 調用模組處理函數，傳遞包裝後的 sendResponse
-        // 注意：apiModule.handleMessage 需要修改以接受 portSendResponse
-        apiModule.handleMessage(request, port.sender, portSendResponse);
+        // API 模組重構後，直接處理 CHECK_SUBTITLE 請求
+        if (request.type === 'CHECK_SUBTITLE') {
+          handleCheckSubtitle(request, portSendResponse);
+        } else {
+          console.error('[Background] Unhandled API request type:', request.type);
+          portSendResponse({ success: false, error: `Unhandled API request type: ${request.type}` });
+        }
         break;
       case 'sync':
         console.log('[Background] Handling in sync module (port):', request.type);
