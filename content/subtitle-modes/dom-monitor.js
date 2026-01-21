@@ -8,7 +8,7 @@
  * 4. 健壯性：保留原有的重試機制和錯誤處理
  */
 
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
+import { registerInternalEventHandler } from '../system/messaging.js';
 
 class DOMMonitor {
   constructor() {
@@ -41,10 +41,13 @@ class DOMMonitor {
     this.log('DOM 監聽模式初始化中...');
     
     try {
-      // 載入調試模式設置
-      await this.loadDebugMode();
-      
-      // 註冊內部事件處理器
+      const { configBridge } = await import('../system/config/config-bridge.js');
+      this.configBridge = configBridge;
+      this.debug = configBridge.get('debugMode');
+      configBridge.subscribe('debugMode', (newValue) => {
+        this.debug = newValue;
+      });
+
       this.setupEventHandlers();
       
       this.isInitialized = true;
@@ -106,23 +109,6 @@ class DOMMonitor {
     this.log('字幕檢測回調已註冊');
   }
 
-  // 從存儲中載入調試模式設置
-  async loadDebugMode() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['debugMode']
-      });
-      
-      if (result && result.debugMode !== undefined) {
-        this.debug = result.debugMode;
-        this.log(`調試模式: ${this.debug}`);
-      }
-    } catch (error) {
-      console.error('載入調試模式設置時出錯:', error);
-    }
-  }
-
   // 設置事件處理器
   setupEventHandlers() {
     // 監聽影片切換事件
@@ -132,12 +118,6 @@ class DOMMonitor {
         this.setupSubtitleObserver();
         this.scanForSubtitles();
       }
-    });
-    
-    // 監聽調試模式變更
-    registerInternalEventHandler('TOGGLE_DEBUG_MODE', (message) => {
-      this.debug = message.debugMode;
-      this.log('調試模式設置已更新:', this.debug);
     });
   }
 

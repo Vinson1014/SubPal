@@ -8,7 +8,7 @@
  * 4. 可配置性：支持自訂閃避參數
  */
 
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
+import { registerInternalEventHandler } from '../system/messaging.js';
 
 class UIAvoidanceHandler {
   constructor(options = {}) {
@@ -77,13 +77,9 @@ class UIAvoidanceHandler {
       });
 
       // 保存 ConfigBridge 實例
-      this.configBridge = configBridge;
-      
-      // 載入配置
-      await this.loadConfig();
-      
-      // 設置事件處理器
-      this.setupEventHandlers();
+       this.configBridge = configBridge;
+
+       this.setupEventHandlers();
       
       this.isInitialized = true;
       this.log('UI 閃避處理器初始化完成');
@@ -552,45 +548,12 @@ class UIAvoidanceHandler {
     
     this.isInitialized = false;
     this.log('UI 閃避處理器資源清理完成');
-  }
+   }
 
-
-  /**
-   * 載入配置
-   */
-  async loadConfig() {
-    try {
-      const result = await sendMessage({
-        type: 'GET_SETTINGS',
-        keys: ['uiAvoidanceConfig']
-      });
-      
-      if (result && result.uiAvoidanceConfig) {
-        this.config = { ...this.config, ...result.uiAvoidanceConfig };
-        this.log('配置已載入:', this.config);
-      }
-    } catch (error) {
-      console.error('載入 UI 閃避配置時出錯:', error);
-    }
-  }
-
-  /**
-   * 設置事件處理器
-   */
+   /**
+    * 設置事件處理器
+    */
   setupEventHandlers() {
-    // 監聽配置變更
-    registerInternalEventHandler('UI_AVOIDANCE_CONFIG_CHANGED', (message) => {
-      this.updateConfig(message.config);
-      
-      // 如果功能被禁用，停止監聽
-      if (!this.config.enabled) {
-        this.stop();
-      } else if (this.isInitialized && !this.observer) {
-        this.start();
-      }
-    });
-    
-    // VIDEO_ID_CHANGED 事件現在由 UI Manager 統一處理，這裡不再需要單獨處理
   }
 
   /**
