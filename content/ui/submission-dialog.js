@@ -202,18 +202,7 @@ class SubmissionDialog {
       </div>
       <div style="margin-bottom: 14px;">
         <label for="language-select" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">字幕語言</label>
-        <select id="language-select" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; color: #222; background: #fff;">
-          <option value="">請選擇語言...</option>
-          <option value="en">English</option>
-          <option value="zh-TW">繁體中文</option>
-          <option value="zh-CN">简体中文</option>
-          <option value="ja">日本語</option>
-          <option value="ko">한국어</option>
-          <option value="es">Español</option>
-          <option value="fr">Français</option>
-          <option value="de">Deutsch</option>
-          <option value="other">其他 (請在原因中註明)</option>
-        </select>
+        <div id="language-display" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; color: #222; background: #f3f4f6;"></div>
       </div>
       <div style="margin-bottom: 14px;">
         <label for="translation-input" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">修正翻譯</label>
@@ -235,7 +224,7 @@ class SubmissionDialog {
     
     // 獲取表單元素引用
     this.inputs = {
-      languageSelect: this.dialog.querySelector('#language-select'),
+      languageDisplay: this.dialog.querySelector('#language-display'),
       translationInput: this.dialog.querySelector('#translation-input'),
       reasonInput: this.dialog.querySelector('#reason-input')
     };
@@ -247,7 +236,7 @@ class SubmissionDialog {
   setupEventHandlers() {
     this.log('設置事件處理器');
     
-    const { languageSelect, translationInput, reasonInput } = this.inputs;
+    const { languageDisplay, translationInput, reasonInput } = this.inputs;
     
     // 自動焦點到翻譯輸入框
     setTimeout(() => {
@@ -378,35 +367,64 @@ class SubmissionDialog {
   // 載入用戶語言設置
   async loadUserLanguage() {
     try {
-      const result = await sendMessage({ type: 'GET_USER_LANGUAGE' });
-      if (result && result.success && result.languageCode) {
-        this.inputs.languageSelect.value = result.languageCode;
-        this.log(`載入用戶語言設置: ${result.languageCode}`);
-      }
+      const languageCode = await this.configBridge.get('subtitle.primaryLanguage');
+      this.log(`載入用戶語言設置: ${languageCode}`);
+      
+      const languageName = this.getLanguageDisplayName(languageCode);
+      this.inputs.languageDisplay.textContent = languageName;
+      this.inputs.languageDisplay.setAttribute('data-language-code', languageCode);
     } catch (error) {
       console.warn('載入用戶語言設置失敗:', error);
     }
   }
 
-  // 保存用戶語言設置
-  async saveUserLanguage(languageCode) {
-    try {
-      await sendMessage({ type: 'SAVE_USER_LANGUAGE', languageCode });
-      this.log(`保存用戶語言設置: ${languageCode}`);
-    } catch (error) {
-      console.warn('保存用戶語言設置失敗:', error);
-    }
+  // 獲取語言顯示名稱
+  getLanguageDisplayName(languageCode) {
+    const languageNames = {
+      'zh-Hant': '繁體中文',
+      'zh-Hans': '简体中文',
+      'en': 'English',
+      'ja': '日本語',
+      'ko': '한국어',
+      'es': 'Español',
+      'fr': 'Français',
+      'de': 'Deutsch',
+      'it': 'Italiano',
+      'pt': 'Português',
+      'ru': 'Русский',
+      'ar': 'العربية',
+      'th': 'ไทย',
+      'vi': 'Tiếng Việt',
+      'id': 'Bahasa Indonesia',
+      'ms': 'Bahasa Melayu',
+      'hi': 'हिन्दी',
+      'tr': 'Türkçe',
+      'nl': 'Nederlands',
+      'pl': 'Polski',
+      'sv': 'Svenska'
+    };
+    return languageNames[languageCode] || languageCode;
+  }
+
+  // 轉換 config 語言代碼為 API 兼容格式
+  convertToAPILanguageCode(configLanguageCode) {
+    const mapping = {
+      'zh-Hant': 'zh-TW',
+      'zh-Hans': 'zh-CN'
+    };
+    return mapping[configLanguageCode] || configLanguageCode;
   }
 
   // 處理表單提交
   handleSubmit() {
     this.log('處理表單提交');
     
-    const { languageSelect, translationInput, reasonInput } = this.inputs;
+    const { languageDisplay, translationInput, reasonInput } = this.inputs;
     
     const translation = translationInput.value.trim();
     const reason = reasonInput.value.trim();
-    const selectedLanguage = languageSelect.value;
+    const configLanguageCode = languageDisplay.getAttribute('data-language-code');
+    const apiLanguageCode = this.convertToAPILanguageCode(configLanguageCode);
     
     // 驗證表單
     if (!translation) {
@@ -421,12 +439,6 @@ class SubmissionDialog {
       return;
     }
     
-    if (!selectedLanguage) {
-      alert('請選擇字幕語言');
-      languageSelect.focus();
-      return;
-    }
-    
     // 構造提交數據
     const submissionData = {
       videoId: this.currentSubtitleData.videoId,
@@ -434,13 +446,10 @@ class SubmissionDialog {
       original: this.currentSubtitleData.original || this.currentSubtitleData.text,
       translation: translation,
       submissionReason: reason,
-      languageCode: selectedLanguage
+      languageCode: apiLanguageCode
     };
     
     this.log('提交數據:', submissionData);
-    
-    // 保存用戶語言設置
-    this.saveUserLanguage(selectedLanguage);
     
     // 觸發提交回調
     this.triggerCallback('onSubmit', submissionData);
