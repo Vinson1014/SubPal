@@ -129,16 +129,8 @@ export async function initMessaging() {
     const { message, messageId, sender } = event.detail;
     debugLog('收到來自 content.js 的消息', message, sender);
 
-    // 處理特定的內部消息，例如更新 debug 模式或連接狀態
-    if (message.type === 'SET_DEBUG_MODE') {
-      debugMode = message.debugMode;
-      debugLog('Debug mode set to:', debugMode);
-      // 不需要進一步處理，這個消息是單向的
-      return;
-    }
-
     // 處理內部事件消息
-    const internalEventTypes = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED', 'SUBTITLE_STYLE_UPDATED'];
+    const internalEventTypes = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED'];
     if (internalEventTypes.includes(message.type)) {
       debugLog(`收到 ${message.type} 消息，分發給內部事件處理器`);
       dispatchInternalEvent(message);
