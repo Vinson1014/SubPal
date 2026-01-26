@@ -5,7 +5,7 @@
  * 利用 Netflix Player API 提供更準確的數據
  */
 
-import { sendMessage, onMessage, dispatchInternalEvent } from '../system/messaging.js';
+import { dispatchInternalEvent } from '../system/messaging.js';
 
 class VideoInfoManager {
     constructor() {
@@ -503,15 +503,12 @@ class VideoInfoManager {
      */
     async saveVideoInfo() {
         try {
-            await sendMessage({
-                type: 'SAVE_VIDEO_INFO',
-                data: {
-                    currentVideoId: this.currentVideoId,
-                    currentVideoTitle: this.currentVideoTitle,
-                    currentVideoLanguage: 'unknown'
-                }
+            await this.configBridge.setMultiple({
+                'video.currentVideoId': this.currentVideoId,
+                'video.currentVideoTitle': this.currentVideoTitle,
+                'video.currentVideoLanguage': 'unknown'
             });
-            
+
             this.log('視頻信息已保存到存儲');
         } catch (error) {
             console.error('保存視頻信息時出錯:', error);

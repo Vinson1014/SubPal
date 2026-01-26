@@ -24,7 +24,6 @@ chrome.storage.local.get(['previousSWInstanceIdForRestartCheck'], (result) => {
   chrome.storage.local.set({ previousSWInstanceIdForRestartCheck: serviceWorkerInstanceId });
 });
 
-import * as storageModule from './background/storage.js';
 import * as apiModule from './background/api.js';
 import * as syncModule from './background/sync.js';
 import './background/sync-listener.js'; // 載入同步監聽器，自動註冊 storage 變化監聽
@@ -302,8 +301,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // 定義需要背景腳本處理的核心訊息類型清單 (來自 popup)
   const handledPopupMessageTypes = [
     'TOGGLE_EXTENSION', // Popup 可以切換擴充功能狀態
-    'TOGGLE_DEBUG_MODE', // Popup 可以切換調試模式
-    'GET_SETTINGS', // Popup 獲取設置
+    // 'TOGGLE_DEBUG_MODE', // Popup 可以切換調試模式
+    // 'GET_SETTINGS', // Popup 獲取設置
     'POPUP_API_REQUEST' // 新增：來自 Popup 的 API 請求
     // 'DEBUG_MODE_CHANGED', // 來自選項頁面的調試模式變更 - 現在通過 port 處理
     // 'API_BASE_URL_CHANGED' // 來自選項頁面的 API Base URL 變更 - 現在通過 port 處理
@@ -334,7 +333,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 function handlePopupMessage(request, sender, sendResponse) {
     // 定義訊息類型到模組的映射 (僅限 popup 相關)
     const moduleMapping = {
-        'GET_SETTINGS': 'storage',
+        // 'GET_SETTINGS': 'storage',
         'TOGGLE_EXTENSION': 'core', // 核心處理
         'TOGGLE_DEBUG_MODE': 'core', // 核心處理
         'POPUP_API_REQUEST': 'api_proxy' // 新增：路由到 API 代理處理
@@ -348,7 +347,8 @@ function handlePopupMessage(request, sender, sendResponse) {
     if (moduleName === 'storage') {
       // 路由到 storage 模組，使用原有的 sendResponse
       // 注意：這裡 storageModule.handleMessage 仍然需要接受 sendResponse
-      storageModule.handleMessage(request, sender, sendResponse);
+      // storageModule.handleMessage(request, sender, sendResponse);
+      console.warn(`[Background] Storage module has been deprecated, please update: ${request}`);
     } else if (moduleName === 'core') {
         // 處理核心消息 (與 handleCoreMessage 類似，但使用 sendResponse)
         switch (request.type) {
@@ -424,40 +424,12 @@ async function handlePopupApiRequest(request, sendResponse) {
  */
 function handleCoreMessagePort(messageId, request, port) {
   switch (request.type) {
-    case 'CONTENT_SCRIPT_LOADED':
-      console.log('[Background] 內容腳本已加載 (port):', port.sender?.tab?.url);
-      // 通過 port 發送響應
-      port.postMessage({ messageId, response: { success: true } });
-      break;
-
     case 'TOGGLE_EXTENSION':
       // 來自 content script 的 TOGGLE_EXTENSION 消息，通常不需要再轉發回 content script
       console.log(`[Background] Received TOGGLE_EXTENSION from content script (port): ${request.isEnabled}`);
       // 如果需要，可以更新狀態或通知其他地方
       port.postMessage({ messageId, response: { success: true } }); // 發送響應
       break;
-
-    case 'TOGGLE_DEBUG_MODE':
-      // 來自 content script 的 TOGGLE_DEBUG_MODE 消息（廢棄）
-      console.warn('[Background] TOGGLE_DEBUG_MODE is deprecated (port). Use ConfigManager instead.');
-      // 為了向後兼容，將配置寫入 chrome.storage
-      // ConfigManager 會自動監聽並通知所有訂閱者
-      chrome.storage.local.set({ debugMode: request.debugMode }, () => {
-        if (chrome.runtime.lastError) {
-          console.error('[Background] Error setting debugMode:', chrome.runtime.lastError);
-          port.postMessage({ messageId, response: { success: false, error: chrome.runtime.lastError.message } });
-        } else {
-          console.log(`[Background] debugMode set to ${request.debugMode} (deprecated path, port)`);
-          port.postMessage({ messageId, response: { success: true } });
-        }
-      });
-      break;
-
-    case 'VIDEO_ID_CHANGED':
-      console.log('[Background] Received VIDEO_ID_CHANGED message (port)');
-      port.postMessage({ messageId, response: { success: true } }); // 發送響應
-      break;
-
     case 'UPDATE_STATS':
       console.log('[Background] Received UPDATE_STATS message (port)');
       // 將統計數據轉發到 popup
@@ -477,26 +449,6 @@ function handleCoreMessagePort(messageId, request, port) {
       // 記錄內容腳本已準備就緒，可以執行相關邏輯
       port.postMessage({ messageId, response: { success: true } });
       break;
-
-    case 'SUBTITLE_STYLE_UPDATED':
-      console.log('[Background] Subtitle style updated:', request.config);
-      // 轉發消息到所有相關的 content scripts (通過 port)
-      contentScriptPorts.forEach(contentPort => {
-        try {
-          contentPort.postMessage({
-            messageId: 'subtitle-style-broadcast',
-            response: {
-              type: 'SUBTITLE_STYLE_UPDATED',
-              config: request.config
-            }
-          });
-        } catch (error) {
-          console.error('[Background] Error forwarding SUBTITLE_STYLE_UPDATED to content script:', error);
-        }
-      });
-      port.postMessage({ messageId, response: { success: true } });
-      break;
-
     default:
       console.warn('[Background] 未處理的核心消息類型 (port):', request.type); // 警告總是顯示
       port.postMessage({ messageId, response: { success: false, error: `Unhandled core message type (port) ${request.type}` } });
@@ -545,21 +497,11 @@ async function handleCheckSubtitle(request, portSendResponse) {
 function routeMessageToModulePort(messageId, request, port) {
   // 定義訊息類型到模組的映射
   const moduleMapping = {
-    'GET_USER_ID': 'storage',
-    'GET_SETTINGS': 'storage', // Content script 獲取設置
-    'GET_DEBUG_MODE': 'storage',
-    'SAVE_SETTINGS': 'storage',
-    'SAVE_VIDEO_INFO': 'storage',
-    'GET_USER_LANGUAGE': 'storage',
-    'SAVE_USER_LANGUAGE': 'storage',
-    // SUBMIT_TRANSLATION 和 PROCESS_VOTE 已改由 Queue System 處理
     'CHECK_SUBTITLE': 'api',
     'SYNC_DATA': 'sync',
     'GET_SYNC_STATUS': 'sync',
     'TRIGGER_VOTE_SYNC': 'sync',
     'TRIGGER_TRANSLATION_SYNC': 'sync',
-    'REPORT_REPLACEMENT_EVENTS': 'storage',
-    'CLEAR_QUEUE': 'storage', // 新增 CLEAR_QUEUE 消息類型
     'SUBTITLE_STYLE_UPDATED': 'core' // 添加字幕樣式更新消息路由
   };
 
@@ -575,12 +517,6 @@ function routeMessageToModulePort(messageId, request, port) {
     };
 
     switch (moduleName) {
-      case 'storage':
-        console.log('[Background] Handling in storage module (port):', request.type);
-        // 調用模組處理函數，傳遞包裝後的 sendResponse
-        // 注意：storageModule.handleMessage 需要修改以接受 portSendResponse
-        storageModule.handleMessage(request, port.sender, portSendResponse);
-        break;
       case 'api':
         console.log('[Background] Handling in api module (port):', request.type);
         // API 模組重構後，直接處理 CHECK_SUBTITLE 請求
