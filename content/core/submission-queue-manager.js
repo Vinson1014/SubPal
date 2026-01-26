@@ -2,7 +2,7 @@
  * SubmissionQueueManager - 提交隊列管理器
  *
  * 職責：
- * - 管理投票和翻譯提交的隊列
+ * - 管理投票、翻譯提交和替換事件的隊列
  * - 提供隊列操作 API（enqueue、history、status、retry）
  * - 處理來自 page context 的消息請求
  * - 狀態追蹤（pending、syncing、completed、failed）
@@ -10,7 +10,7 @@
  * 架構模式：
  * - 運行在 content script context
  * - 直接訪問 chrome.storage.local（通過 StorageAdapter）
- * - 接收來自 vote-bridge 和 translation-bridge 的消息
+ * - 接收來自 vote-bridge、translation-bridge 和 replacement-event-bridge 的消息
  *
  * @module submission-queue-manager
  */
@@ -286,53 +286,149 @@ export class SubmissionQueueManager {
     return true;
   }
 
+  // ==================== 替換事件操作 ====================
+
+  /**
+   * 將替換事件加入隊列
+   *
+   * @param {Object} data - 替換事件數據
+   * @param {string} data.translationID - 翻譯 ID
+   * @param {string} data.contributorUserID - 貢獻者用戶 ID
+   * @param {string} data.beneficiaryUserID - 受益者用戶 ID
+   * @param {string} data.occurredAt - 發生時間（ISO8601 格式）
+   * @returns {Promise<{itemId: string, message: string}>}
+   */
+  async enqueueReplacementEvent(data) {
+    this.log('enqueueReplacementEvent 被調用:', data);
+
+    // 驗證必要參數
+    if (!data.translationID || !data.contributorUserID || !data.beneficiaryUserID || !data.occurredAt) {
+      throw new Error('缺少必要參數: translationID, contributorUserID, beneficiaryUserID, occurredAt');
+    }
+
+    // 建立隊列項目
+    const item = {
+      id: generateUUID(),
+      translationID: data.translationID,
+      contributorUserID: data.contributorUserID,
+      beneficiaryUserID: data.beneficiaryUserID,
+      occurredAt: data.occurredAt,
+      status: 'pending',
+      createdAt: Date.now(),
+      syncedAt: null,
+      retryCount: 0,
+      error: null
+    };
+
+    // 加入隊列
+    await this.storage.appendToQueue('replacementEvent', item);
+
+    this.log('替換事件已加入隊列:', item.id);
+
+    return {
+      itemId: item.id,
+      message: '替換事件已加入同步隊列'
+    };
+  }
+
+  /**
+   * 獲取替換事件歷史記錄
+   *
+   * @param {number} limit - 返回記錄數量上限（預設 100）
+   * @returns {Promise<Array>} 替換事件歷史陣列
+   */
+  async getReplacementEventHistory(limit = 100) {
+    this.log('getReplacementEventHistory 被調用, limit:', limit);
+
+    const history = await this.storage.getHistory('replacementEvent', limit);
+
+    this.log(`獲取到 ${history.length} 筆替換事件歷史`);
+
+    return history;
+  }
+
+  /**
+   * 重試失敗的替換事件
+   *
+   * @param {string} itemId - 項目 ID
+   * @returns {Promise<boolean>} 是否成功重試
+   */
+  async retryReplacementEvent(itemId) {
+    this.log('retryReplacementEvent 被調用, itemId:', itemId);
+
+    if (!itemId) {
+      throw new Error('itemId 是必要參數');
+    }
+
+    // 更新項目狀態為 pending，並重設 retryCount
+    const updated = await this.storage.updateQueueItem('replacementEvent', itemId, {
+      status: 'pending',
+      retryCount: 0,
+      error: null
+    });
+
+    if (!updated) {
+      throw new Error(`找不到替換事件項目或無法重試: ${itemId}`);
+    }
+
+    this.log('替換事件項目已重設為 pending:', itemId);
+
+    return true;
+  }
+
   // ==================== 通用操作 ====================
 
   /**
    * 獲取所有待同步的項目
    *
-   * @returns {Promise<{votes: Array, translations: Array}>}
+   * @returns {Promise<{votes: Array, translations: Array, replacementEvents: Array}>}
    */
   async getAllPending() {
     this.log('getAllPending 被調用');
 
-    const [voteQueue, translationQueue] = await Promise.all([
+    const [voteQueue, translationQueue, replacementEventQueue] = await Promise.all([
       this.storage.getQueue('vote'),
-      this.storage.getQueue('translation')
+      this.storage.getQueue('translation'),
+      this.storage.getQueue('replacementEvent')
     ]);
 
     const pendingVotes = voteQueue.filter(item => item.status === 'pending');
     const pendingTranslations = translationQueue.filter(item => item.status === 'pending');
+    const pendingReplacementEvents = replacementEventQueue.filter(item => item.status === 'pending');
 
-    this.log(`待同步項目: ${pendingVotes.length} 筆投票, ${pendingTranslations.length} 筆翻譯`);
+    this.log(`待同步項目: ${pendingVotes.length} 筆投票, ${pendingTranslations.length} 筆翻譯, ${pendingReplacementEvents.length} 筆替換事件`);
 
     return {
       votes: pendingVotes,
-      translations: pendingTranslations
+      translations: pendingTranslations,
+      replacementEvents: pendingReplacementEvents
     };
   }
 
   /**
    * 獲取隊列統計資訊
    *
-   * @returns {Promise<{votes: Object, translations: Object}>}
+   * @returns {Promise<{votes: Object, translations: Object, replacementEvents: Object}>}
    */
   async getStats() {
     this.log('getStats 被調用');
 
-    const [voteQueue, translationQueue] = await Promise.all([
+    const [voteQueue, translationQueue, replacementEventQueue] = await Promise.all([
       this.storage.getQueue('vote'),
-      this.storage.getQueue('translation')
+      this.storage.getQueue('translation'),
+      this.storage.getQueue('replacementEvent')
     ]);
 
     const voteStats = this._calculateStats(voteQueue);
     const translationStats = this._calculateStats(translationQueue);
+    const replacementEventStats = this._calculateStats(replacementEventQueue);
 
-    this.log('統計資訊:', { votes: voteStats, translations: translationStats });
+    this.log('統計資訊:', { votes: voteStats, translations: translationStats, replacementEvents: replacementEventStats });
 
     return {
       votes: voteStats,
-      translations: translationStats
+      translations: translationStats,
+      replacementEvents: replacementEventStats
     };
   }
 
@@ -386,7 +482,7 @@ export class SubmissionQueueManager {
 
 /**
  * 消息處理器
- * 處理來自 page context (vote-bridge, translation-bridge) 的消息
+ * 處理來自 page context (vote-bridge, translation-bridge, replacement-event-bridge) 的消息
  *
  * @param {Object} request - 消息請求對象
  * @param {string} request.type - 消息類型
@@ -447,6 +543,25 @@ export function handleQueueMessage(request, sendResponse) {
 
       case 'TRANSLATION_RETRY':
         submissionQueueManager.retryTranslation(payload.itemId)
+          .then(result => sendResponse({ success: result }))
+          .catch(error => sendResponse({ error: error.message }));
+        break;
+
+      // 替換事件消息
+      case 'REPLACEMENT_EVENT_ENQUEUE':
+        submissionQueueManager.enqueueReplacementEvent(payload)
+          .then(result => sendResponse(result))
+          .catch(error => sendResponse({ error: error.message }));
+        break;
+
+      case 'REPLACEMENT_EVENT_GET_HISTORY':
+        submissionQueueManager.getReplacementEventHistory(payload?.limit)
+          .then(result => sendResponse({ history: result }))
+          .catch(error => sendResponse({ error: error.message }));
+        break;
+
+      case 'REPLACEMENT_EVENT_RETRY':
+        submissionQueueManager.retryReplacementEvent(payload.itemId)
           .then(result => sendResponse({ success: result }))
           .catch(error => sendResponse({ error: error.message }));
         break;

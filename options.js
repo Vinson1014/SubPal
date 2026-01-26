@@ -768,7 +768,7 @@ function restoreData(file) {
  */
 async function updatePendingDataUI() {
   try {
-    const result = await chrome.storage.local.get(['voteQueue', 'translationQueue', 'replacementEvents']);
+    const result = await chrome.storage.local.get(['voteQueue', 'translationQueue', 'replacementEventQueue']);
 
     const voteQueueCount = document.getElementById('voteQueueCount');
     const translationQueueCount = document.getElementById('translationQueueCount');
@@ -781,7 +781,7 @@ async function updatePendingDataUI() {
       translationQueueCount.textContent = (result.translationQueue || []).length;
     }
     if (replacementEventsQueueCount) {
-      replacementEventsQueueCount.textContent = (result.replacementEvents || []).length;
+      replacementEventsQueueCount.textContent = (result.replacementEventQueue || []).length;
     }
   } catch (error) {
     console.error('[Options] 更新待同步數據 UI 失敗:', error);

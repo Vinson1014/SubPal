@@ -10,10 +10,13 @@ const VOTE_QUEUE_KEY = 'voteQueue';
 const VOTE_HISTORY_KEY = 'voteHistory';
 const TRANSLATION_QUEUE_KEY = 'translationQueue';
 const TRANSLATION_HISTORY_KEY = 'translationHistory';
+const REPLACEMENT_EVENT_QUEUE_KEY = 'replacementEventQueue';
+const REPLACEMENT_EVENT_HISTORY_KEY = 'replacementEventHistory';
 
 // 同步狀態標誌
 let isSyncingVotes = false;
 let isSyncingTranslations = false;
+let isSyncingReplacementEvents = false;
 
 // ==================== Storage 輔助函數 ====================
 
@@ -118,11 +121,13 @@ async function moveToHistory(queueType, itemId, historyType) {
 async function getSyncStatus() {
   const storageData = await chrome.storage.local.get([
     VOTE_QUEUE_KEY,
-    TRANSLATION_QUEUE_KEY
+    TRANSLATION_QUEUE_KEY,
+    REPLACEMENT_EVENT_QUEUE_KEY
   ]);
 
   const voteQueue = storageData[VOTE_QUEUE_KEY] || [];
   const translationQueue = storageData[TRANSLATION_QUEUE_KEY] || [];
+  const replacementEventQueue = storageData[REPLACEMENT_EVENT_QUEUE_KEY] || [];
 
   return {
     pendingVotes: voteQueue.filter(item => item.status === 'pending').length,
@@ -131,8 +136,12 @@ async function getSyncStatus() {
     pendingTranslations: translationQueue.filter(item => item.status === 'pending').length,
     syncingTranslations: translationQueue.filter(item => item.status === 'syncing').length,
     failedTranslations: translationQueue.filter(item => item.status === 'failed').length,
+    pendingReplacementEvents: replacementEventQueue.filter(item => item.status === 'pending').length,
+    syncingReplacementEvents: replacementEventQueue.filter(item => item.status === 'syncing').length,
+    failedReplacementEvents: replacementEventQueue.filter(item => item.status === 'failed').length,
     isSyncingVotes,
-    isSyncingTranslations
+    isSyncingTranslations,
+    isSyncingReplacementEvents
   };
 }
 
@@ -399,6 +408,27 @@ export function handleMessage(request, sender, portSendResponse) {
       portSendResponse({ success: true, message: 'Translation sync triggered' });
       break;
 
+    case 'SYNC_REPLACEMENT_EVENTS':
+      syncPendingReplacementEvents().then(() => {
+        portSendResponse({ success: true, message: 'Replacement event sync triggered' });
+      }).catch(error => {
+        portSendResponse({ success: false, error: error.message });
+      });
+      break;
+
+    case 'RETRY_FAILED_REPLACEMENT_EVENTS':
+      retryFailedReplacementEvents().then(() => {
+        portSendResponse({ success: true, message: 'Failed replacement events retry triggered' });
+      }).catch(error => {
+        portSendResponse({ success: false, error: error.message });
+      });
+      break;
+
+    case 'TRIGGER_REPLACEMENT_EVENT_SYNC':
+      triggerReplacementEventSync();
+      portSendResponse({ success: true, message: 'Replacement event sync triggered' });
+      break;
+
     default:
       portSendResponse({
         success: false,
@@ -408,50 +438,130 @@ export function handleMessage(request, sender, portSendResponse) {
   }
 }
 
-// ==================== 替換事件同步（保留舊功能）====================
+// ==================== 替換事件同步 ====================
 
 /**
- * 發送替換事件到後端 API
- * @param {Array} events - 替換事件陣列
- * @returns {Promise<Object>} - API 回應結果
- */
-async function sendReplacementEventsToAPI(events) {
-  return await apiModule.submitReplacementEvents(events);
-}
-
-/**
- * 同步待處理的替換事件列表
+ * 同步待處理的替換事件隊列
+ * 使用批量 API 提交（最多100個）
  */
 async function syncPendingReplacementEvents() {
-  console.log('[Sync] Starting replacement events sync...');
+  if (isSyncingReplacementEvents) return;
+  isSyncingReplacementEvents = true;
+  console.log('[Sync] Starting replacement event sync...');
 
   try {
-    const { replacementEvents = [] } = await chrome.storage.local.get(['replacementEvents']);
-    if (replacementEvents.length === 0) {
-      console.log('[Sync] Replacement events queue is empty.');
+    const pendingItems = await getPendingItems(REPLACEMENT_EVENT_QUEUE_KEY);
+
+    if (pendingItems.length === 0) {
+      console.log('[Sync] Replacement event queue is empty.');
       return;
     }
 
-    console.log(`[Sync] Syncing ${replacementEvents.length} pending replacement events...`);
+    console.log(`[Sync] Syncing ${pendingItems.length} pending replacement events...`);
 
-    try {
-      const result = await sendReplacementEventsToAPI(replacementEvents);
-      await chrome.storage.local.set({ replacementEvents: [] });
-      console.log(`[Sync] Successfully synced ${replacementEvents.length} replacement events and cleared local storage.`);
-    } catch (error) {
-      console.warn('[Sync] Failed to sync replacement events, keeping in storage:', error.message);
+    // 批量發送（最多100個，符合後端API限制）
+    const batchSize = 100;
+    const batches = [];
+    for (let i = 0; i < pendingItems.length; i += batchSize) {
+      batches.push(pendingItems.slice(i, i + batchSize));
+    }
+
+    for (const batch of batches) {
+      try {
+        // 標記所有項目為 syncing
+        await Promise.all(
+          batch.map(item => updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, 'syncing'))
+        );
+
+        // 批量發送
+        await sendReplacementEventsToAPI(batch);
+
+        // 移動到歷史記錄
+        await Promise.all(
+          batch.map(item => moveToHistory(REPLACEMENT_EVENT_QUEUE_KEY, item.id, REPLACEMENT_EVENT_HISTORY_KEY))
+        );
+
+        console.log(`[Sync] Replacement event batch of ${batch.length} synced successfully`);
+
+      } catch (error) {
+        console.error('[Sync] Error syncing replacement event batch:', error);
+
+        // 處理批次中的每個項目
+        for (const item of batch) {
+          const retryCount = item.retryCount || 0;
+
+          if (retryCount < MAX_RETRIES) {
+            await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, 'pending', null);
+            await updateQueueItemRetryCount(REPLACEMENT_EVENT_QUEUE_KEY, item.id, retryCount + 1);
+            console.warn(`[Sync] Replacement event ${item.id} retry ${retryCount + 1}/${MAX_RETRIES}: ${error.message}`);
+          } else {
+            await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, 'failed', error.message);
+            console.error(`[Sync] Replacement event ${item.id} failed after ${MAX_RETRIES} retries: ${error.message}`);
+          }
+        }
+      }
     }
   } catch (error) {
-    console.error('[Sync] Error during replacement events sync:', error);
+    console.error('[Sync] Error during replacement event sync:', error);
+  } finally {
+    isSyncingReplacementEvents = false;
+  }
+}
+
+/**
+ * 重試所有失敗的替換事件
+ */
+async function retryFailedReplacementEvents() {
+  const result = await chrome.storage.local.get(REPLACEMENT_EVENT_QUEUE_KEY);
+  const queue = result[REPLACEMENT_EVENT_QUEUE_KEY] || [];
+  const failedItems = queue.filter(item => item.status === 'failed');
+
+  for (const item of failedItems) {
+    await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, 'pending', null);
+    await updateQueueItemRetryCount(REPLACEMENT_EVENT_QUEUE_KEY, item.id, 0);
+  }
+
+  console.log(`[Sync] Retrying ${failedItems.length} failed replacement events`);
+  await syncPendingReplacementEvents();
+}
+
+/**
+ * 發送替換事件批次到後端 API
+ * @param {Array} items - 替換事件項目陣列
+ */
+async function sendReplacementEventsToAPI(items) {
+  console.log('[Sync] Sending replacement events to API:', items.length);
+
+  try {
+    // 轉換格式以符合後端 API 要求
+    const events = items.map(item => ({
+      translationID: item.translationID,
+      contributorUserID: item.contributorUserID,
+      beneficiaryUserID: item.beneficiaryUserID,
+      occurredAt: item.occurredAt
+    }));
+
+    // 調用 API 模組的 submitReplacementEvents 函數
+    const result = await apiModule.submitReplacementEvents(events);
+
+    console.log('[Sync] Replacement events submitted successfully:', result);
+    return { success: true };
+  } catch (error) {
+    console.error('[Sync] Error submitting replacement events:', error);
+    throw error;
   }
 }
 
 /**
  * 觸發替換事件同步
  */
-function triggerReplacementEventsSync() {
-  console.log('[Sync] Triggering replacement events sync');
-  syncPendingReplacementEvents();
+export async function triggerReplacementEventSync() {
+  if (!isSyncingReplacementEvents) {
+    console.log('[Sync] Triggering replacement event sync');
+    await syncPendingReplacementEvents();
+  } else {
+    console.log('[Sync] Replacement event sync already in progress');
+  }
 }
 
 // ==================== 初始化 ====================
@@ -474,6 +584,10 @@ async function initializeSync() {
       await syncPendingTranslations();
     }
 
+    if (status.pendingReplacementEvents > 0 || status.failedReplacementEvents > 0) {
+      await syncPendingReplacementEvents();
+    }
+
     console.log('[Sync] Initialization complete');
   } catch (error) {
     console.error('[Sync] Initialization failed:', error);
@@ -485,10 +599,10 @@ initializeSync();
 
 // ==================== 定期同步（Alarms）====================
 
-// 創建三個獨立的 alarm
+// 創建三個獨立的 alarm（均為 5 分鐘）
 chrome.alarms.create('syncVotesAlarm', { periodInMinutes: 5 });
 chrome.alarms.create('syncTranslationsAlarm', { periodInMinutes: 5 });
-chrome.alarms.create('syncReplacementEventsAlarm', { periodInMinutes: 15 });
+chrome.alarms.create('syncReplacementEventsAlarm', { periodInMinutes: 5 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'syncVotesAlarm') {
@@ -499,7 +613,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     triggerTranslationSync();
   } else if (alarm.name === 'syncReplacementEventsAlarm') {
     console.log('[Sync] Periodic replacement events sync triggered by alarm');
-    triggerReplacementEventsSync();
+    triggerReplacementEventSync();
   }
 });
 
@@ -508,5 +622,5 @@ chrome.runtime.onStartup.addListener(() => {
   console.log('[Sync] Extension startup, triggering all syncs');
   triggerVoteSync();
   triggerTranslationSync();
-  triggerReplacementEventsSync();
+  triggerReplacementEventSync();
 });

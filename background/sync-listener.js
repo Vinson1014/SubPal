@@ -22,6 +22,7 @@ const DEBUG_MODE = false; // 調試模式
 
 let voteTimer = null;
 let translationTimer = null;
+let replacementEventTimer = null;
 
 // ==================== 防抖函數 ====================
 
@@ -30,10 +31,17 @@ let translationTimer = null;
  * 避免短時間內多次操作觸發多次同步
  *
  * @param {Function} triggerFn - 同步觸發函數
- * @param {string} timerType - 計時器類型 ('vote' 或 'translation')
+ * @param {string} timerType - 計時器類型 ('vote'、'translation' 或 'replacementEvent')
  */
 function debouncedTriggerSync(triggerFn, timerType) {
-  const timer = timerType === 'vote' ? voteTimer : translationTimer;
+  let timer;
+  if (timerType === 'vote') {
+    timer = voteTimer;
+  } else if (timerType === 'translation') {
+    timer = translationTimer;
+  } else {
+    timer = replacementEventTimer;
+  }
 
   if (timer) {
     clearTimeout(timer);
@@ -43,15 +51,19 @@ function debouncedTriggerSync(triggerFn, timerType) {
     triggerFn();
     if (timerType === 'vote') {
       voteTimer = null;
-    } else {
+    } else if (timerType === 'translation') {
       translationTimer = null;
+    } else {
+      replacementEventTimer = null;
     }
   }, DEBOUNCE_DELAY);
 
   if (timerType === 'vote') {
     voteTimer = newTimer;
-  } else {
+  } else if (timerType === 'translation') {
     translationTimer = newTimer;
+  } else {
+    replacementEventTimer = newTimer;
   }
 
   log(`已設置 ${timerType} 同步防抖計時器（${DEBOUNCE_DELAY}ms）`);
@@ -107,6 +119,30 @@ async function triggerTranslationSync() {
   }
 }
 
+/**
+ * 觸發替換事件同步
+ * 檢查待同步的替換事件項目並直接調用同步函數
+ */
+async function triggerReplacementEventSync() {
+  try {
+    const { replacementEventQueue = [] } = await chrome.storage.local.get('replacementEventQueue');
+    const pendingItems = replacementEventQueue.filter(item => item.status === 'pending');
+
+    if (pendingItems.length > 0) {
+      log(`發現 ${pendingItems.length} 個待同步的替換事件，觸發同步`);
+
+      // 直接調用 sync 模組的同步函數（避免消息傳遞問題）
+      syncModule.triggerReplacementEventSync().catch(error => {
+        logError('觸發替換事件同步失敗:', error);
+      });
+    } else {
+      log('替換事件隊列中沒有待同步項目');
+    }
+  } catch (error) {
+    logError('觸發替換事件同步時發生錯誤:', error);
+  }
+}
+
 // ==================== Storage 變化監聽 ====================
 
 /**
@@ -139,6 +175,17 @@ chrome.storage.onChanged.addListener((changes, area) => {
       debouncedTriggerSync(triggerTranslationSync, 'translation');
     }
   }
+
+  // 替換事件隊列變化
+  if (changes.replacementEventQueue) {
+    const oldLength = changes.replacementEventQueue.oldValue?.length || 0;
+    const newLength = changes.replacementEventQueue.newValue?.length || 0;
+
+    if (newLength > oldLength) {
+      log(`replacementEventQueue 長度變化: ${oldLength} → ${newLength}，觸發同步`);
+      debouncedTriggerSync(triggerReplacementEventSync, 'replacementEvent');
+    }
+  }
 });
 
 // ==================== 初始化同步 ====================
@@ -156,6 +203,9 @@ async function initializeSync() {
 
     // 檢查翻譯隊列
     await triggerTranslationSync();
+
+    // 檢查替換事件隊列
+    await triggerReplacementEventSync();
 
     log('同步監聽器初始化完成');
   } catch (error) {
@@ -204,4 +254,4 @@ function logError(...args) {
 
 // ==================== 導出 ====================
 
-export { triggerVoteSync, triggerTranslationSync, initializeSync };
+export { triggerVoteSync, triggerTranslationSync, triggerReplacementEventSync, initializeSync };

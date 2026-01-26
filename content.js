@@ -27,7 +27,8 @@
   const QUEUE_MESSAGE_TYPES = [
     'VOTE_ENQUEUE', 'VOTE_GET_HISTORY', 'VOTE_GET_STATUS', 'VOTE_RETRY',
     'TRANSLATION_ENQUEUE', 'TRANSLATION_GET_HISTORY', 'TRANSLATION_RETRY',
-    'GET_ALL_PENDING', 'GET_QUEUE_STATS'
+    'GET_ALL_PENDING', 'GET_QUEUE_STATS', 'REPLACEMENT_EVENT_ENQUEUE', 
+    'REPLACEMENT_EVENT_GET_HISTORY', 'REPLACEMENT_EVENT_RETRY'
   ];
 
   // 初始化 ConfigManager
@@ -373,6 +374,21 @@
 
         case 'TRANSLATION_RETRY':
           result = await submissionQueueManager.retryTranslation(payload.itemId);
+          result = { success: result };
+          break;
+
+        // 替換事件消息
+        case 'REPLACEMENT_EVENT_ENQUEUE':
+          result = await submissionQueueManager.enqueueReplacementEvent(payload);
+          break;
+
+        case 'REPLACEMENT_EVENT_GET_HISTORY':
+          result = await submissionQueueManager.getReplacementEventHistory(payload?.limit);
+          result = { history: result };
+          break;
+
+        case 'REPLACEMENT_EVENT_RETRY':
+          result = await submissionQueueManager.retryReplacementEvent(payload.itemId);
           result = { success: result };
           break;
 

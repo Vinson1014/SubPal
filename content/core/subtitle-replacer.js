@@ -40,6 +40,10 @@ class SubtitleReplacer {
       apiRequests: 0,
       lastActivity: null
     };
+
+    // 替換事件去重記錄（15分鐘窗口）
+    this.recentReplacementEvents = [];
+    this.DEDUP_WINDOW_MS = 15 * 60 * 1000; // 15 分鐘
   }
 
   async initialize() {
@@ -456,7 +460,17 @@ class SubtitleReplacer {
       replacement: suggestedSubtitle,
       translationID: translationID
     });
-    
+
+    // 記錄 replacement event（異步，不阻塞字幕替換）
+    // 忽略測試模式的替換
+    if (!isTestReplacement && translationID && contributorUserID) {
+      this.recordReplacementEvent(translationID, contributorUserID)
+        .catch(error => {
+          // 靜默處理錯誤，不影響字幕替換功能
+          console.warn('[SubtitleReplacer] 記錄替換事件失敗:', error);
+        });
+    }
+
     return result;
   }
 
@@ -548,6 +562,96 @@ class SubtitleReplacer {
         this.log('測試規則已更新:', this.testRules.length);
       }
     });
+  }
+
+  /**
+   * 記錄替換事件到隊列
+   * @param {string} translationID - 翻譯 ID
+   * @param {string} contributorUserID - 貢獻者用戶 ID
+   * @returns {Promise<void>}
+   */
+  async recordReplacementEvent(translationID, contributorUserID) {
+    try {
+      // 獲取當前用戶 ID（受益者）
+      const beneficiaryUserID = this.configBridge?.get('user.userId');
+
+      // 如果沒有用戶 ID，跳過記錄
+      if (!beneficiaryUserID) {
+        this.log('未找到用戶 ID，跳過記錄替換事件');
+        return;
+      }
+
+      // 檢查是否重複（15分鐘窗口）
+      if (this.isDuplicateReplacementEvent(translationID, beneficiaryUserID)) {
+        this.log('跳過重複的替換事件:', { translationID, beneficiaryUserID });
+        return;
+      }
+
+      // 記錄到去重列表
+      const now = Date.now();
+      this.recentReplacementEvents.push({
+        translationID,
+        beneficiaryUserID,
+        timestamp: now
+      });
+
+      // 清理過期記錄（超過15分鐘）
+      this.cleanupReplacementEventHistory();
+
+      // 動態導入 replacement-event-bridge
+      const { replacementEventBridge } = await import('./replacement-event-bridge.js');
+
+      // 確保 bridge 已初始化
+      if (!replacementEventBridge.isInitialized) {
+        await replacementEventBridge.initialize();
+      }
+
+      // 記錄事件
+      const occurredAt = new Date(now).toISOString();
+      await replacementEventBridge.enqueue({
+        translationID,
+        contributorUserID,
+        beneficiaryUserID,
+        occurredAt
+      });
+
+      this.log('替換事件已記錄:', { translationID, contributorUserID, beneficiaryUserID });
+
+    } catch (error) {
+      // 錯誤已在 createReplacedSubtitle 中處理，這裡只記錄詳細信息
+      throw new Error(`記錄替換事件失敗: ${error.message}`);
+    }
+  }
+
+  /**
+   * 檢查是否為重複的替換事件（15分鐘窗口）
+   * @param {string} translationID - 翻譯 ID
+   * @param {string} beneficiaryUserID - 受益者用戶 ID
+   * @returns {boolean} 是否重複
+   */
+  isDuplicateReplacementEvent(translationID, beneficiaryUserID) {
+    const now = Date.now();
+    const windowStart = now - this.DEDUP_WINDOW_MS;
+
+    return this.recentReplacementEvents.some(event =>
+      event.translationID === translationID &&
+      event.beneficiaryUserID === beneficiaryUserID &&
+      event.timestamp >= windowStart
+    );
+  }
+
+  /**
+   * 清理過期的替換事件記錄（超過15分鐘）
+   */
+  cleanupReplacementEventHistory() {
+    const now = Date.now();
+    const windowStart = now - this.DEDUP_WINDOW_MS;
+
+    this.recentReplacementEvents = this.recentReplacementEvents.filter(
+      event => event.timestamp >= windowStart
+    );
+
+    this.log(`清理過期替換事件記錄，剩餘: ${this.recentReplacementEvents.length}`);
   }
 
   log(message, ...args) {

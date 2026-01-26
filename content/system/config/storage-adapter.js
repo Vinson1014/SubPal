@@ -495,8 +495,8 @@ export class StorageAdapter {
    * const voteQueue = await adapter.getQueue('vote');
    */
   async getQueue(queueType) {
-    if (!queueType || !['vote', 'translation'].includes(queueType)) {
-      throw new Error('queueType 必須是 "vote" 或 "translation"');
+    if (!queueType || !['vote', 'translation', 'replacementEvent'].includes(queueType)) {
+      throw new Error('queueType 必須是 "vote"、"translation" 或 "replacementEvent"');
     }
 
     const storageKey = `${queueType}Queue`;
@@ -522,8 +522,8 @@ export class StorageAdapter {
    * });
    */
   async appendToQueue(queueType, item) {
-    if (!queueType || !['vote', 'translation'].includes(queueType)) {
-      throw new Error('queueType 必須是 "vote" 或 "translation"');
+    if (!queueType || !['vote', 'translation', 'replacementEvent'].includes(queueType)) {
+      throw new Error('queueType 必須是 "vote"、"translation" 或 "replacementEvent"');
     }
 
     if (!item || typeof item !== 'object') {
@@ -561,8 +561,8 @@ export class StorageAdapter {
    * });
    */
   async updateQueueItem(queueType, itemId, updates) {
-    if (!queueType || !['vote', 'translation'].includes(queueType)) {
-      throw new Error('queueType 必須是 "vote" 或 "translation"');
+    if (!queueType || !['vote', 'translation', 'replacementEvent'].includes(queueType)) {
+      throw new Error('queueType 必須是 "vote"、"translation" 或 "replacementEvent"');
     }
 
     if (!itemId || typeof itemId !== 'string') {
@@ -601,8 +601,8 @@ export class StorageAdapter {
    * const removed = await adapter.removeFromQueue('vote', 'uuid-v4');
    */
   async removeFromQueue(queueType, itemId) {
-    if (!queueType || !['vote', 'translation'].includes(queueType)) {
-      throw new Error('queueType 必須是 "vote" 或 "translation"');
+    if (!queueType || !['vote', 'translation', 'replacementEvent'].includes(queueType)) {
+      throw new Error('queueType 必須是 "vote"、"translation" 或 "replacementEvent"');
     }
 
     if (!itemId || typeof itemId !== 'string') {
@@ -635,8 +635,8 @@ export class StorageAdapter {
    * await adapter.clearQueue('vote');
    */
   async clearQueue(queueType) {
-    if (!queueType || !['vote', 'translation'].includes(queueType)) {
-      throw new Error('queueType 必須是 "vote" 或 "translation"');
+    if (!queueType || !['vote', 'translation', 'replacementEvent'].includes(queueType)) {
+      throw new Error('queueType 必須是 "vote"、"translation" 或 "replacementEvent"');
     }
 
     const storageKey = `${queueType}Queue`;
@@ -657,8 +657,8 @@ export class StorageAdapter {
    * const voteHistory = await adapter.getHistory('vote', 50);
    */
   async getHistory(historyType, limit = 100) {
-    if (!historyType || !['vote', 'translation'].includes(historyType)) {
-      throw new Error('historyType 必須是 "vote" 或 "translation"');
+    if (!historyType || !['vote', 'translation', 'replacementEvent'].includes(historyType)) {
+      throw new Error('historyType 必須是 "vote"、"translation" 或 "replacementEvent"');
     }
 
     if (typeof limit !== 'number' || limit <= 0) {
@@ -691,8 +691,8 @@ export class StorageAdapter {
    * });
    */
   async addToHistory(historyType, item) {
-    if (!historyType || !['vote', 'translation'].includes(historyType)) {
-      throw new Error('historyType 必須是 "vote" 或 "translation"');
+    if (!historyType || !['vote', 'translation', 'replacementEvent'].includes(historyType)) {
+      throw new Error('historyType 必須是 "vote"、"translation" 或 "replacementEvent"');
     }
 
     if (!item || typeof item !== 'object') {
@@ -727,8 +727,8 @@ export class StorageAdapter {
    * await adapter.clearHistory('vote');
    */
   async clearHistory(historyType) {
-    if (!historyType || !['vote', 'translation'].includes(historyType)) {
-      throw new Error('historyType 必須是 "vote" 或 "translation"');
+    if (!historyType || !['vote', 'translation', 'replacementEvent'].includes(historyType)) {
+      throw new Error('historyType 必須是 "vote"、"translation" 或 "replacementEvent"');
     }
 
     const storageKey = `${historyType}History`;
