@@ -164,46 +164,6 @@ async function saveConfigMultiple(items) {
   console.log(`[Options] 批量保存 ${Object.keys(items).length} 個配置`);
 }
 
-// ==================== Background 通訊 ====================
-
-let backgroundPort = null;
-
-/**
- * 發送消息到 background script
- * 用於清空隊列等需要 background 處理的操作
- */
-function sendMessageToBackground(messageType, payload = {}) {
-  return new Promise((resolve, reject) => {
-    if (!backgroundPort) {
-      console.error('Background port not connected.');
-      return reject(new Error('Background port not connected.'));
-    }
-
-    const messageId = Date.now() + Math.random().toString(36).substring(2, 7);
-    const message = { type: messageType, ...payload };
-
-    const timeout = setTimeout(() => {
-      backgroundPort.onMessage.removeListener(onResponse);
-      reject(new Error(`Message timeout: ${messageType}`));
-    }, 10000);
-
-    const onResponse = (responseMessage) => {
-      if (responseMessage.messageId === messageId) {
-        clearTimeout(timeout);
-        backgroundPort.onMessage.removeListener(onResponse);
-
-        if (responseMessage.response.success) {
-          resolve(responseMessage.response);
-        } else {
-          reject(new Error(responseMessage.response.error || '未知錯誤'));
-        }
-      }
-    };
-
-    backgroundPort.onMessage.addListener(onResponse);
-    backgroundPort.postMessage({ messageId, message });
-  });
-}
 
 // ==================== UI 更新函數 ====================
 
@@ -614,6 +574,7 @@ function setupStyleControlListeners(type, keyPrefix) {
 
 /**
  * 設置清空隊列按鈕
+ * 直接操作 chrome.storage.local，不需要通過 background
  */
 function setupClearQueueButtons() {
   const clearVoteQueueButton = document.getElementById('clearVoteQueueButton');
@@ -624,11 +585,13 @@ function setupClearQueueButtons() {
     clearVoteQueueButton.addEventListener('click', async () => {
       if (confirm('確定要清空投票隊列嗎？此操作不可撤銷。')) {
         try {
-          await sendMessageToBackground('CLEAR_QUEUE', { queueType: 'voteQueue' });
+          // 直接清空 chrome.storage.local 中的隊列
+          await chrome.storage.local.set({ voteQueue: [] });
+          console.log('[Options] 投票隊列已清空');
           alert('投票隊列已清空。');
           updatePendingDataUI();
         } catch (error) {
-          console.error('Error clearing vote queue:', error);
+          console.error('[Options] 清空投票隊列失敗:', error);
           alert('清空投票隊列失敗：' + error.message);
         }
       }
@@ -639,11 +602,13 @@ function setupClearQueueButtons() {
     clearTranslationQueueButton.addEventListener('click', async () => {
       if (confirm('確定要清空翻譯隊列嗎？此操作不可撤銷。')) {
         try {
-          await sendMessageToBackground('CLEAR_QUEUE', { queueType: 'translationQueue' });
+          // 直接清空 chrome.storage.local 中的隊列
+          await chrome.storage.local.set({ translationQueue: [] });
+          console.log('[Options] 翻譯隊列已清空');
           alert('翻譯隊列已清空。');
           updatePendingDataUI();
         } catch (error) {
-          console.error('Error clearing translation queue:', error);
+          console.error('[Options] 清空翻譯隊列失敗:', error);
           alert('清空翻譯隊列失敗：' + error.message);
         }
       }
@@ -654,11 +619,13 @@ function setupClearQueueButtons() {
     clearReplacementEventsQueueButton.addEventListener('click', async () => {
       if (confirm('確定要清空替換事件隊列嗎？此操作不可撤銷。')) {
         try {
-          await sendMessageToBackground('CLEAR_QUEUE', { queueType: 'replacementEvents' });
+          // 直接清空 chrome.storage.local 中的隊列
+          await chrome.storage.local.set({ replacementEventQueue: [] });
+          console.log('[Options] 替換事件隊列已清空');
           alert('替換事件隊列已清空。');
           updatePendingDataUI();
         } catch (error) {
-          console.error('Error clearing replacement events queue:', error);
+          console.error('[Options] 清空替換事件隊列失敗:', error);
           alert('清空替換事件隊列失敗：' + error.message);
         }
       }
@@ -827,17 +794,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const versionElement = document.getElementById('appVersion');
   if (versionElement && manifest.version) {
     versionElement.textContent = `v${manifest.version}`;
-  }
-
-  // 建立與 background script 的連接（用於清空隊列等操作）
-  try {
-    backgroundPort = chrome.runtime.connect({ name: 'options-page-channel' });
-    backgroundPort.onDisconnect.addListener(() => {
-      console.warn('[Options] Background port disconnected.');
-      backgroundPort = null;
-    });
-  } catch (error) {
-    console.warn('[Options] 無法連接到 background script:', error);
   }
 
   // 設置 Tab 導航
