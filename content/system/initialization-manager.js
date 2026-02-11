@@ -577,25 +577,46 @@ class InitializationManager {
    */
   setupEventFlow() {
     this.log('設置組件間事件流...');
-    
+
     const { uiManager, subtitleCoordinator } = this.components;
-    
+
+    // 訂閱 isEnabled 全域開關
+    this.configBridge.subscribe('isEnabled', (newValue) => {
+      this.log(`全域開關變更: ${newValue}`);
+      if (!newValue) {
+        // 關閉：停止字幕處理 + 隱藏自訂UI + 恢復Netflix原生字幕
+        subtitleCoordinator.stopCurrentMode();
+        uiManager.hideSubtitle();
+        uiManager.showNativeSubtitles();
+      } else {
+        // 開啟：隱藏Netflix原生字幕 + 恢復字幕處理
+        uiManager.hideNativeSubtitles();
+        subtitleCoordinator.startCurrentMode();
+      }
+    });
+
     // 字幕檢測事件流
     subtitleCoordinator.onSubtitleDetected(async (subtitleData) => {
       try {
+        // 全域開關關閉時，不顯示字幕
+        if (this.configBridge.get('isEnabled') === false) {
+          uiManager.hideSubtitle();
+          return;
+        }
+
         // 處理字幕替換（如果需要）
         const processedSubtitle = await this.processSubtitleReplacement(subtitleData);
-        
+
         // 顯示字幕
         if (processedSubtitle && processedSubtitle.text) {
           uiManager.showSubtitle(processedSubtitle);
         } else {
           uiManager.hideSubtitle();
         }
-        
+
       } catch (error) {
         console.error('處理字幕時出錯:', error);
-        
+
         // 降級顯示原始字幕
         if (subtitleData && subtitleData.text) {
           uiManager.showSubtitle(subtitleData);

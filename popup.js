@@ -461,13 +461,11 @@ async function updateUserData() {
     mainToggle.addEventListener('change', async (e) => {
         const newValue = e.target.checked;
         try {
-            // 1. 使用 configManager 更新配置
+            // 1. 使用 configManager 更新配置（content 側透過 ConfigBridge 訂閱偵測）
             await configManager.set('isEnabled', newValue);
             isEnabled = newValue;
             // 2. 更新 UI
             updateUI();
-            // 3. 發送消息通知 background 和 content
-            chrome.runtime.sendMessage({ type: 'TOGGLE_EXTENSION', isEnabled });
         } catch (error) {
             console.error('[Popup] 設置 isEnabled 失敗:', error);
             // 回滾 UI

@@ -858,6 +858,15 @@ class UIManager {
     this.log('UI 管理器資源清理完成');
   }
 
+  // 恢復原生字幕（移除隱藏CSS）
+  showNativeSubtitles() {
+    const styleElement = document.getElementById('subpal-hide-native-subtitles');
+    if (styleElement) {
+      styleElement.remove();
+      this.log('✅ 已移除CSS規則，恢復Netflix原生字幕');
+    }
+  }
+
   // 隱藏原生字幕
   hideNativeSubtitles() {
     this.log('隱藏Netflix原生字幕...');
