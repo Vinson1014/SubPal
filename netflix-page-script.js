@@ -97,7 +97,7 @@
           rawTrackType: track.rawTrackType
         })).filter(lang => !lang.isNone);
 
-        debugLog('可用字幕語言:', languages);
+        debugLog('可用字幕語言 (詳細):', languages);
         return languages;
       } catch (error) {
         console.error('獲取可用語言時出錯:', error);
@@ -136,16 +136,31 @@
           throw new Error('無法獲取字幕軌道列表');
         }
 
-        const targetTrack = trackList.find(track => track.bcp47 === languageCode);
-        if (!targetTrack) {
-          debugLog('可用語言軌道:', trackList.map(t => ({ code: t.bcp47, name: t.displayName })));
+        // 找出所有匹配語言的軌道
+        const matchingTracks = trackList.filter(track => track.bcp47 === languageCode);
+
+        if (matchingTracks.length === 0) {
+          debugLog('可用語言軌道:', trackList.map(t => ({
+            code: t.bcp47,
+            name: t.displayName,
+            trackType: t.trackType,
+            rawTrackType: t.rawTrackType
+          })));
           throw new Error(`找不到語言: ${languageCode}`);
         }
 
+        // 智能選擇字幕軌道
+        const targetTrack = this.selectBestSubtitleTrack(matchingTracks, languageCode);
+
         await this.videoPlayer.setTimedTextTrack(targetTrack);
-        debugLog(`✅ 成功切換到 ${languageCode}`);
+        debugLog(`✅ 成功切換到 ${languageCode}`, {
+          selectedTrack: targetTrack.displayName,
+          trackType: targetTrack.trackType,
+          rawTrackType: targetTrack.rawTrackType,
+          trackId: targetTrack.trackId
+        });
         return true;
-        
+
       } catch (error) {
         console.error(`切換到 ${languageCode} 失敗:`, error);
         
@@ -167,6 +182,51 @@
         
         throw error;
       }
+    }
+
+    /**
+     * 選擇最佳字幕軌道
+     * 策略：
+     * 1. 優先選擇 PRIMARY 且 name 不為 '關閉' 的軌道（乾淨字幕）
+     * 2. 若無，選擇任何 name 不為 '關閉' 的軌道
+     * 3. 若都是 '關閉'，fallback 到第一個
+     */
+    selectBestSubtitleTrack(matchingTracks, languageCode) {
+      if (matchingTracks.length === 1) {
+        debugLog(`✅ 只有一個 ${languageCode} 軌道，直接使用: ${matchingTracks[0].displayName}`);
+        return matchingTracks[0];
+      }
+
+      debugLog(`發現 ${matchingTracks.length} 個 ${languageCode} 軌道:`,
+        matchingTracks.map(t => ({
+          name: t.displayName,
+          trackType: t.trackType
+        }))
+      );
+
+      // 步驟 1：優先選擇 PRIMARY 且不是 '關閉' 的軌道
+      const primaryCleanTrack = matchingTracks.find(
+        track => track.trackType === 'PRIMARY' && track.displayName !== '關閉'
+      );
+
+      if (primaryCleanTrack) {
+        debugLog(`✅ 選擇 PRIMARY 乾淨字幕: ${primaryCleanTrack.displayName}`);
+        return primaryCleanTrack;
+      }
+
+      // 步驟 2：尋找任何不是 '關閉' 的軌道
+      const anyCleanTrack = matchingTracks.find(
+        track => track.displayName !== '關閉'
+      );
+
+      if (anyCleanTrack) {
+        debugLog(`✅ 選擇乾淨字幕: ${anyCleanTrack.displayName} (${anyCleanTrack.trackType})`);
+        return anyCleanTrack;
+      }
+
+      // 步驟 3：Fallback，所有軌道都是 '關閉'，選第一個
+      debugLog(`⚠️ 所有軌道都標記為'關閉'，使用第一個: ${matchingTracks[0].displayName}`);
+      return matchingTracks[0];
     }
 
     /**
@@ -259,6 +319,7 @@
       XMLHttpRequest.prototype.open = function(method, url, ...args) {
         this._interceptorUrl = url;
         this._interceptorMethod = method;
+        this._interceptorPageUrl = location.href;  // 記錄 request-time URL
         return self.originalXHROpen.apply(this, [method, url, ...args]);
       };
 
@@ -340,6 +401,7 @@
       const requestInfo = {
         url: xhr._interceptorUrl,
         method: xhr._interceptorMethod,
+        pageUrl: xhr._interceptorPageUrl,  // request-time 頁面 URL
         timestamp: Date.now(),
         type: 'xhr'
       };
@@ -351,12 +413,6 @@
           try {
             const contentType = xhr.getResponseHeader('content-type');
             let content = '';
-            
-            // debugLog('XHR Response info:', {
-            //   responseType: xhr.responseType,
-            //   contentType: contentType,
-            //   status: xhr.status
-            // });
             
             // 根據 responseType 和 contentType 選擇正確的讀取方式
             if (xhr.responseType === 'arraybuffer' || contentType === 'application/octet-stream') {
@@ -434,10 +490,12 @@
     }
 
     /**
-     * 從當前 URL 提取視頻 ID
+     * 從 URL 提取視頻 ID
+     * @param {string} [pageUrl] - 頁面 URL，預設為 location.href
      */
-    extractVideoIdFromUrl() {
-      const urlMatch = location.href.match(/netflix\.com\/watch\/(\d+)/);
+    extractVideoIdFromUrl(pageUrl) {
+      const url = pageUrl || location.href;
+      const urlMatch = url.match(/netflix\.com\/watch\/(\d+)/);
       if (urlMatch && urlMatch[1]) {
         debugLog('從 URL 提取視頻 ID:', urlMatch[1]);
         return urlMatch[1];
@@ -448,9 +506,9 @@
     /**
      * 生成包含語言和視頻 ID 的緩存鍵
      */
-    generateCacheKeyWithLanguage(url, language) {
-      // 首先檢查是否能從 URL 獲取到 videoID
-      const videoId = this.extractVideoIdFromUrl();
+    generateCacheKeyWithLanguage(url, language, pageUrl) {
+      // 首先檢查是否能從 URL 獲取到 videoID（優先使用 request-time URL）
+      const videoId = this.extractVideoIdFromUrl(pageUrl);
       if (!videoId) {
         debugLog('無法從 URL 獲取 videoID，跳過緩存 - 可能是預覽影片');
         return null; // 返回 null 表示不應該緩存
@@ -470,20 +528,19 @@
      */
     processSubtitleContent(content, requestInfo) {
       if (content.includes('<?xml') && content.includes('<tt')) {
-        // 從 TTML 內容解析語言
         const language = this.parseTTMLLanguage(content);
-        
-        // 生成包含正確語言的 cacheKey
-        const cacheKey = this.generateCacheKeyWithLanguage(requestInfo.url, language);
-        
+
+        // 生成包含正確語言的 cacheKey（使用 request-time URL 提取 videoId）
+        const cacheKey = this.generateCacheKeyWithLanguage(requestInfo.url, language, requestInfo.pageUrl);
+
         // 如果無法生成有效的緩存鍵（例如預覽影片），則跳過緩存
         if (!cacheKey) {
           debugLog(`跳過緩存 - 無法生成有效緩存鍵，語言: ${language}`);
           return;
         }
-        
+
         debugLog(`TTML攔截成功: ${language}, 緩存鍵: ${cacheKey}`);
-        
+
         // 緩存 raw TTML（混合策略：既緩存又通知）
         this.interceptedTTMLs.set(cacheKey, {
           rawContent: content,
@@ -491,7 +548,7 @@
           language: language,
           timestamp: Date.now()
         });
-        
+
         // 通知後續模組（即使沒人接收也沒關係）
         this.notifyRawTTMLIntercepted({
           cacheKey: cacheKey,

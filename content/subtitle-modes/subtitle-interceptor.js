@@ -284,8 +284,9 @@ class SubtitleInterceptor {
    * 分析緩存狀態
    */
   analyzeCacheStatus(existingCache) {
-    const hasPrimary = existingCache.has(this.primaryLanguage);
-    const hasSecondary = existingCache.has(this.secondaryLanguage);
+    // 使用 base-code fallback 檢查緩存（如 "zh" 匹配 "zh-Hant"）
+    const hasPrimary = Array.from(existingCache.keys()).some(k => this.matchesLanguage(k, this.primaryLanguage));
+    const hasSecondary = Array.from(existingCache.keys()).some(k => this.matchesLanguage(k, this.secondaryLanguage));
     
     const status = {
       hasPrimary,
@@ -376,9 +377,62 @@ class SubtitleInterceptor {
       this.log(`已經是 ${languageCode}，無需切換`);
       // 但仍要等待可能的攔截事件
       await this.waitForInterception(languageCode);
+      // 重要：等待後需要從緩存載入字幕數據到對應的屬性
+      const type = this.matchesLanguage(languageCode, this.primaryLanguage) ? 'primary' : 'secondary';
+      await this.loadLanguageDataFromCache(languageCode, type);
     } else {
       this.log(`切換到 ${languageCode}`);
       await this.loadSubtitleForLanguage(languageCode, 'auto');
+    }
+  }
+
+  /**
+   * 從緩存載入語言數據（不觸發語言切換）
+   */
+  async loadLanguageDataFromCache(languageCode, type) {
+    try {
+      this.log(`從緩存載入 ${languageCode} (${type}) 字幕數據...`);
+      
+      // 查找匹配的緩存數據（支援 base-code fallback，如 "zh" 匹配 "zh-Hant"）
+      let matchedKey = null;
+      for (const [cacheKey] of this.interceptedSubtitles.entries()) {
+        const keyLanguageCode = cacheKey.split('_')[0];
+        if (keyLanguageCode && this.matchesLanguage(keyLanguageCode, languageCode)) {
+          matchedKey = cacheKey;
+          break;
+        }
+      }
+      
+      if (!matchedKey) {
+        this.log(`未找到 ${languageCode} 的緩存數據，可用鍵:`, Array.from(this.interceptedSubtitles.keys()));
+        return;
+      }
+      
+      const languageData = this.interceptedSubtitles.get(matchedKey);
+      if (!languageData || !languageData.subtitles) {
+        this.log(`${languageCode} 緩存數據無效`);
+        return;
+      }
+      
+      const subtitles = languageData.subtitles;
+      this.log(`從緩存載入 ${languageCode} 的 ${subtitles.length} 個字幕條目`);
+      
+      if (subtitles.length > 0) {
+        const timeIndex = languageData.timeIndex;
+        
+        // 儲存到對應的屬性
+        if (type === 'primary') {
+          this.primarySubtitles = subtitles;
+          this.primaryTimeIndex = timeIndex;
+        } else if (type === 'secondary') {
+          this.secondarySubtitles = subtitles;
+          this.secondaryTimeIndex = timeIndex;
+        }
+        
+        this.log(`${languageCode} (${type}) 字幕從緩存載入完成`);
+      }
+    } catch (error) {
+      console.error(`從緩存載入 ${languageCode} 字幕時出錯:`, error);
     }
   }
 
@@ -393,9 +447,9 @@ class SubtitleInterceptor {
       }, 3000);
       
       const handleInterception = (event) => {
-        if (event.language === languageCode) {
+        if (this.matchesLanguage(event.language, languageCode)) {
           clearTimeout(timeout);
-          this.log(`收到 ${languageCode} 攔截事件`);
+          this.log(`收到 ${languageCode} 攔截事件 (TTML lang: ${event.language})`);
           resolve();
         }
       };
@@ -467,9 +521,10 @@ class SubtitleInterceptor {
           const { cacheKey } = event;
           this.log(`收到字幕準備就緒事件: ${cacheKey}`);
           
-          // 檢查是否是我們等待的語言
-          if (cacheKey.startsWith(languageCode + '_') && !isResolved) {
-            this.log(`匹配到 ${languageCode} 的字幕攔截事件`);
+          // 檢查是否是我們等待的語言（支援 base-code fallback）
+          const cacheKeyLang = cacheKey.split('_')[0];
+          if (this.matchesLanguage(cacheKeyLang, languageCode) && !isResolved) {
+            this.log(`匹配到 ${languageCode} 的字幕攔截事件 (cache key lang: ${cacheKeyLang})`);
             isResolved = true;
             clearTimeout(timeout);
             resolve(cacheKey);
@@ -504,27 +559,31 @@ class SubtitleInterceptor {
       
       // 步驟4: 檢查本地已解析的字幕緩存
       this.log(`檢查 ${languageCode} 的本地緩存...`);
-      
-      // 查找匹配語言代碼的數據
-      let matchedKey = null;
-      for (const [cacheKey] of this.interceptedSubtitles.entries()) {
-        if (cacheKey.startsWith(languageCode + '_')) {
-          matchedKey = cacheKey;
-          break;
+
+      // 查找所有匹配語言代碼的數據（支援 base-code fallback）
+      const matchingEntries = [];
+      for (const [cacheKey, data] of this.interceptedSubtitles.entries()) {
+        const keyLang = cacheKey.split('_')[0];
+        if (this.matchesLanguage(keyLang, languageCode)) {
+          matchingEntries.push({ cacheKey, data });
         }
       }
-      
-      if (!matchedKey) {
+
+      if (matchingEntries.length === 0) {
         this.log(`未找到 ${languageCode} 的字幕數據，可用鍵:`, Array.from(this.interceptedSubtitles.keys()));
         return;
       }
-      
-      const languageData = this.interceptedSubtitles.get(matchedKey);
+
+      // 使用第一個匹配的字幕數據
+      const selectedEntry = matchingEntries[0];
+      const matchedKey = selectedEntry.cacheKey;
+      const languageData = selectedEntry.data;
+
       if (!languageData || !languageData.subtitles) {
         this.log(`${languageCode} 字幕數據無效`);
         return;
       }
-      
+
       const subtitles = languageData.subtitles;
       this.log(`從鍵 "${matchedKey}" 找到 ${languageCode} 的 ${subtitles.length} 個字幕條目`);
       
@@ -799,6 +858,21 @@ class SubtitleInterceptor {
 
 
   /**
+   * 語言匹配：支援 base-code fallback
+   * 例如 "zh" 可匹配 "zh-Hant"，"zh-Hant" 可匹配 "zh"
+   * 解決 Netflix TTML xml:lang 標記不精確的問題（如 "zh" 代替 "zh-Hant"）
+   */
+  matchesLanguage(langA, langB) {
+    if (!langA || !langB) return false;
+    // 精確匹配（大小寫不敏感）
+    if (langA.toLowerCase() === langB.toLowerCase()) return true;
+    // base-code fallback：比較第一段（如 zh-Hant → zh）
+    const baseA = langA.split('-')[0].toLowerCase();
+    const baseB = langB.split('-')[0].toLowerCase();
+    return baseA === baseB;
+  }
+
+  /**
    * 解析緩存鍵，提取語言和 videoID 等信息
    */
   parseCacheKey(cacheKey) {
@@ -882,7 +956,7 @@ class SubtitleInterceptor {
         this.log(`TTML解析完成: ${language}, 共 ${subtitles.length} 條字幕, ${Object.keys(regionConfigs).length} 個 region 配置`);
         
         // 如果是主要語言，更新 netflix-player-adapter 的 region 配置
-        if (language === this.primaryLanguage && Object.keys(regionConfigs).length > 0) {
+        if (this.matchesLanguage(language, this.primaryLanguage) && Object.keys(regionConfigs).length > 0) {
           this.log(`更新 netflix-player-adapter 的 region 配置 (主要語言: ${language})`);
           setRegionConfigs(regionConfigs);
         }
@@ -899,13 +973,13 @@ class SubtitleInterceptor {
    * 檢查並處理語言數據
    */
   checkAndProcessLanguage(language, subtitles) {
-    // 檢查是否是我們需要的語言
-    if (language === this.primaryLanguage) {
+    // 檢查是否是我們需要的語言（支援 base-code fallback）
+    if (this.matchesLanguage(language, this.primaryLanguage)) {
       this.primarySubtitles = subtitles;
-      this.log(`主要語言字幕已更新: ${language}`);
-    } else if (language === this.secondaryLanguage && this.dualSubtitleEnabled) {
+      this.log(`主要語言字幕已更新: ${language} (目標: ${this.primaryLanguage})`);
+    } else if (this.matchesLanguage(language, this.secondaryLanguage) && this.dualSubtitleEnabled) {
       this.secondarySubtitles = subtitles;
-      this.log(`次要語言字幕已更新: ${language}`);
+      this.log(`次要語言字幕已更新: ${language} (目標: ${this.secondaryLanguage})`);
     }
   }
 
@@ -977,8 +1051,8 @@ class SubtitleInterceptor {
   isSubtitlesValidForVideo(language, currentVideoId) {
     for (const [cacheKey] of this.interceptedSubtitles) {
       const parsedKey = this.parseCacheKey(cacheKey);
-      if (parsedKey && 
-          parsedKey.language === language && 
+      if (parsedKey &&
+          this.matchesLanguage(parsedKey.language, language) &&
           parsedKey.videoId === currentVideoId) {
         return true;
       }
