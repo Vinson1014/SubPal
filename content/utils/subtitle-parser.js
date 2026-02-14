@@ -51,18 +51,18 @@ class SubtitleParser {
    */
   parseSubtitle(content) {
     debugLog('開始解析 TTML 字幕');
-    
+
     if (!content || typeof content !== 'string') {
       debugLog('字幕內容無效');
       return { subtitles: [], regionConfigs: {} };
     }
 
-    // Netflix 主要使用 TTML 格式
-    const subtitles = this.parseTTML(content);
-    
-    // 解析 region 配置
+    // 先解析 region 配置（合併多行字幕時需要 y 座標資訊）
     const regionConfigs = this.parseRegionConfigs(content);
-    
+
+    // 解析 TTML 並合併同時間多行字幕
+    const subtitles = this.parseTTML(content, regionConfigs);
+
     debugLog(`解析完成，共 ${subtitles.length} 個字幕條目，${Object.keys(regionConfigs).length} 個 region 配置`);
     return { subtitles, regionConfigs };
   }
@@ -76,17 +76,19 @@ class SubtitleParser {
 
   /**
    * 解析 TTML 格式字幕
+   * @param {string} content - TTML 內容
+   * @param {Object} regionConfigs - region 配置（用於合併多行字幕時按 y 座標排序）
    */
-  parseTTML(content) {
+  parseTTML(content, regionConfigs = {}) {
     debugLog('解析 TTML 格式');
-    
+
     const subtitles = [];
-    
+
     try {
       // 解析 XML
       const parser = new DOMParser();
       const xmlDoc = parser.parseFromString(content, 'text/xml');
-      
+
       // 檢查解析錯誤
       const parseError = xmlDoc.querySelector('parsererror');
       if (parseError) {
@@ -106,7 +108,7 @@ class SubtitleParser {
 
       // 獲取所有 <p> 元素（字幕段落）
       const paragraphs = xmlDoc.querySelectorAll('p');
-      
+
       for (const p of paragraphs) {
         const subtitle = this.parseTTMLParagraph(p);
         if (subtitle) {
@@ -119,7 +121,70 @@ class SubtitleParser {
       return [];
     }
 
-    return subtitles.sort((a, b) => a.startTime - b.startTime);
+    // 合併同時間範圍的多行字幕（不同 region 代表不同行）
+    const merged = this.mergeSimultaneousSubtitles(subtitles, regionConfigs);
+
+    return merged.sort((a, b) => a.startTime - b.startTime);
+  }
+
+  /**
+   * 合併同時間範圍的多行字幕
+   * Netflix TTML 中，多行同時顯示的字幕使用多個 <p> 元素（不同 region），
+   * 需要按 region 的 y 座標排序後合併為單一條目。
+   * @param {Array} subtitles - 原始字幕陣列
+   * @param {Object} regionConfigs - region 配置映射
+   * @returns {Array} 合併後的字幕陣列
+   */
+  mergeSimultaneousSubtitles(subtitles, regionConfigs) {
+    // 以 "startTime-endTime" 為 key 分組
+    const groups = new Map();
+
+    for (const subtitle of subtitles) {
+      const key = `${subtitle.startTime}-${subtitle.endTime}`;
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key).push(subtitle);
+    }
+
+    const merged = [];
+
+    for (const group of groups.values()) {
+      if (group.length === 1) {
+        // 單獨一條，直接保留
+        merged.push(group[0]);
+        continue;
+      }
+
+      // 多條同時間：按 region 的 y 座標排序（上方的排前面）
+      group.sort((a, b) => {
+        const yA = this.getRegionY(a.region, regionConfigs);
+        const yB = this.getRegionY(b.region, regionConfigs);
+        return yA - yB;
+      });
+
+      // 合併文本，保留第一條的元數據
+      const mergedSubtitle = { ...group[0] };
+      mergedSubtitle.text = group.map(s => s.text).join('\n');
+
+      debugLog(`合併 ${group.length} 行字幕: "${mergedSubtitle.text.replace(/\n/g, '\\n')}"`);
+
+      merged.push(mergedSubtitle);
+    }
+
+    return merged;
+  }
+
+  /**
+   * 取得 region 的 y 座標（用於多行字幕排序）
+   * @param {string} regionId - region ID
+   * @param {Object} regionConfigs - region 配置映射
+   * @returns {number} y 座標值，找不到時返回 0
+   */
+  getRegionY(regionId, regionConfigs) {
+    if (!regionId || !regionConfigs[regionId]) return 0;
+    const config = regionConfigs[regionId];
+    return config.origin ? config.origin.y : 0;
   }
 
   /**
