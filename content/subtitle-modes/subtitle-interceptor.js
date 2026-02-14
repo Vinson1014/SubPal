@@ -192,8 +192,15 @@ class SubtitleInterceptor {
       
       // 階段4: 執行字幕獲取策略
       await this.executeStrategy(strategy, defaultLanguage);
-      
-      // 階段5: 切回預設語言
+
+      // 階段5: 確保 primarySubtitles/secondarySubtitles 指向當前影片的資料
+      // 無論策略為何，都從快取重新載入，避免預載場景下殘留舊集數的字幕
+      await this.loadLanguageDataFromCache(this.primaryLanguage, 'primary');
+      if (this.dualSubtitleEnabled) {
+        await this.loadLanguageDataFromCache(this.secondaryLanguage, 'secondary');
+      }
+
+      // 階段6: 切回預設語言
       await this.restoreDefaultLanguage(defaultLanguage);
       
       this.log('字幕數據載入完成，已恢復用戶原始設定');
@@ -918,51 +925,50 @@ class SubtitleInterceptor {
     }
     
     // 步驟3: 驗證是否為當前影片的字幕
-    if (parsedKey.videoId !== currentVideoId) {
-      this.log(`字幕不屬於當前影片，跳過處理:`, {
+    const isCurrentVideo = (parsedKey.videoId === currentVideoId);
+
+    if (!isCurrentVideo) {
+      this.log(`字幕屬於其他影片（可能是預載），僅緩存不立即處理:`, {
         緩存中的videoID: parsedKey.videoId,
         當前影片ID: currentVideoId,
+        語言: language
+      });
+    } else {
+      this.log(`✅ VideoID 驗證通過，處理當前影片字幕:`, {
         語言: language,
+        videoID: currentVideoId,
         緩存鍵: cacheKey
       });
-      return;
     }
-    
-    this.log(`✅ VideoID 驗證通過，處理當前影片字幕:`, {
-      語言: language,
-      videoID: currentVideoId,
-      緩存鍵: cacheKey
-    });
-    
+
+    // 解析和儲存（無論是否為當前影片）
     try {
-      // 使用 subtitle-parser 解析 raw TTML（新格式返回 subtitles 和 regionConfigs）
       const parseResult = parseSubtitle(rawContent);
       const { subtitles, regionConfigs } = parseResult;
-      
+
       if (subtitles.length > 0) {
-        // 建立時間索引
         const timeIndex = buildTimeIndex(subtitles);
-        
-        // 儲存到攔截數據
+
         this.interceptedSubtitles.set(cacheKey, {
           subtitles: subtitles,
           requestInfo: requestInfo,
           language: language,
           timeIndex: timeIndex,
-          regionConfigs: regionConfigs,  // 保存 region 配置
+          regionConfigs: regionConfigs,
           timestamp: Date.now()
         });
-        
+
         this.log(`TTML解析完成: ${language}, 共 ${subtitles.length} 條字幕, ${Object.keys(regionConfigs).length} 個 region 配置`);
-        
-        // 如果是主要語言，更新 netflix-player-adapter 的 region 配置
-        if (this.matchesLanguage(language, this.primaryLanguage) && Object.keys(regionConfigs).length > 0) {
-          this.log(`更新 netflix-player-adapter 的 region 配置 (主要語言: ${language})`);
-          setRegionConfigs(regionConfigs);
+
+        // 只有當前影片才觸發即時處理
+        if (isCurrentVideo) {
+          if (this.matchesLanguage(language, this.primaryLanguage) && Object.keys(regionConfigs).length > 0) {
+            this.log(`更新 netflix-player-adapter 的 region 配置 (主要語言: ${language})`);
+            setRegionConfigs(regionConfigs);
+          }
+
+          this.checkAndProcessLanguage(language, subtitles);
         }
-        
-        // 如果是當前需要的語言，立即處理
-        this.checkAndProcessLanguage(language, subtitles);
       }
     } catch (error) {
       console.error(`解析 ${language} TTML 失敗:`, error);

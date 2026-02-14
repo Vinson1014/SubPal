@@ -296,6 +296,7 @@
       this.originalFetch = null;
       this.lastRequestTime = 0;
       this.requestCache = new Map();
+      this.latestManifestVideoId = null; // 從 licensedmanifest 追蹤的真實 videoId
     }
 
     /**
@@ -320,18 +321,29 @@
         this._interceptorUrl = url;
         this._interceptorMethod = method;
         this._interceptorPageUrl = location.href;  // 記錄 request-time URL
+        this._interceptorManifestVideoId = self.latestManifestVideoId;  // 快照當前 manifest videoId
         return self.originalXHROpen.apply(this, [method, url, ...args]);
       };
 
       XMLHttpRequest.prototype.send = function(body) {
         if (this._interceptorUrl) {
+          // 攔截 licensedmanifest 請求，追蹤真實 videoId
+          if (this._interceptorUrl.includes('licensedmanifest')) {
+            const manifestVideoId = self.extractManifestVideoId(this._interceptorUrl);
+            if (manifestVideoId) {
+              self.latestManifestVideoId = manifestVideoId;
+              debugLog('從 manifest 更新 videoId:', manifestVideoId);
+            }
+          }
+
           // 只記錄 Netflix 相關的請求
           if (debugMode && this._interceptorUrl.includes('nflxvideo.net')) {
             // debugLog('攔截到 Netflix 請求:', this._interceptorUrl);
           }
-          
+
           if (self.isSubtitleRequest(this._interceptorUrl)) {
-            // debugLog('識別為字幕請求:', this._interceptorUrl);
+            // 在 send 時再次更新快照，確保捕獲到同步執行中最新的 manifest videoId
+            this._interceptorManifestVideoId = self.latestManifestVideoId;
             self.handleXHRRequest(this);
           }
         }
@@ -343,11 +355,12 @@
       window.fetch = function(...args) {
         const [url] = args;
         if (typeof url === 'string') {
-          
+
           if (self.isSubtitleRequest(url)) {
             // debugLog('識別為字幕請求:', url);
+            const manifestVideoId = self.latestManifestVideoId;  // 快照當前 manifest videoId
             const fetchPromise = self.originalFetch.apply(this, args);
-            self.handleFetchRequest(fetchPromise, url);
+            self.handleFetchRequest(fetchPromise, url, manifestVideoId);
             return fetchPromise;
           }
         }
@@ -383,6 +396,14 @@
     }
 
     /**
+     * 從 licensedmanifest URL 提取 mainContentViewableId（真實 videoId）
+     */
+    extractManifestVideoId(url) {
+      const match = url.match(/mainContentViewableId=(\d+)/);
+      return match ? match[1] : null;
+    }
+
+    /**
      * 檢查是否為字幕請求
      */
     isSubtitleRequest(url) {
@@ -402,6 +423,7 @@
         url: xhr._interceptorUrl,
         method: xhr._interceptorMethod,
         pageUrl: xhr._interceptorPageUrl,  // request-time 頁面 URL
+        manifestVideoId: xhr._interceptorManifestVideoId,  // request-time manifest videoId
         timestamp: Date.now(),
         type: 'xhr'
       };
@@ -460,13 +482,14 @@
     /**
      * 處理Fetch字幕請求
      */
-    async handleFetchRequest(fetchPromise, url) {
+    async handleFetchRequest(fetchPromise, url, manifestVideoId) {
       try {
         const response = await fetchPromise;
         if (response.ok) {
           const content = await response.clone().text();
           this.processSubtitleContent(content, {
             url: url,
+            manifestVideoId: manifestVideoId,  // request-time manifest videoId
             timestamp: Date.now(),
             type: 'fetch'
           });
@@ -506,11 +529,12 @@
     /**
      * 生成包含語言和視頻 ID 的緩存鍵
      */
-    generateCacheKeyWithLanguage(url, language, pageUrl) {
-      // 首先檢查是否能從 URL 獲取到 videoID（優先使用 request-time URL）
-      const videoId = this.extractVideoIdFromUrl(pageUrl);
+    generateCacheKeyWithLanguage(url, language, pageUrl, requestManifestVideoId) {
+      // 優先使用 request-time 的 manifest videoId（每個請求獨立快照，避免被後續 manifest 覆蓋）
+      // 降級使用全域 latestManifestVideoId，最後降級使用 URL 中的 videoId
+      const videoId = requestManifestVideoId || this.latestManifestVideoId || this.extractVideoIdFromUrl(pageUrl);
       if (!videoId) {
-        debugLog('無法從 URL 獲取 videoID，跳過緩存 - 可能是預覽影片');
+        debugLog('無法獲取 videoID，跳過緩存 - 可能是預覽影片');
         return null; // 返回 null 表示不應該緩存
       }
 
@@ -530,8 +554,8 @@
       if (content.includes('<?xml') && content.includes('<tt')) {
         const language = this.parseTTMLLanguage(content);
 
-        // 生成包含正確語言的 cacheKey（使用 request-time URL 提取 videoId）
-        const cacheKey = this.generateCacheKeyWithLanguage(requestInfo.url, language, requestInfo.pageUrl);
+        // 生成包含正確語言的 cacheKey（使用 request-time manifest videoId 或 URL）
+        const cacheKey = this.generateCacheKeyWithLanguage(requestInfo.url, language, requestInfo.pageUrl, requestInfo.manifestVideoId);
 
         // 如果無法生成有效的緩存鍵（例如預覽影片），則跳過緩存
         if (!cacheKey) {
