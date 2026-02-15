@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SubPal-字幕助手",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "由公眾貢獻驅動的修正翻譯擴充應用, 自動替換串流平台不合格的字幕翻譯, 替換內容由公眾提供。",
   "icons": {
     "16": "icons/icon16.png",
