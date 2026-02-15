@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "SubPal-字幕助手",
   "version": "0.2.1",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApz74vmwHck5wj0S7eg3e5OuBi93y6APbyRFHYGb1KqypQmaxWm05Xnb6w2hIjdGOGZgS83tlZwFCa0aJAuEZhAdFUMTiZlZpwjoxW3Ou3l1zTJFd9F4SBca/vJ8ptb97pYDLHdCcsGkhdyTfo8YHo4tzGCMmYhfDQFOJwvWQwRwEtPmDUQMLpo8vL9CyVqQJrmXmoVqNIE7IKfGLuRbix/Tf3a6P8rWuH2Oblc/sojpARaJq26L2Mcx1HeiMPT3OJgJyo2Y1CMY69V3nYUZyQRUQ30D71trJHrHU7oqtjzJ98astJozLm2GCLe6yrE0El2RinAeCDkYxVEH7oQclMwIDAQAB",
   "description": "由公眾貢獻驅動的修正翻譯擴充應用, 自動替換串流平台不合格的字幕翻譯, 替換內容由公眾提供。",
   "icons": {
     "16": "icons/icon16.png",
