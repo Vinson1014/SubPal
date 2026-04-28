@@ -27,12 +27,28 @@ class UIAvoidanceHandler {
     
     // 目標元素選擇器
     this.targetSelector = '#subpal-region-container';
-    
+    // 額外淡出目標（單語字幕容器）
+    this.fadeTargetSelectors = ['#subpal-region-container', '#subpal-subtitle-container'];
+
     // 重試機制
     this.retryTimer = null;
     this.retryCount = 0;
     this.maxRetries = 30;        // 最大重試次數（30次 = 30秒）
     this.retryInterval = 1000;   // 重試間隔（1秒）
+
+    // 進度條（時間軸預覽）相關
+    this.scrubberBarSelector = null;
+    this.scrubberRetryTimer = null;
+    this.scrubberRetryCount = 0;
+    this.isPreviewActive = false;
+    this.previewCheckRaf = null;
+    this.scrubberBarSelectors = [
+      '[data-uia="scrubber-bar"]',
+      '[data-uia="timeline"]',
+      '.scrubber-bar',
+      '.PlayerControlsNeo__progress-control',
+      '.timeline',
+    ];
     
     // 配置參數
     this.config = {
@@ -212,9 +228,121 @@ class UIAvoidanceHandler {
     
     // 設置滑鼠監聽器
     this.setupMouseListeners();
-    
+
+    // 啟動進度條預覽偵測
+    this.startScrubberSearch();
+
+    // 啟動後立即檢查一次當前狀態
+    // 避免控制欄已可見但因無 mutation 觸發而漏掉閃避（載入初期常見）
+    setTimeout(() => {
+      if (this.controlBarSelector) {
+        this.log('啟動後初始狀態檢查');
+        this.handleControlBarChange();
+      }
+    }, 0);
+
     this.log('UI 閃避監聽器已啟動');
     return true;
+  }
+
+  /**
+   * 開始搜尋進度條（時間軸）元素
+   */
+  startScrubberSearch() {
+    this.scrubberRetryCount = 0;
+    this.searchScrubberBar();
+  }
+
+  /**
+   * 搜尋進度條元素（僅作為早期驗證；實際偵測使用座標比對，每次重新查詢 DOM）
+   */
+  searchScrubberBar() {
+    for (const selector of this.scrubberBarSelectors) {
+      if (document.querySelector(selector)) {
+        this.scrubberBarSelector = selector;
+        this.log(`✅ 找到進度條: ${selector}`);
+        return;
+      }
+    }
+
+    this.scrubberRetryCount++;
+    if (this.scrubberRetryCount < this.maxRetries) {
+      this.scrubberRetryTimer = setTimeout(() => {
+        this.searchScrubberBar();
+      }, this.retryInterval);
+    } else {
+      this.log('❌ 達到最大重試次數，無法偵測時間軸預覽');
+    }
+  }
+
+  /**
+   * 動態查詢當前可見的進度條 rect（每次重新搜尋，不依賴快取的元素參考）
+   * 避免 Netflix 重新渲染導致 listener 失效的問題
+   */
+  findScrubberRect() {
+    for (const selector of this.scrubberBarSelectors) {
+      const el = document.querySelector(selector);
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.height > 0 && rect.width > 0) {
+        return rect;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 檢查滑鼠 Y 座標是否落在進度條範圍內（含上下緩衝）
+   */
+  checkPreviewZone(clientY) {
+    const rect = this.findScrubberRect();
+    if (!rect) {
+      // 進度條不可見時強制還原（safety）
+      if (this.isPreviewActive) this.handlePreviewHide();
+      return;
+    }
+    const buffer = 10;
+    const inZone = clientY >= rect.top - buffer && clientY <= rect.bottom + buffer;
+
+    if (inZone && !this.isPreviewActive) {
+      this.handlePreviewShow();
+    } else if (!inZone && this.isPreviewActive) {
+      this.handlePreviewHide();
+    }
+  }
+
+  /**
+   * 時間軸預覽顯示時：淡出 SubPal 字幕避免遮擋
+   */
+  handlePreviewShow() {
+    if (this.isPreviewActive) return;
+    this.isPreviewActive = true;
+    this.log('時間軸預覽顯示，淡出字幕');
+    this.setSubtitleOpacity(0);
+  }
+
+  /**
+   * 時間軸預覽隱藏時：還原字幕
+   */
+  handlePreviewHide() {
+    if (!this.isPreviewActive) return;
+    this.isPreviewActive = false;
+    this.log('時間軸預覽隱藏，還原字幕');
+    this.setSubtitleOpacity('');
+  }
+
+  /**
+   * 設定 SubPal 字幕容器的 opacity
+   * @param {number|string} opacity - 數字 0-1 或空字串還原
+   */
+  setSubtitleOpacity(opacity) {
+    const value = opacity === '' ? '' : String(opacity);
+    this.fadeTargetSelectors.forEach(selector => {
+      const el = document.querySelector(selector);
+      if (!el) return;
+      el.style.transition = 'opacity 150ms ease-out';
+      el.style.opacity = value;
+    });
   }
 
   /**
@@ -225,22 +353,35 @@ class UIAvoidanceHandler {
       this.observer.disconnect();
       this.observer = null;
     }
-    
+
     if (this.avoidanceTimer) {
       clearTimeout(this.avoidanceTimer);
       this.avoidanceTimer = null;
     }
-    
+
     if (this.mouseTimer) {
       clearTimeout(this.mouseTimer);
       this.mouseTimer = null;
     }
-    
+
+    // 停止進度條搜尋與預覽偵測
+    if (this.scrubberRetryTimer) {
+      clearTimeout(this.scrubberRetryTimer);
+      this.scrubberRetryTimer = null;
+    }
+    if (this.previewCheckRaf) {
+      cancelAnimationFrame(this.previewCheckRaf);
+      this.previewCheckRaf = null;
+    }
+    if (this.isPreviewActive) {
+      this.handlePreviewHide();
+    }
+
     // 恢復目標元素
     if (this.isAvoiding) {
       this.restoreTargetElement();
     }
-    
+
     this.isAvoiding = false;
     this.log('UI 閃避監聽器已停止');
   }
@@ -309,11 +450,19 @@ class UIAvoidanceHandler {
   setupMouseListeners() {
     const playerElement = document.querySelector('.watch-video');
     if (!playerElement) return;
-    
-    playerElement.addEventListener('mousemove', () => {
+
+    playerElement.addEventListener('mousemove', (e) => {
       this.handleMouseMove();
+      // 進度條預覽偵測：用 rAF throttle 避免高頻 reflow
+      if (!this.previewCheckRaf) {
+        const clientY = e.clientY;
+        this.previewCheckRaf = requestAnimationFrame(() => {
+          this.previewCheckRaf = null;
+          this.checkPreviewZone(clientY);
+        });
+      }
     });
-    
+
     playerElement.addEventListener('mouseleave', () => {
       this.handleMouseLeave();
     });
@@ -356,7 +505,12 @@ class UIAvoidanceHandler {
    */
   handleMouseLeave() {
     this.log('滑鼠離開播放器');
-    
+
+    // Safety net：滑鼠離開播放器代表絕對不在進度條上，強制還原預覽淡出狀態
+    if (this.isPreviewActive) {
+      this.handlePreviewHide();
+    }
+
     // 延遲檢查控制欄狀態
     setTimeout(() => {
       if (this.controlBarSelector) {
@@ -392,29 +546,35 @@ class UIAvoidanceHandler {
       this.avoidanceTimer = null;
     }
     
-    this.log('觸發 UI 閃避');
-    this.isAvoiding = true;
-    
     // 動態查找當前的 regionContainer
     const targetElement = this.getTargetElement();
     if (!targetElement) {
-      this.log('未找到目標元素，跳過閃避');
+      // 容器尚未建立（例如載入初期），不更動 isAvoiding 狀態
+      // 等 SUBPAL_CONTAINER_CREATED 事件後會重新檢查
+      this.log('未找到目標元素，等待容器建立後重試');
       return;
     }
-    
+
     const avoidanceOffset = this.calculateAvoidanceOffset(targetElement, controlBarPosition);
-    
-    if (avoidanceOffset !== 0) {
-      // 設置動畫
-      targetElement.style.transition = `transform ${this.config.animationDuration}ms ease-out`;
-      targetElement.style.transform = `translateY(${avoidanceOffset}px)`;
-      targetElement.setAttribute('data-avoiding', 'true');
-      
-      this.log(`regionContainer 閃避中，偏移: ${avoidanceOffset}px`);
-      
-      // 通知位置變化（閃避）
-      this.notifyPositionChange(true, avoidanceOffset);
+
+    if (avoidanceOffset === 0) {
+      // 沒有重疊，不需閃避；但也不更新狀態（因為實際上沒有套用 transform）
+      this.log('未檢測到重疊，無需閃避');
+      return;
     }
+
+    this.log('觸發 UI 閃避');
+    this.isAvoiding = true;
+
+    // 設置動畫
+    targetElement.style.transition = `transform ${this.config.animationDuration}ms ease-out`;
+    targetElement.style.transform = `translateY(${avoidanceOffset}px)`;
+    targetElement.setAttribute('data-avoiding', 'true');
+
+    this.log(`regionContainer 閃避中，偏移: ${avoidanceOffset}px`);
+
+    // 通知位置變化（閃避）
+    this.notifyPositionChange(true, avoidanceOffset);
   }
 
   /**
@@ -554,6 +714,15 @@ class UIAvoidanceHandler {
     * 設置事件處理器
     */
   setupEventHandlers() {
+    // 監聽字幕容器建立事件：載入初期可能在容器建立前就已經嘗試過閃避（並失敗），
+    // 容器建立後需要重新檢查一次當前控制欄狀態，補做閃避
+    registerInternalEventHandler('SUBPAL_CONTAINER_CREATED', (event) => {
+      this.log(`收到容器建立事件 (${event.containerId})，重新檢查閃避狀態`);
+      if (this.controlBarSelector && this.config.enabled) {
+        // 延遲一格 tick，確保容器 DOM 完全就緒
+        setTimeout(() => this.handleControlBarChange(), 0);
+      }
+    });
   }
 
   /**
