@@ -576,16 +576,19 @@ async function initializeSync() {
     const status = await getSyncStatus();
     console.log('[Sync] Current status:', status);
 
+    // 使用 retryFailed* 系列函式：內部會將 failed 重設為 pending 後再呼叫
+    // syncPending*，可同時處理 pending 與 failed 項目，避免 SW 啟動後失敗
+    // 項目永遠卡住的問題
     if (status.pendingVotes > 0 || status.failedVotes > 0) {
-      await syncPendingVotes();
+      await retryFailedVotes();
     }
 
     if (status.pendingTranslations > 0 || status.failedTranslations > 0) {
-      await syncPendingTranslations();
+      await retryFailedTranslations();
     }
 
     if (status.pendingReplacementEvents > 0 || status.failedReplacementEvents > 0) {
-      await syncPendingReplacementEvents();
+      await retryFailedReplacementEvents();
     }
 
     console.log('[Sync] Initialization complete');
@@ -617,10 +620,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-// 擴充功能啟動時觸發所有同步
+// 擴充功能啟動時觸發所有同步（含失敗項目自動重試）
 chrome.runtime.onStartup.addListener(() => {
   console.log('[Sync] Extension startup, triggering all syncs');
-  triggerVoteSync();
-  triggerTranslationSync();
-  triggerReplacementEventSync();
+  retryFailedVotes();
+  retryFailedTranslations();
+  retryFailedReplacementEvents();
 });
