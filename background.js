@@ -502,6 +502,10 @@ function routeMessageToModulePort(messageId, request, port) {
     'GET_SYNC_STATUS': 'sync',
     'TRIGGER_VOTE_SYNC': 'sync',
     'TRIGGER_TRANSLATION_SYNC': 'sync',
+    'TRIGGER_REPLACEMENT_EVENT_SYNC': 'sync',
+    'RETRY_FAILED_VOTES': 'sync',
+    'RETRY_FAILED_TRANSLATIONS': 'sync',
+    'RETRY_FAILED_REPLACEMENT_EVENTS': 'sync',
     'SUBTITLE_STYLE_UPDATED': 'core' // 添加字幕樣式更新消息路由
   };
 

@@ -241,6 +241,11 @@ body {
   color: var(--color-warning);
 }
 
+.card-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .card-title h2 {
   font-size: 1.1rem;
   font-weight: 600;
@@ -251,6 +256,14 @@ body {
 .card-title p {
   font-size: 0.85rem;
   color: var(--color-text-tertiary);
+}
+
+.card-header-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
 }
 
 .card-body {

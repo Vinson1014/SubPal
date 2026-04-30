@@ -495,6 +495,9 @@ function setupEventListeners() {
 
   // 清空隊列按鈕
   setupClearQueueButtons();
+
+  // 重試同步按鈕
+  setupRetrySyncButton();
 }
 
 /**
@@ -572,6 +575,61 @@ function setupStyleControlListeners(type, keyPrefix) {
   }
 }
 
+// ==================== Background Port 通訊 ====================
+
+let bgPort = null;
+const pendingPortRequests = new Map();
+let nextPortMessageId = 1;
+
+/**
+ * 取得（或建立）與 background service worker 的 port 連線
+ * 連線中斷時自動清空，下一次呼叫會重新建立
+ */
+function getBackgroundPort() {
+  if (bgPort) return bgPort;
+
+  bgPort = chrome.runtime.connect({ name: 'options-page-channel' });
+
+  bgPort.onMessage.addListener(({ messageId, response }) => {
+    const resolver = pendingPortRequests.get(messageId);
+    if (resolver) {
+      pendingPortRequests.delete(messageId);
+      resolver(response);
+    }
+  });
+
+  bgPort.onDisconnect.addListener(() => {
+    console.warn('[Options] background port 已中斷');
+    bgPort = null;
+    // 通知所有等待中的請求失敗
+    for (const [, resolver] of pendingPortRequests) {
+      resolver({ success: false, error: 'background port 已中斷' });
+    }
+    pendingPortRequests.clear();
+  });
+
+  return bgPort;
+}
+
+/**
+ * 透過 port 傳送訊息到 background，回傳 Promise
+ * @param {Object} message - 訊息物件，需含 type 欄位
+ * @returns {Promise<Object>} 後端回應
+ */
+function sendToBackground(message) {
+  return new Promise((resolve) => {
+    const port = getBackgroundPort();
+    const messageId = nextPortMessageId++;
+    pendingPortRequests.set(messageId, resolve);
+    try {
+      port.postMessage({ messageId, message });
+    } catch (error) {
+      pendingPortRequests.delete(messageId);
+      resolve({ success: false, error: error.message });
+    }
+  });
+}
+
 /**
  * 設置清空隊列按鈕
  * 直接操作 chrome.storage.local，不需要通過 background
@@ -631,6 +689,47 @@ function setupClearQueueButtons() {
       }
     });
   }
+}
+
+/**
+ * 設置「重試同步」按鈕
+ * 透過 background 同時觸發三種隊列的失敗+pending 重試
+ */
+function setupRetrySyncButton() {
+  const retryAllSyncButton = document.getElementById('retryAllSyncButton');
+  if (!retryAllSyncButton) return;
+
+  const labelSpan = retryAllSyncButton.querySelector('span');
+  const originalLabel = labelSpan ? labelSpan.textContent : '重試同步';
+
+  retryAllSyncButton.addEventListener('click', async () => {
+    retryAllSyncButton.disabled = true;
+    if (labelSpan) labelSpan.textContent = '重試中…';
+
+    try {
+      const responses = await Promise.all([
+        sendToBackground({ type: 'RETRY_FAILED_VOTES' }),
+        sendToBackground({ type: 'RETRY_FAILED_TRANSLATIONS' }),
+        sendToBackground({ type: 'RETRY_FAILED_REPLACEMENT_EVENTS' })
+      ]);
+
+      const failed = responses.filter(r => r && r.success === false);
+      if (failed.length > 0) {
+        const messages = failed.map(r => r.error || '未知錯誤').join('\n');
+        alert(`部分隊列重試觸發失敗：\n${messages}`);
+      } else {
+        alert('已觸發重試，背景持續處理中。');
+      }
+
+      await updatePendingDataUI();
+    } catch (error) {
+      console.error('[Options] 重試同步失敗:', error);
+      alert('重試同步失敗：' + error.message);
+    } finally {
+      retryAllSyncButton.disabled = false;
+      if (labelSpan) labelSpan.textContent = originalLabel;
+    }
+  });
 }
 
 // ==================== 樣式操作 ====================
