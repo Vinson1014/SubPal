@@ -1,0 +1,34 @@
+# Claude 開發相關
+CLAUDE.md
+.claude/
+claude-doc/
+
+# Agent 相關
+.agents/
+
+# 測試與實驗代碼
+testcode/
+testing-code/
+
+# 系統檔案
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 編輯器與 IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日誌與暫存檔
+*.log
+*.tmp
+*.bak
+node_modules/
+
+# 打包輸出
+*.zip
+dist/
+build/
