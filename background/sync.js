@@ -6,6 +6,7 @@ import * as apiModule from './api.js';
 // 常量定義
 const MAX_RETRIES = 3;
 const MAX_HISTORY_LENGTH = 100;
+const SYNCING_STALE_TIMEOUT_MS = 30 * 60 * 1000; // 30 分鐘
 const VOTE_QUEUE_KEY = 'voteQueue';
 const VOTE_HISTORY_KEY = 'voteHistory';
 const TRANSLATION_QUEUE_KEY = 'translationQueue';
@@ -32,6 +33,37 @@ async function getPendingItems(queueType) {
 }
 
 /**
+ * 更新隊列項目的指定欄位
+ * @param {string} queueType - 隊列類型
+ * @param {string} itemId - 項目 ID
+ * @param {Object} updater - 要寫入的欄位
+ * @returns {Promise<Object|null>} - 更新後的項目
+ */
+async function updateQueueItem(queueType, itemId, updater) {
+  const result = await chrome.storage.local.get(queueType);
+  const queue = result[queueType] || [];
+  const updatedQueue = queue.map(item => {
+    if (item.id !== itemId) {
+      return item;
+    }
+
+    const nextItem = {
+      ...item,
+      ...updater
+    };
+
+    if ('syncStartedAt' in nextItem && nextItem.syncStartedAt == null) {
+      delete nextItem.syncStartedAt;
+    }
+
+    return nextItem;
+  });
+
+  await chrome.storage.local.set({ [queueType]: updatedQueue });
+  return updatedQueue.find(item => item.id === itemId) || null;
+}
+
+/**
  * 更新隊列項目的狀態
  * @param {string} queueType - 隊列類型
  * @param {string} itemId - 項目 ID
@@ -40,21 +72,32 @@ async function getPendingItems(queueType) {
  * @returns {Promise<Object|null>} - 更新後的項目
  */
 async function updateItemStatus(queueType, itemId, status, error = null) {
-  const result = await chrome.storage.local.get(queueType);
-  const queue = result[queueType] || [];
-  const updatedQueue = queue.map(item => {
-    if (item.id === itemId) {
-      return {
-        ...item,
-        status,
-        error,
-        syncedAt: status === 'completed' ? Date.now() : null
-      };
-    }
-    return item;
+  const updates = {
+    status,
+    error,
+    syncedAt: status === 'completed' ? Date.now() : null
+  };
+
+  if (status === 'pending' || status === 'failed' || status === 'completed') {
+    updates.syncStartedAt = null;
+  }
+
+  return await updateQueueItem(queueType, itemId, updates);
+}
+
+/**
+ * 將項目標記為正在同步，並記錄本次同步開始時間
+ * @param {string} queueType - 隊列類型
+ * @param {string} itemId - 項目 ID
+ * @returns {Promise<Object|null>} - 更新後的項目
+ */
+async function markItemAsSyncing(queueType, itemId) {
+  return await updateQueueItem(queueType, itemId, {
+    status: 'syncing',
+    error: null,
+    syncedAt: null,
+    syncStartedAt: Date.now()
   });
-  await chrome.storage.local.set({ [queueType]: updatedQueue });
-  return updatedQueue.find(item => item.id === itemId) || null;
 }
 
 /**
@@ -64,15 +107,65 @@ async function updateItemStatus(queueType, itemId, status, error = null) {
  * @param {number} retryCount - 重試次數
  */
 async function updateQueueItemRetryCount(queueType, itemId, retryCount) {
+  await updateQueueItem(queueType, itemId, { retryCount });
+}
+
+/**
+ * 回收卡住過久的 syncing 項目，避免舊版殘留資料永久卡住。
+ * TODO: 當大多數使用者已自然遷移完成、storage 不再出現長時間殘留的 syncing 項目後，
+ * 可以在未來版本移除此相容救援邏輯。
+ * @param {string} queueType - 隊列類型
+ * @returns {Promise<number>} - 回收的項目數量
+ */
+async function recoverStaleSyncingItems(queueType) {
   const result = await chrome.storage.local.get(queueType);
   const queue = result[queueType] || [];
+  const now = Date.now();
+  const recoveredIds = [];
+
   const updatedQueue = queue.map(item => {
-    if (item.id === itemId) {
-      return { ...item, retryCount };
+    if (item.status !== 'syncing') {
+      return item;
+    }
+
+    const isStale = typeof item.createdAt === 'number' && (now - item.createdAt) > SYNCING_STALE_TIMEOUT_MS;
+    if (!isStale) {
+      return item;
+    }
+
+    recoveredIds.push(item.id);
+    return {
+      ...item,
+      status: 'pending',
+      error: null,
+      syncedAt: null,
+      syncStartedAt: null
+    };
+  }).map(item => {
+    if ('syncStartedAt' in item && item.syncStartedAt == null) {
+      const sanitizedItem = { ...item };
+      delete sanitizedItem.syncStartedAt;
+      return sanitizedItem;
     }
     return item;
   });
+
+  if (recoveredIds.length === 0) {
+    return 0;
+  }
+
   await chrome.storage.local.set({ [queueType]: updatedQueue });
+  console.warn(`[Sync] Recovered ${recoveredIds.length} stale syncing items from ${queueType}:`, recoveredIds);
+  return recoveredIds.length;
+}
+
+/**
+ * 判斷是否為可視為已完成的重複提交錯誤
+ * @param {Error} error - API 錯誤
+ * @returns {boolean}
+ */
+function isDuplicateSubmissionError(error) {
+  return error?.status === 409;
 }
 
 /**
@@ -99,6 +192,7 @@ async function moveToHistory(queueType, itemId, historyType) {
   // 移除敏感或不需要的欄位
   delete completedItem.retryCount;
   delete completedItem.error;
+  delete completedItem.syncStartedAt;
 
   // 加到歷史記錄開頭
   history.unshift(completedItem);
@@ -156,6 +250,7 @@ async function syncPendingVotes() {
   console.log('[Sync] Starting vote sync...');
 
   try {
+    await recoverStaleSyncingItems(VOTE_QUEUE_KEY);
     const pendingItems = await getPendingItems(VOTE_QUEUE_KEY);
 
     if (pendingItems.length === 0) {
@@ -167,11 +262,17 @@ async function syncPendingVotes() {
 
     for (const item of pendingItems) {
       try {
-        await updateItemStatus(VOTE_QUEUE_KEY, item.id, 'syncing');
+        await markItemAsSyncing(VOTE_QUEUE_KEY, item.id);
         await sendVoteToAPI(item);
         await moveToHistory(VOTE_QUEUE_KEY, item.id, VOTE_HISTORY_KEY);
         console.log(`[Sync] Vote ${item.id} synced successfully`);
       } catch (error) {
+        if (isDuplicateSubmissionError(error)) {
+          await moveToHistory(VOTE_QUEUE_KEY, item.id, VOTE_HISTORY_KEY);
+          console.warn(`[Sync] Vote ${item.id} already exists on backend (409), moved to history`);
+          continue;
+        }
+
         const retryCount = item.retryCount || 0;
 
         if (retryCount < MAX_RETRIES) {
@@ -200,6 +301,7 @@ async function syncPendingTranslations() {
   console.log('[Sync] Starting translation sync...');
 
   try {
+    await recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY);
     const pendingItems = await getPendingItems(TRANSLATION_QUEUE_KEY);
 
     if (pendingItems.length === 0) {
@@ -211,11 +313,17 @@ async function syncPendingTranslations() {
 
     for (const item of pendingItems) {
       try {
-        await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'syncing');
+        await markItemAsSyncing(TRANSLATION_QUEUE_KEY, item.id);
         await sendTranslationToAPI(item);
         await moveToHistory(TRANSLATION_QUEUE_KEY, item.id, TRANSLATION_HISTORY_KEY);
         console.log(`[Sync] Translation ${item.id} synced successfully`);
       } catch (error) {
+        if (isDuplicateSubmissionError(error)) {
+          await moveToHistory(TRANSLATION_QUEUE_KEY, item.id, TRANSLATION_HISTORY_KEY);
+          console.warn(`[Sync] Translation ${item.id} already exists on backend (409), moved to history`);
+          continue;
+        }
+
         const retryCount = item.retryCount || 0;
 
         if (retryCount < MAX_RETRIES) {
@@ -239,6 +347,7 @@ async function syncPendingTranslations() {
  * 重試所有失敗的投票
  */
 async function retryFailedVotes() {
+  await recoverStaleSyncingItems(VOTE_QUEUE_KEY);
   const result = await chrome.storage.local.get(VOTE_QUEUE_KEY);
   const queue = result[VOTE_QUEUE_KEY] || [];
   const failedItems = queue.filter(item => item.status === 'failed');
@@ -256,6 +365,7 @@ async function retryFailedVotes() {
  * 重試所有失敗的翻譯
  */
 async function retryFailedTranslations() {
+  await recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY);
   const result = await chrome.storage.local.get(TRANSLATION_QUEUE_KEY);
   const queue = result[TRANSLATION_QUEUE_KEY] || [];
   const failedItems = queue.filter(item => item.status === 'failed');
@@ -330,6 +440,7 @@ async function sendTranslationToAPI(translationData) {
 export async function triggerVoteSync() {
   if (!isSyncingVotes) {
     console.log('[Sync] Triggering vote sync');
+    await recoverStaleSyncingItems(VOTE_QUEUE_KEY);
     await syncPendingVotes();
   } else {
     console.log('[Sync] Vote sync already in progress');
@@ -342,6 +453,7 @@ export async function triggerVoteSync() {
 export async function triggerTranslationSync() {
   if (!isSyncingTranslations) {
     console.log('[Sync] Triggering translation sync');
+    await recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY);
     await syncPendingTranslations();
   } else {
     console.log('[Sync] Translation sync already in progress');
@@ -450,6 +562,7 @@ async function syncPendingReplacementEvents() {
   console.log('[Sync] Starting replacement event sync...');
 
   try {
+    await recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY);
     const pendingItems = await getPendingItems(REPLACEMENT_EVENT_QUEUE_KEY);
 
     if (pendingItems.length === 0) {
@@ -470,7 +583,7 @@ async function syncPendingReplacementEvents() {
       try {
         // 標記所有項目為 syncing
         await Promise.all(
-          batch.map(item => updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, 'syncing'))
+          batch.map(item => markItemAsSyncing(REPLACEMENT_EVENT_QUEUE_KEY, item.id))
         );
 
         // 批量發送
@@ -512,6 +625,7 @@ async function syncPendingReplacementEvents() {
  * 重試所有失敗的替換事件
  */
 async function retryFailedReplacementEvents() {
+  await recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY);
   const result = await chrome.storage.local.get(REPLACEMENT_EVENT_QUEUE_KEY);
   const queue = result[REPLACEMENT_EVENT_QUEUE_KEY] || [];
   const failedItems = queue.filter(item => item.status === 'failed');
@@ -558,6 +672,7 @@ async function sendReplacementEventsToAPI(items) {
 export async function triggerReplacementEventSync() {
   if (!isSyncingReplacementEvents) {
     console.log('[Sync] Triggering replacement event sync');
+    await recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY);
     await syncPendingReplacementEvents();
   } else {
     console.log('[Sync] Replacement event sync already in progress');
@@ -573,6 +688,12 @@ async function initializeSync() {
   console.log('[Sync] Initializing sync service...');
 
   try {
+    await Promise.all([
+      recoverStaleSyncingItems(VOTE_QUEUE_KEY),
+      recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY),
+      recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY)
+    ]);
+
     const status = await getSyncStatus();
     console.log('[Sync] Current status:', status);
 
