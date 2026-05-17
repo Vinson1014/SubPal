@@ -698,11 +698,17 @@ class InitializationManager {
     this.log(`處理視頻切換: ${newVideoId}`);
     
     // 清理當前字幕顯示
-    this.components.uiManager.hideSubtitle();
+    if (this.components.uiManager?.hideSubtitle) {
+      this.components.uiManager.hideSubtitle();
+    } else {
+      this.log('UIManager 尚未初始化，略過清理字幕顯示');
+    }
     
     // 通知字幕協調器重新選擇模式
-    if (this.components.subtitleCoordinator) {
+    if (this.components.subtitleCoordinator?.selectOptimalMode) {
       this.components.subtitleCoordinator.selectOptimalMode();
+    } else {
+      this.log('SubtitleCoordinator 尚未初始化，略過重新選擇模式');
     }
   }
 
