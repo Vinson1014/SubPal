@@ -5,6 +5,7 @@ claude-doc/
 
 # Agent 相關
 .agents/
+.codex/
 
 # 測試與實驗代碼
 testcode/
