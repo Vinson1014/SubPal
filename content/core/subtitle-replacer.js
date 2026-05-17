@@ -188,7 +188,7 @@ class SubtitleReplacer {
       if (rule.original === text) {
         return {
           suggestedSubtitle: rule.replacement,
-          translationID: `test_exact_${Date.now()}`,
+          translationID: null,
           contributorUserID: 'test_user',
           isTestReplacement: true
         };
@@ -201,7 +201,7 @@ class SubtitleReplacer {
         const replacedText = text.replace(rule.original, rule.replacement);
         return {
           suggestedSubtitle: replacedText,
-          translationID: `test_partial_${Date.now()}`,
+          translationID: null,
           contributorUserID: 'test_user',
           isTestReplacement: true
         };
