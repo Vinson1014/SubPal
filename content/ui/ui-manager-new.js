@@ -141,7 +141,7 @@ class UIManager {
           const replacedSubtitle = await this.subtitleReplacer.processSubtitle(
             subtitleData, 
             subtitleData.videoId || 'unknown', 
-            subtitleData.timestamp || Date.now() / 1000
+            subtitleData.timestamp ?? Date.now() / 1000
           );
           
           if (replacedSubtitle) {
@@ -611,10 +611,11 @@ class UIManager {
     try {
       const voteParams = {
         videoId: this.currentSubtitle.videoId || 'unknown',
-        timestamp: this.currentSubtitle.timestamp || Date.now() / 1000,
+        timestamp: this.currentSubtitle.timestamp ?? Date.now() / 1000,
         originalSubtitle: this.currentSubtitle.original || this.currentSubtitle.text,
         voteType: 'upvote',
-        translationID: this.currentSubtitle.translationID || null
+        translationID: this.currentSubtitle.translationID || null,
+        slotKey: this.currentSubtitle.slotKey || null
       };
 
       const result = await this.voteBridge.enqueue(voteParams);
@@ -643,10 +644,11 @@ class UIManager {
     try {
       const voteParams = {
         videoId: this.currentSubtitle.videoId || 'unknown',
-        timestamp: this.currentSubtitle.timestamp || Date.now() / 1000,
+        timestamp: this.currentSubtitle.timestamp ?? Date.now() / 1000,
         originalSubtitle: this.currentSubtitle.original || this.currentSubtitle.text,
         voteType: 'downvote',
-        translationID: this.currentSubtitle.translationID || null
+        translationID: this.currentSubtitle.translationID || null,
+        slotKey: this.currentSubtitle.slotKey || null
       };
 
       const result = await this.voteBridge.enqueue(voteParams);

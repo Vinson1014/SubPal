@@ -14,6 +14,20 @@ async function getApiBaseUrl() {
   return result.api?.baseUrl || 'https://subnfbackend.zeabur.app';
 }
 
+/**
+ * 取得前端 clientVersion，供後端 rollout 與行為觀測使用。
+ * @returns {string|null}
+ */
+function getClientVersion() {
+  try {
+    const version = chrome.runtime.getManifest()?.version;
+    return version ? `frontend-${version}` : null;
+  } catch (error) {
+    console.warn('[API Module] Unable to resolve clientVersion:', error);
+    return null;
+  }
+}
+
 // ==================== 底層 HTTP 通信 ====================
 
 /**
@@ -109,28 +123,33 @@ async function sendToAPI(url, body, method = 'POST') {
  * @param {string} voteData.voteType - 投票類型 ('upvote' | 'downvote')
  * @param {string} [voteData.translationID] - 翻譯 ID（可選）
  * @param {string} [voteData.originalSubtitle] - 原始字幕（無 translationID 時必填）
+ * @param {string} [voteData.slotKey] - 字幕 slot 識別值（可選）
+ * @param {string} [voteData.clientVersion] - 前端版本（可選）
  * @returns {Promise<Object>} - API 響應
  * @throws {Error} - 錯誤包含 status, code, details 屬性
  */
 export async function submitVote(voteData) {
-  const { translationID, videoID, originalSubtitle, timestamp, voteType } = voteData;
+  const { translationID, videoID, originalSubtitle, timestamp, voteType, slotKey, clientVersion } = voteData;
 
   if (!videoID || typeof timestamp !== 'number' || !['upvote', 'downvote'].includes(voteType)) {
     throw new Error('Missing or invalid parameters for vote submission');
   }
 
   const apiBaseUrl = await getApiBaseUrl();
-  let url;
-  let body = { videoID, timestamp, voteType };
+  const url = `${apiBaseUrl}/votes`;
+  const body = {
+    videoID,
+    timestamp,
+    voteType,
+    translationID: translationID || null
+  };
   if (originalSubtitle) body.originalSubtitle = originalSubtitle;
+  if (slotKey) body.slotKey = slotKey;
+  const resolvedClientVersion = clientVersion || getClientVersion();
+  if (resolvedClientVersion) body.clientVersion = resolvedClientVersion;
 
-  if (translationID) {
-    url = `${apiBaseUrl}/translations/${translationID}/vote`;
-  } else {
-    url = `${apiBaseUrl}/votes`;
-    if (!body.originalSubtitle) {
-      console.warn("[API Module] Missing originalSubtitle for vote without translationID. API call might fail.");
-    }
+  if (!body.originalSubtitle) {
+    console.warn("[API Module] Missing originalSubtitle for vote submission. API call might fail.");
   }
 
   const response = await sendToAPI(url, body);
@@ -148,11 +167,13 @@ export async function submitVote(voteData) {
  * @param {string} translationData.translation - 翻譯字幕
  * @param {string} translationData.languageCode - 語言代碼
  * @param {string} [translationData.submissionReason] - 提交原因（可選）
+ * @param {string} [translationData.slotKey] - 字幕 slot 識別值（可選）
+ * @param {string} [translationData.clientVersion] - 前端版本（可選）
  * @returns {Promise<Object>} - API 響應
  * @throws {Error} - 錯誤包含 status, code, details 屬性
  */
 export async function submitTranslation(translationData) {
-  const { videoId, timestamp, original, translation, submissionReason, languageCode } = translationData;
+  const { videoId, timestamp, original, translation, submissionReason, languageCode, slotKey, clientVersion } = translationData;
 
   if (!videoId || typeof timestamp !== 'number' || !original || !translation || !languageCode) {
     throw new Error('Missing or invalid parameters for translation submission');
@@ -168,6 +189,9 @@ export async function submitTranslation(translationData) {
     languageCode: languageCode,
     submissionReason: submissionReason || ''
   };
+  if (slotKey) body.slotKey = slotKey;
+  const resolvedClientVersion = clientVersion || getClientVersion();
+  if (resolvedClientVersion) body.clientVersion = resolvedClientVersion;
 
   const response = await sendToAPI(url, body);
   return response.data || response;
@@ -231,7 +255,14 @@ function parseSubtitlesResponse(response) {
       translationID: sub.translationID,
       originalSubtitle: sub.originalSubtitle,
       suggestedSubtitle: sub.suggestedSubtitle,
-      contributorUserID: sub.contributorUserID
+      contributorUserID: sub.contributorUserID,
+      languageCode: sub.languageCode,
+      slotKey: sub.slotKey,
+      slotKeySource: sub.slotKeySource,
+      clientVersion: sub.clientVersion,
+      upvotes: sub.upvotes,
+      downvotes: sub.downvotes,
+      status: sub.status
     }));
   } else {
     console.error('[API Module] API response indicates failure or invalid format:', response);

@@ -395,7 +395,8 @@ async function sendVoteToAPI(voteData) {
       timestamp: voteData.timestamp,
       voteType: voteData.voteType,
       translationID: voteData.translationID || null,
-      originalSubtitle: voteData.originalSubtitle || null
+      originalSubtitle: voteData.originalSubtitle || null,
+      slotKey: voteData.slotKey || null
     });
 
     console.log('[Sync] Vote submitted successfully:', result);
@@ -421,7 +422,8 @@ async function sendTranslationToAPI(translationData) {
       original: translationData.original,
       translation: translationData.translation,
       submissionReason: translationData.submissionReason || '',
-      languageCode: translationData.languageCode
+      languageCode: translationData.languageCode,
+      slotKey: translationData.slotKey || null
     });
 
     console.log('[Sync] Translation submitted successfully:', result);

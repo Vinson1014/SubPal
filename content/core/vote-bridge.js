@@ -54,13 +54,14 @@ export const voteBridge = {
    * @param {string} data.voteType - 投票類型 'upvote' | 'downvote' (必填)
    * @param {string} [data.translationID] - 翻譯 ID (選填)
    * @param {string} [data.originalSubtitle] - 原始字幕 (選填)
+   * @param {string} [data.slotKey] - 字幕 slot 識別值（選填）
    * @returns {Promise<Object>} - 返回 { itemId, message }
    */
   async enqueue(data) {
     this.log('enqueue 方法被調用，參數:', data);
 
     // 參數驗證
-    const { videoId, timestamp, voteType, translationID, originalSubtitle } = data;
+    const { videoId, timestamp, voteType, translationID, originalSubtitle, slotKey } = data;
 
     if (!videoId || typeof videoId !== 'string') {
       const error = new Error('缺少必要參數: videoId 必須是字符串');
@@ -89,7 +90,8 @@ export const voteBridge = {
           timestamp,
           voteType,
           translationID: translationID || null,
-          originalSubtitle: originalSubtitle || null
+          originalSubtitle: originalSubtitle || null,
+          slotKey: slotKey || null
         }
       });
 

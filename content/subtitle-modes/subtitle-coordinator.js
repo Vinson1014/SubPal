@@ -10,6 +10,8 @@
 
 import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
 import { getVideoId } from '../core/video-info.js';
+import { toAPILanguageCode } from '../utils/language-code.js';
+import { buildSlotKey } from '../utils/slot-key.js';
 
 class SubtitleCoordinator {
   constructor() {
@@ -29,6 +31,7 @@ class SubtitleCoordinator {
     // 調試模式（從 ConfigBridge 讀取）
     this.debug = false;
     this.lastSubtitleData = null;
+    this.primaryLanguage = 'zh-Hant';
   }
 
   async initialize(uiManager) {
@@ -41,12 +44,18 @@ class SubtitleCoordinator {
 
       // 讀取 debugMode 配置
       this.debug = configBridge.get('debugMode');
+      this.primaryLanguage = configBridge.get('subtitle.primaryLanguage');
       this.log(`調試模式: ${this.debug}`);
 
       // 訂閱 debugMode 變更
       configBridge.subscribe('debugMode', (newValue) => {
         this.debug = newValue;
         this.log('調試模式已更新:', newValue);
+      });
+
+      configBridge.subscribe('subtitle.primaryLanguage', (newValue) => {
+        this.primaryLanguage = newValue;
+        this.log('主要語言已更新:', newValue);
       });
 
       // 設置事件處理器
@@ -168,6 +177,20 @@ class SubtitleCoordinator {
 
   // 統一字幕數據格式
   normalizeSubtitleData(subtitleData, mode) {
+    const primaryLanguageCode = mode === 'intercept' && subtitleData.dualSubtitle?.primaryLanguage
+      ? subtitleData.dualSubtitle.primaryLanguage
+      : this.primaryLanguage;
+    const apiLanguageCode = toAPILanguageCode(primaryLanguageCode);
+    const originalSubtitle = subtitleData.original || subtitleData.text || '';
+    const videoId = subtitleData.videoId || getVideoId();
+    const timestamp = subtitleData.timestamp ?? Date.now();
+    const slotKey = buildSlotKey({
+      videoID: videoId,
+      originalSubtitle,
+      languageCode: apiLanguageCode,
+      timestamp
+    });
+
     const normalized = {
       // 基本字幕信息
       text: subtitleData.text || '',
@@ -177,13 +200,18 @@ class SubtitleCoordinator {
       position: subtitleData.position || { top: 0, left: 0, width: 0, height: 0 },
       
       // 時間信息
-      timestamp: subtitleData.timestamp || Date.now(),
+      timestamp,
       
       // 模式信息
       mode: mode,
       
       // 視頻信息
-      videoId: subtitleData.videoId || getVideoId(),
+      videoId,
+
+      // slot 識別資訊
+      original: originalSubtitle,
+      languageCode: apiLanguageCode,
+      slotKey: slotKey,
       
       // 雙語字幕數據（僅攔截模式支持）
       isDualSubtitle: mode === 'intercept' && subtitleData.dualSubtitle,

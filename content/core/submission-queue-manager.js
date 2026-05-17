@@ -68,13 +68,14 @@ export class SubmissionQueueManager {
    * @param {string} data.voteType - 投票類型 ('upvote' 或 'downvote')
    * @param {string} [data.translationID] - 翻譯 ID（可選）
    * @param {string} [data.originalSubtitle] - 原始字幕（可選）
+   * @param {string} [data.slotKey] - 字幕 slot 識別值（可選）
    * @returns {Promise<{itemId: string, message: string}>}
    */
   async enqueueVote(data) {
     this.log('enqueueVote 被調用:', data);
 
     // 驗證必要參數
-    if (!data.videoId || !data.timestamp || !data.voteType) {
+    if (!data.videoId || data.timestamp === undefined || data.timestamp === null || !data.voteType) {
       throw new Error('缺少必要參數: videoId, timestamp, voteType');
     }
 
@@ -90,6 +91,7 @@ export class SubmissionQueueManager {
       voteType: data.voteType,
       translationID: data.translationID || null,
       originalSubtitle: data.originalSubtitle || null,
+      slotKey: data.slotKey || null,
       status: 'pending',
       createdAt: Date.now(),
       syncedAt: null,
@@ -204,13 +206,14 @@ export class SubmissionQueueManager {
    * @param {string} data.translation - 翻譯建議
    * @param {string} data.languageCode - 語言代碼
    * @param {string} data.submissionReason - 提交原因
+   * @param {string} [data.slotKey] - 字幕 slot 識別值（可選）
    * @returns {Promise<{itemId: string, message: string}>}
    */
   async enqueueTranslation(data) {
     this.log('enqueueTranslation 被調用:', data);
 
     // 驗證必要參數
-    if (!data.videoId || !data.timestamp || !data.original || !data.translation || !data.languageCode || !data.submissionReason) {
+    if (!data.videoId || data.timestamp === undefined || data.timestamp === null || !data.original || !data.translation || !data.languageCode || !data.submissionReason) {
       throw new Error('缺少必要參數: videoId, timestamp, original, translation, languageCode, submissionReason');
     }
 
@@ -223,6 +226,7 @@ export class SubmissionQueueManager {
       translation: data.translation,
       languageCode: data.languageCode,
       submissionReason: data.submissionReason,
+      slotKey: data.slotKey || null,
       status: 'pending',
       createdAt: Date.now(),
       syncedAt: null,

@@ -9,6 +9,7 @@
  */
 
 import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
+import { toAPILanguageCode } from '../utils/language-code.js';
 
 class SubmissionDialog {
   constructor() {
@@ -408,11 +409,7 @@ class SubmissionDialog {
 
   // 轉換 config 語言代碼為 API 兼容格式
   convertToAPILanguageCode(configLanguageCode) {
-    const mapping = {
-      'zh-Hant': 'zh-TW',
-      'zh-Hans': 'zh-CN'
-    };
-    return mapping[configLanguageCode] || configLanguageCode;
+    return toAPILanguageCode(configLanguageCode);
   }
 
   // 處理表單提交
@@ -446,7 +443,8 @@ class SubmissionDialog {
       original: this.currentSubtitleData.original || this.currentSubtitleData.text,
       translation: translation,
       submissionReason: reason,
-      languageCode: apiLanguageCode
+      languageCode: apiLanguageCode,
+      slotKey: this.currentSubtitleData.slotKey || null
     };
     
     this.log('提交數據:', submissionData);

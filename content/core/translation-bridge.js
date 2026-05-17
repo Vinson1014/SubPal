@@ -55,13 +55,14 @@ export const translationBridge = {
    * @param {string} data.translation - 翻譯建議 (必填)
    * @param {string} data.languageCode - 語言代碼 (必填)
    * @param {string} data.submissionReason - 提交原因 (必填)
+   * @param {string} [data.slotKey] - 字幕 slot 識別值（選填）
    * @returns {Promise<Object>} - 返回 { itemId, message }
    */
   async enqueue(data) {
     this.log('enqueue 方法被調用，參數:', data);
 
     // 參數驗證
-    const { videoId, timestamp, original, translation, languageCode, submissionReason } = data;
+    const { videoId, timestamp, original, translation, languageCode, submissionReason, slotKey } = data;
 
     // 驗證所有必填參數
     if (!videoId || typeof videoId !== 'string') {
@@ -110,7 +111,8 @@ export const translationBridge = {
           original: original.trim(),
           translation: translation.trim(),
           languageCode,
-          submissionReason: submissionReason.trim()
+          submissionReason: submissionReason.trim(),
+          slotKey: slotKey || null
         }
       });
 
