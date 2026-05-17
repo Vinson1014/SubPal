@@ -299,6 +299,7 @@ class SubtitleInterceptor {
       const validCacheData = new Map();
       let skippedWrongVideo = 0;
       let skippedAlreadyProcessed = 0;
+      let reprocessedStale = 0;
       
       Object.entries(existingTTMLs.allTTMLs).forEach(([cacheKey, ttmlData]) => {
         // 步驟1: 解析緩存鍵驗證 videoID  
@@ -324,8 +325,30 @@ class SubtitleInterceptor {
           return;
         }
         
-        // 步驟3: 檢查是否已經處理過
+        // 步驟3: 檢查是否已經處理過；Netflix 可能重用同一 cache key，
+        // 因此已解析資料若屬於舊 PlaybackContext，必須重新 parse raw TTML。
         if (this.interceptedSubtitles.has(cacheKey)) {
+          const existingData = this.interceptedSubtitles.get(cacheKey);
+          const hasParsedSubtitleData = Array.isArray(existingData?.subtitles) &&
+            existingData.subtitles.length > 0 &&
+            existingData.timeIndex &&
+            existingData.playbackContext;
+
+          if (!hasParsedSubtitleData || !this.isSubtitleEntryCurrent(cacheKey, existingData)) {
+            this.log(`已處理緩存已過期，重新處理 raw TTML: ${cacheKey}`);
+            this.recordDebugEvent('CACHE_REPROCESS_STALE_ENTRY', {
+              cacheKey,
+              language: ttmlData.language,
+              hasParsedSubtitleData,
+              existingPlaybackContext: existingData?.playbackContext || null,
+              currentPlaybackContext: this.getCurrentPlaybackContext()
+            });
+            needsProcessing.push({ cacheKey, ttmlData });
+            validCacheData.set(ttmlData.language, ttmlData);
+            reprocessedStale++;
+            return;
+          }
+
           this.log(`跳過已處理的緩存: ${cacheKey}`);
           skippedAlreadyProcessed++;
           // 但仍要加入 validCacheData 用於狀態分析
@@ -351,6 +374,7 @@ class SubtitleInterceptor {
       this.log(`✅ 緩存檢查完成:`, {
         處理新數據: needsProcessing.length,
         跳過已處理: skippedAlreadyProcessed,
+        重新處理過期: reprocessedStale,
         跳過其他影片: skippedWrongVideo,
         當前影片ID: currentVideoId,
         有效語言: Array.from(validCacheData.keys())
