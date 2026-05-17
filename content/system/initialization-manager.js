@@ -20,6 +20,7 @@ class InitializationManager {
       messagingReady: false,
       pageScriptInjected: false,
       netflixAPIAvailable: false,
+      playbackContextReady: false,
       configLoaded: false,
       componentsReady: false
     };
@@ -29,6 +30,7 @@ class InitializationManager {
       uiManager: null,
       subtitleStyleManager: null,
       subtitleCoordinator: null,
+      playbackContextManager: null,
       dualSubtitleConfig: null
     };
     
@@ -367,6 +369,8 @@ class InitializationManager {
       } else {
         this.log('字幕攔截器已啟動，開始攔截所有Netflix CDN請求');
       }
+
+      await this.initializePlaybackContextManager();
       
       this.state.netflixAPIAvailable = true;
       return true;
@@ -381,6 +385,24 @@ class InitializationManager {
       }
       
       throw error;
+    }
+  }
+
+  /**
+   * 初始化播放狀態管理器（診斷與後續字幕 gate 的狀態來源）
+   */
+  async initializePlaybackContextManager() {
+    this.log('初始化 PlaybackContextManager...');
+
+    try {
+      const { playbackContextManager } = await import('../core/playback-context-manager.js');
+      await playbackContextManager.initialize();
+      this.components.playbackContextManager = playbackContextManager;
+      this.state.playbackContextReady = true;
+      this.log('PlaybackContextManager 初始化完成', playbackContextManager.getCurrentContext());
+    } catch (error) {
+      this.state.playbackContextReady = false;
+      console.warn('PlaybackContextManager 初始化失敗，暫時不影響既有字幕流程:', error);
     }
   }
 
@@ -765,6 +787,7 @@ class InitializationManager {
         uiManager: !!this.components.uiManager,
         subtitleStyleManager: !!this.components.subtitleStyleManager,
         subtitleCoordinator: !!this.components.subtitleCoordinator,
+        playbackContextManager: !!this.components.playbackContextManager,
         dualSubtitleConfig: !!this.components.dualSubtitleConfig
       }
     };
@@ -793,6 +816,10 @@ class InitializationManager {
     
     if (this.components.subtitleCoordinator) {
       await this.components.subtitleCoordinator.cleanup();
+    }
+
+    if (this.components.playbackContextManager) {
+      this.components.playbackContextManager.cleanup();
     }
     
     this.isInitialized = false;

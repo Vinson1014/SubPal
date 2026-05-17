@@ -297,6 +297,223 @@
       this.lastRequestTime = 0;
       this.requestCache = new Map();
       this.latestManifestVideoId = null; // 從 licensedmanifest 追蹤的真實 videoId
+      this.debugEvents = [];
+      this.maxDebugEvents = 50;
+    }
+
+    /**
+     * 記錄診斷事件（固定長度 ring buffer）
+     */
+    recordDebugEvent(type, data = {}) {
+      this.debugEvents.push({
+        type,
+        timestamp: Date.now(),
+        pageUrl: location.href,
+        ...data
+      });
+
+      if (this.debugEvents.length > this.maxDebugEvents) {
+        this.debugEvents.splice(0, this.debugEvents.length - this.maxDebugEvents);
+      }
+    }
+
+    /**
+     * 從 URL 提取視頻 ID
+     * @param {string} [pageUrl] - 頁面 URL，預設為 location.href
+     */
+    extractVideoIdFromUrl(pageUrl) {
+      const url = pageUrl || location.href;
+      const urlMatch = url.match(/netflix\.com\/watch\/(\d+)/);
+      if (urlMatch && urlMatch[1]) {
+        debugLog('從 URL 提取視頻 ID:', urlMatch[1]);
+        return urlMatch[1];
+      }
+      return null;
+    }
+
+    /**
+     * 取得目前 Netflix player 狀態快照（僅診斷，不影響字幕邏輯）
+     */
+    getActivePlaybackSnapshot() {
+      const snapshot = {
+        pageUrl: location.href,
+        pageUrlVideoId: this.extractVideoIdFromUrl(location.href),
+        latestManifestVideoId: this.latestManifestVideoId,
+        playerHelperInitialized: !!playerHelper?.isInitialized,
+        sessionId: null,
+        playerApiVideoId: null,
+        movieId: null,
+        currentTime: null,
+        duration: null,
+        currentTrack: null,
+        openSessions: [],
+        error: null,
+        timestamp: Date.now()
+      };
+
+      try {
+        let api = playerHelper?.playerAPI;
+
+        if (!api && window.netflix?.appContext?.state?.playerApp) {
+          api = window.netflix.appContext.state.playerApp.getAPI();
+        }
+
+        if (!api) {
+          snapshot.error = 'Netflix player API unavailable';
+          return snapshot;
+        }
+
+        const sessions = api.getOpenPlaybackSessions?.() || [];
+        snapshot.openSessions = sessions.map(session => ({
+          sessionId: session.sessionId,
+          videoId: session.videoId || null
+        }));
+
+        const sessionId = playerHelper?.sessionId || sessions[0]?.sessionId || null;
+        snapshot.sessionId = sessionId;
+
+        if (sessionId && typeof api.getVideoIdBySessionId === 'function') {
+          try {
+            const videoId = api.getVideoIdBySessionId(sessionId);
+            snapshot.playerApiVideoId = videoId ? String(videoId) : null;
+          } catch (error) {
+            snapshot.playerApiVideoIdError = error.message;
+          }
+        }
+
+        const videoPlayer = playerHelper?.videoPlayer ||
+          (sessionId && api.videoPlayer?.getVideoPlayerBySessionId?.(sessionId));
+
+        if (videoPlayer) {
+          try {
+            const movieId = videoPlayer.getMovieId?.();
+            snapshot.movieId = movieId ? String(movieId) : null;
+          } catch (error) {
+            snapshot.movieIdError = error.message;
+          }
+
+          try {
+            const currentTime = videoPlayer.getCurrentTime?.();
+            snapshot.currentTime = typeof currentTime === 'number' ? currentTime : null;
+          } catch (error) {
+            snapshot.currentTimeError = error.message;
+          }
+
+          try {
+            const duration = videoPlayer.getDuration?.();
+            snapshot.duration = typeof duration === 'number' ? duration : null;
+          } catch (error) {
+            snapshot.durationError = error.message;
+          }
+
+          try {
+            const currentTrack = videoPlayer.getTimedTextTrack?.();
+            snapshot.currentTrack = currentTrack ? {
+              code: currentTrack.bcp47,
+              name: currentTrack.displayName,
+              trackId: currentTrack.trackId,
+              trackType: currentTrack.trackType,
+              rawTrackType: currentTrack.rawTrackType
+            } : null;
+          } catch (error) {
+            snapshot.currentTrackError = error.message;
+          }
+        }
+      } catch (error) {
+        snapshot.error = error.message;
+      }
+
+      return snapshot;
+    }
+
+    /**
+     * 依 request-time evidence 推導字幕可能歸屬的 videoId（僅記錄，不改變現有 cache key 行為）
+     */
+    deriveSubtitleVideoId(evidence) {
+      const manifestVideoId = evidence.manifestVideoIdAtRequest;
+      const activePlayerVideoId = evidence.activePlayerVideoIdAtRequest;
+      const pageUrlVideoId = evidence.pageUrlVideoIdAtRequest;
+
+      if (manifestVideoId && activePlayerVideoId && manifestVideoId === activePlayerVideoId) {
+        return {
+          videoId: manifestVideoId,
+          confidence: 'high',
+          reason: 'manifest-matches-active-player'
+        };
+      }
+
+      if (manifestVideoId && activePlayerVideoId && manifestVideoId !== activePlayerVideoId) {
+        return {
+          videoId: manifestVideoId,
+          confidence: 'ambiguous',
+          reason: 'manifest-differs-from-active-player'
+        };
+      }
+
+      if (activePlayerVideoId) {
+        return {
+          videoId: activePlayerVideoId,
+          confidence: 'medium',
+          reason: 'active-player-only'
+        };
+      }
+
+      if (manifestVideoId) {
+        return {
+          videoId: manifestVideoId,
+          confidence: 'medium',
+          reason: 'manifest-only'
+        };
+      }
+
+      if (pageUrlVideoId) {
+        return {
+          videoId: pageUrlVideoId,
+          confidence: 'low',
+          reason: 'page-url-only'
+        };
+      }
+
+      return {
+        videoId: null,
+        confidence: 'none',
+        reason: 'no-video-id-evidence'
+      };
+    }
+
+    /**
+     * 建立字幕 request-time metadata。保留舊欄位，並追加 evidence 供後續 gate 使用。
+     */
+    createSubtitleRequestInfo({ url, method = null, pageUrl = location.href, manifestVideoId = null, source }) {
+      const playbackSnapshot = this.getActivePlaybackSnapshot();
+      const activePlayerVideoId = playbackSnapshot.playerApiVideoId || playbackSnapshot.movieId || null;
+
+      const evidence = {
+        ttmlLanguage: null,
+        manifestVideoIdAtRequest: manifestVideoId,
+        activePlayerVideoIdAtRequest: activePlayerVideoId,
+        pageUrlVideoIdAtRequest: playbackSnapshot.pageUrlVideoId,
+        currentTrackAtRequest: playbackSnapshot.currentTrack,
+        sessionIdAtRequest: playbackSnapshot.sessionId,
+        latestManifestVideoIdAtRequest: this.latestManifestVideoId,
+        requestUrl: url,
+        requestTime: Date.now(),
+        source,
+        playbackSnapshot
+      };
+
+      const derivedSubtitleVideo = this.deriveSubtitleVideoId(evidence);
+
+      return {
+        url,
+        method,
+        pageUrl,
+        manifestVideoId, // legacy: 現有 cache key 邏輯仍使用此欄位
+        timestamp: evidence.requestTime,
+        type: source,
+        ...evidence,
+        derivedSubtitleVideo
+      };
     }
 
     /**
@@ -332,6 +549,10 @@
             const manifestVideoId = self.extractManifestVideoId(this._interceptorUrl);
             if (manifestVideoId) {
               self.latestManifestVideoId = manifestVideoId;
+              self.recordDebugEvent('licensedmanifest', {
+                manifestVideoId,
+                url: this._interceptorUrl
+              });
               debugLog('從 manifest 更新 videoId:', manifestVideoId);
             }
           }
@@ -344,6 +565,24 @@
           if (self.isSubtitleRequest(this._interceptorUrl)) {
             // 在 send 時再次更新快照，確保捕獲到同步執行中最新的 manifest videoId
             this._interceptorManifestVideoId = self.latestManifestVideoId;
+            this._interceptorRequestInfo = self.createSubtitleRequestInfo({
+              url: this._interceptorUrl,
+              method: this._interceptorMethod,
+              pageUrl: this._interceptorPageUrl,
+              manifestVideoId: this._interceptorManifestVideoId,
+              source: 'xhr'
+            });
+            self.recordDebugEvent('TTML_REQUEST', {
+              source: 'xhr',
+              url: this._interceptorUrl,
+              manifestVideoId: this._interceptorManifestVideoId,
+              activePlayerVideoId: this._interceptorRequestInfo.activePlayerVideoIdAtRequest,
+              pageUrlVideoId: this._interceptorRequestInfo.pageUrlVideoIdAtRequest,
+              sessionId: this._interceptorRequestInfo.sessionIdAtRequest,
+              currentTrack: this._interceptorRequestInfo.currentTrackAtRequest,
+              derivedSubtitleVideo: this._interceptorRequestInfo.derivedSubtitleVideo,
+              pageUrl: this._interceptorPageUrl
+            });
             self.handleXHRRequest(this);
           }
         }
@@ -359,8 +598,25 @@
           if (self.isSubtitleRequest(url)) {
             // debugLog('識別為字幕請求:', url);
             const manifestVideoId = self.latestManifestVideoId;  // 快照當前 manifest videoId
+            const requestInfo = self.createSubtitleRequestInfo({
+              url,
+              pageUrl: location.href,
+              manifestVideoId,
+              source: 'fetch'
+            });
+            self.recordDebugEvent('TTML_REQUEST', {
+              source: 'fetch',
+              url,
+              manifestVideoId,
+              activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
+              pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
+              sessionId: requestInfo.sessionIdAtRequest,
+              currentTrack: requestInfo.currentTrackAtRequest,
+              derivedSubtitleVideo: requestInfo.derivedSubtitleVideo,
+              pageUrl: location.href
+            });
             const fetchPromise = self.originalFetch.apply(this, args);
-            self.handleFetchRequest(fetchPromise, url, manifestVideoId);
+            self.handleFetchRequest(fetchPromise, requestInfo);
             return fetchPromise;
           }
         }
@@ -419,14 +675,13 @@
      * 處理XMLHttpRequest字幕請求
      */
     handleXHRRequest(xhr) {
-      const requestInfo = {
+      const requestInfo = xhr._interceptorRequestInfo || this.createSubtitleRequestInfo({
         url: xhr._interceptorUrl,
         method: xhr._interceptorMethod,
-        pageUrl: xhr._interceptorPageUrl,  // request-time 頁面 URL
-        manifestVideoId: xhr._interceptorManifestVideoId,  // request-time manifest videoId
-        timestamp: Date.now(),
-        type: 'xhr'
-      };
+        pageUrl: xhr._interceptorPageUrl,
+        manifestVideoId: xhr._interceptorManifestVideoId,
+        source: 'xhr'
+      });
 
       // debugLog('攔截到字幕請求:', requestInfo.url);
 
@@ -482,17 +737,12 @@
     /**
      * 處理Fetch字幕請求
      */
-    async handleFetchRequest(fetchPromise, url, manifestVideoId) {
+    async handleFetchRequest(fetchPromise, requestInfo) {
       try {
         const response = await fetchPromise;
         if (response.ok) {
           const content = await response.clone().text();
-          this.processSubtitleContent(content, {
-            url: url,
-            manifestVideoId: manifestVideoId,  // request-time manifest videoId
-            timestamp: Date.now(),
-            type: 'fetch'
-          });
+          this.processSubtitleContent(content, requestInfo);
         }
       } catch (error) {
         console.error('處理Fetch字幕請求失敗:', error);
@@ -510,20 +760,6 @@
         debugLog('解析TTML語言失敗:', error);
         return 'unknown';
       }
-    }
-
-    /**
-     * 從 URL 提取視頻 ID
-     * @param {string} [pageUrl] - 頁面 URL，預設為 location.href
-     */
-    extractVideoIdFromUrl(pageUrl) {
-      const url = pageUrl || location.href;
-      const urlMatch = url.match(/netflix\.com\/watch\/(\d+)/);
-      if (urlMatch && urlMatch[1]) {
-        debugLog('從 URL 提取視頻 ID:', urlMatch[1]);
-        return urlMatch[1];
-      }
-      return null;
     }
 
     /**
@@ -553,6 +789,7 @@
     processSubtitleContent(content, requestInfo) {
       if (content.includes('<?xml') && content.includes('<tt')) {
         const language = this.parseTTMLLanguage(content);
+        requestInfo.ttmlLanguage = language;
 
         // 生成包含正確語言的 cacheKey（使用 request-time manifest videoId 或 URL）
         const cacheKey = this.generateCacheKeyWithLanguage(requestInfo.url, language, requestInfo.pageUrl, requestInfo.manifestVideoId);
@@ -564,6 +801,19 @@
         }
 
         debugLog(`TTML攔截成功: ${language}, 緩存鍵: ${cacheKey}`);
+        this.recordDebugEvent('TTML_RESPONSE', {
+          source: requestInfo.type,
+          language,
+          cacheKey,
+          manifestVideoId: requestInfo.manifestVideoId,
+          activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
+          pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
+          sessionId: requestInfo.sessionIdAtRequest,
+          currentTrack: requestInfo.currentTrackAtRequest,
+          derivedSubtitleVideo: requestInfo.derivedSubtitleVideo,
+          requestUrl: requestInfo.url,
+          pageUrl: requestInfo.pageUrl
+        });
 
         // 緩存 raw TTML（混合策略：既緩存又通知）
         this.interceptedTTMLs.set(cacheKey, {
@@ -620,6 +870,17 @@
       const messageId = this.generateMessageId();
       
       debugLog('發送 raw TTML 攔截消息:', { messageId, cacheKey: data.cacheKey, language: data.language });
+      this.recordDebugEvent('RAW_TTML_INTERCEPTED', {
+        cacheKey: data.cacheKey,
+        language: data.language,
+        manifestVideoId: data.requestInfo?.manifestVideoId,
+        activePlayerVideoId: data.requestInfo?.activePlayerVideoIdAtRequest,
+        pageUrlVideoId: data.requestInfo?.pageUrlVideoIdAtRequest,
+        sessionId: data.requestInfo?.sessionIdAtRequest,
+        currentTrack: data.requestInfo?.currentTrackAtRequest,
+        derivedSubtitleVideo: data.requestInfo?.derivedSubtitleVideo,
+        requestUrl: data.requestInfo?.url
+      });
       
       // 觸發 messageToContentScript 事件，符合 SubPal 架構
       window.dispatchEvent(new CustomEvent('messageToContentScript', {
@@ -692,6 +953,21 @@
         result[key] = value;
       }
       return result;
+    }
+
+    /**
+     * 獲取字幕攔截診斷快照
+     */
+    getDebugSnapshot() {
+      return {
+        playback: this.getActivePlaybackSnapshot(),
+        latestManifestVideoId: this.latestManifestVideoId,
+        interceptedTTMLCacheKeys: Array.from(this.interceptedTTMLs.keys()),
+        interceptedSubtitleCacheKeys: Array.from(this.interceptedSubtitles.keys()),
+        interceptedTTMLCount: this.interceptedTTMLs.size,
+        interceptedSubtitleCount: this.interceptedSubtitles.size,
+        recentEvents: this.debugEvents.slice(-20)
+      };
     }
 
     /**
@@ -828,6 +1104,12 @@
           debugLog('返回所有攔截的 raw TTML，數量:', Object.keys(response.allTTMLs).length);
           break;
 
+        case 'GET_SUBPAL_DEBUG_SNAPSHOT':
+          response.debugSnapshot = subtitleInterceptor.getDebugSnapshot();
+          response.success = true;
+          debugLog('返回 SubPal 診斷快照');
+          break;
+
         case 'CHECK_INTERCEPTOR_STATUS':
           response.active = subtitleInterceptor.isActive;
           response.success = true;
@@ -890,6 +1172,10 @@
   window.addEventListener('messageToContentScript', (event) => {
     if (event.detail?.message?.type === 'VIDEO_ID_CHANGED') {
       const { oldVideoId, newVideoId } = event.detail.message;
+      subtitleInterceptor.recordDebugEvent('VIDEO_ID_CHANGED', {
+        oldVideoId,
+        newVideoId
+      });
       debugLog(`檢測到影片切換 (${oldVideoId} -> ${newVideoId})，重新初始化播放器助手`);
       
       // 使用重試機制等待播放會話就緒
@@ -967,6 +1253,7 @@
     playerHelper,
     subtitleInterceptor,
     checkAPIAvailability,
+    getDebugSnapshot: () => subtitleInterceptor.getDebugSnapshot(),
     debugMode: () => debugMode,
     setDebugMode: (enabled) => {
       debugMode = enabled;

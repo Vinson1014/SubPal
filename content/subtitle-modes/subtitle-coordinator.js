@@ -268,7 +268,8 @@ class SubtitleCoordinator {
         text: this.lastSubtitleData.text.substring(0, 50) + '...',
         timestamp: this.lastSubtitleData.timestamp,
         mode: this.lastSubtitleData.mode
-      } : null
+      } : null,
+      interceptor: this.interceptor?.getStatus ? this.interceptor.getStatus() : null
     };
   }
 
