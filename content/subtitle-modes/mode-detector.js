@@ -17,6 +17,8 @@ class ModeDetector {
     this.retryCount = 0;
     this.maxRetries = 3;
     this.lastCheckResult = null;
+    this.checkHistory = [];
+    this.maxHistory = 20;
     this.isInitialized = false;
   }
 
@@ -51,32 +53,94 @@ class ModeDetector {
    */
   async detectOptimalMode() {
     this.log('開始檢測最佳字幕模式...');
-    
+
+    const result = await this.detectInterceptModeStatus();
+    return result.mode;
+  }
+
+  /**
+   * 檢測攔截模式狀態，並區分短暫未就緒與真正不可用。
+   *
+   * status:
+   * - ready: 攔截模式可啟動
+   * - soft_not_ready: Netflix SPA / 播放器 / 字幕資料仍在 warming up，應保持攔截重試
+   * - hard_fail: Page script 或基本通訊不可用，才允許進入 DOM emergency
+   */
+  async detectInterceptModeStatus() {
+    this.log('開始檢測攔截模式狀態...');
+
+    const checks = {};
+
     try {
-      // 1. 檢查基本環境
       if (!this.isNetflixPage()) {
-        this.log('不在 Netflix 頁面，使用 DOM 監聽模式');
-        return 'dom';
+        return this.recordCheckResult({
+          status: 'hard_fail',
+          mode: 'dom',
+          reason: 'not-netflix-page',
+          checks
+        });
       }
-      
-      // 2. 嘗試攔截模式檢測
-      const interceptAvailable = await this.checkInterceptModeAvailability();
-      
-      if (interceptAvailable) {
-        this.log('攔截模式可用，優先使用');
-        this.lastCheckResult = { mode: 'intercept', timestamp: Date.now() };
-        return 'intercept';
+
+      const scriptInjected = await this.ensurePageScriptInjected();
+      checks.pageScriptInjected = scriptInjected;
+      if (!scriptInjected) {
+        return this.recordCheckResult({
+          status: 'hard_fail',
+          mode: 'dom',
+          reason: 'page-script-unavailable',
+          checks
+        });
       }
-      
-      // 3. 攔截模式不可用，降級到 DOM 監聽模式
-      this.log('攔截模式不可用，降級到 DOM 監聽模式');
-      this.lastCheckResult = { mode: 'dom', timestamp: Date.now() };
-      return 'dom';
-      
+
+      const apiAvailable = await this.checkNetflixAPIAvailability();
+      checks.netflixAPIAvailable = apiAvailable;
+      if (!apiAvailable) {
+        return this.recordCheckResult({
+          status: 'soft_not_ready',
+          mode: 'intercept',
+          reason: 'netflix-api-not-ready',
+          checks
+        });
+      }
+
+      const playerReady = await this.checkPlayerReadiness();
+      checks.playerReady = playerReady;
+      if (!playerReady) {
+        return this.recordCheckResult({
+          status: 'soft_not_ready',
+          mode: 'intercept',
+          reason: 'player-not-ready',
+          checks
+        });
+      }
+
+      const interceptStatus = await this.checkSubtitleInterceptCapabilityStatus();
+      checks.subtitleIntercept = interceptStatus;
+      if (interceptStatus.status !== 'ready') {
+        return this.recordCheckResult({
+          status: interceptStatus.status,
+          mode: interceptStatus.status === 'hard_fail' ? 'dom' : 'intercept',
+          reason: interceptStatus.reason,
+          checks
+        });
+      }
+
+      return this.recordCheckResult({
+        status: 'ready',
+        mode: 'intercept',
+        reason: 'intercept-ready',
+        checks
+      });
+
     } catch (error) {
-      console.warn('模式檢測過程出錯，使用安全後備模式:', error);
-      this.lastCheckResult = { mode: 'dom', error: error.message, timestamp: Date.now() };
-      return 'dom';
+      console.warn('模式檢測過程出錯，視為攔截模式暫時未就緒:', error);
+      return this.recordCheckResult({
+        status: 'soft_not_ready',
+        mode: 'intercept',
+        reason: 'detector-error',
+        error: error.message,
+        checks
+      });
     }
   }
 
@@ -85,44 +149,8 @@ class ModeDetector {
    * @returns {Promise<boolean>}
    */
   async checkInterceptModeAvailability() {
-    this.log('檢測攔截模式可用性...');
-    
-    try {
-      // 1. 確保頁面腳本已注入
-      const scriptInjected = await this.ensurePageScriptInjected();
-      if (!scriptInjected) {
-        this.log('頁面腳本注入失敗');
-        return false;
-      }
-      
-      // 2. 檢測 Netflix API 可用性
-      const apiAvailable = await this.checkNetflixAPIAvailability();
-      if (!apiAvailable) {
-        this.log('Netflix API 不可用');
-        return false;
-      }
-      
-      // 3. 檢測播放器準備狀態
-      const playerReady = await this.checkPlayerReadiness();
-      if (!playerReady) {
-        this.log('播放器未準備就緒');
-        return false;
-      }
-      
-      // 4. 檢測字幕攔截功能
-      const interceptWorking = await this.checkSubtitleInterceptCapability();
-      if (!interceptWorking) {
-        this.log('字幕攔截功能不可用');
-        return false;
-      }
-      
-      this.log('攔截模式所有檢測項目通過');
-      return true;
-      
-    } catch (error) {
-      console.error('檢測攔截模式可用性時出錯:', error);
-      return false;
-    }
+    const result = await this.detectInterceptModeStatus();
+    return result.status === 'ready';
   }
 
   /**
@@ -228,37 +256,69 @@ class ModeDetector {
    * 檢測字幕攔截功能
    */
   async checkSubtitleInterceptCapability() {
+    const result = await this.checkSubtitleInterceptCapabilityStatus();
+    return result.status === 'ready';
+  }
+
+  async checkSubtitleInterceptCapabilityStatus() {
     this.log('檢測字幕攔截功能...');
-    
+
     try {
-      // 檢測可用語言
       const languagesResult = await this.sendToPageScript({
         type: 'GET_AVAILABLE_LANGUAGES'
       });
-      
-      if (!languagesResult || !languagesResult.success || !languagesResult.languages || languagesResult.languages.length === 0) {
-        this.log('無法獲取可用語言列表');
-        return false;
+
+      if (!languagesResult || !languagesResult.success) {
+        this.log('可用語言列表暫時不可讀:', languagesResult?.error);
+        return {
+          status: 'soft_not_ready',
+          reason: 'languages-unavailable',
+          languagesCount: 0,
+          error: languagesResult?.error || null
+        };
       }
-      
-      this.log(`檢測到 ${languagesResult.languages.length} 種可用語言`);
-      
-      // 嘗試基本的字幕獲取功能
+
+      const languages = languagesResult.languages || [];
+      if (languages.length === 0) {
+        this.log('可用語言列表為空，播放器可能仍在切換');
+        return {
+          status: 'soft_not_ready',
+          reason: 'languages-empty',
+          languagesCount: 0
+        };
+      }
+
+      this.log(`檢測到 ${languages.length} 種可用語言`);
+
       const subtitleTest = await this.sendToPageScript({
         type: 'TEST_SUBTITLE_FETCH'
       });
-      
+
       if (subtitleTest && subtitleTest.success) {
         this.log('字幕攔截功能正常');
-        return true;
+        return {
+          status: 'ready',
+          reason: 'interceptor-active',
+          languagesCount: languages.length,
+          interceptorActive: !!subtitleTest.interceptorActive
+        };
       }
-      
-      this.log('字幕攔截功能測試失敗:', subtitleTest?.error);
-      return false;
-      
+
+      this.log('字幕攔截功能測試暫時未通過:', subtitleTest?.error);
+      return {
+        status: 'soft_not_ready',
+        reason: 'interceptor-not-active',
+        languagesCount: languages.length,
+        error: subtitleTest?.error || null
+      };
+
     } catch (error) {
       console.error('檢測字幕攔截功能時出錯:', error);
-      return false;
+      return {
+        status: 'soft_not_ready',
+        reason: 'intercept-capability-error',
+        error: error.message
+      };
     }
   }
 
@@ -296,6 +356,7 @@ class ModeDetector {
   getDetectionHistory() {
     return {
       lastCheck: this.lastCheckResult,
+      history: this.checkHistory.slice(-this.maxHistory),
       currentRetryCount: this.retryCount,
       maxRetries: this.maxRetries,
       settings: {
@@ -312,6 +373,22 @@ class ModeDetector {
     this.log('手動重新檢測模式...');
     this.retryCount++;
     return await this.detectOptimalMode();
+  }
+
+  recordCheckResult(result) {
+    const normalized = {
+      ...result,
+      timestamp: Date.now()
+    };
+
+    this.lastCheckResult = normalized;
+    this.checkHistory.push(normalized);
+    if (this.checkHistory.length > this.maxHistory) {
+      this.checkHistory.splice(0, this.checkHistory.length - this.maxHistory);
+    }
+
+    this.log('攔截模式檢測結果:', normalized);
+    return normalized;
   }
 
   /**

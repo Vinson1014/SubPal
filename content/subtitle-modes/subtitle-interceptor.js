@@ -116,7 +116,8 @@ class SubtitleInterceptor {
       // 設置事件處理器
       this.setupEventHandlers();
 
-      // 等待播放器準備就緒
+      // 播放器與字幕語言列表在 Netflix SPA 換片時可能暫時不可讀。
+      // 初始化攔截器只需要完成事件與設定綁定；字幕資料交給後續 reload/retry 補齊。
       await this.waitForPlayerReady();
 
       this.isInitialized = true;
@@ -195,13 +196,21 @@ class SubtitleInterceptor {
         this.log('播放器已準備就緒，可用語言:', result.languages.map(l => l.code));
         return true;
       } else {
-        this.log('播放器未準備就緒:', result?.error || '未知錯誤');
-        throw new Error(result?.error || '播放器未準備就緒');
+        const reason = result?.error || '播放器未準備就緒';
+        this.log('播放器暫時未準備就緒:', reason);
+        this.recordDebugEvent('PLAYER_SOFT_NOT_READY', {
+          reason,
+          languagesCount: result?.languages?.length || 0
+        });
+        return false;
       }
       
     } catch (error) {
-      this.log('檢查播放器狀態時出錯:', error.message);
-      throw error;
+      this.log('檢查播放器狀態時出錯，視為暫時未就緒:', error.message);
+      this.recordDebugEvent('PLAYER_SOFT_NOT_READY', {
+        reason: error.message
+      });
+      return false;
     }
   }
 

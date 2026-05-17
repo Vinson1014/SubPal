@@ -22,6 +22,20 @@ class SubtitleCoordinator {
     this.uiManager = null;
     this.isInitialized = false;
     this.backgroundRetryTimer = null; // 背景重試計時器
+    this.backgroundRetryInFlight = false;
+    this.backgroundUpgradeState = {
+      active: false,
+      attempts: 0,
+      reason: null,
+      startedAt: null,
+      lastResult: null
+    };
+    this.modeHealth = 'intercept_warming_up';
+    this.lastModeDecision = null;
+    this.lastSoftFailureReason = null;
+    this.lastDomEmergencyReason = null;
+    this.interceptFailureCount = 0;
+    this.maxInterceptFailuresBeforeDom = 3;
     this.eventCallbacks = {
       onSubtitleDetected: null,
       onModeChanged: null,
@@ -81,8 +95,9 @@ class SubtitleCoordinator {
         await this.interceptor.initialize();
         this.log('攔截器初始化成功');
       } catch (error) {
-        console.warn('攔截器初始化失敗，將使用 DOM 監聽模式:', error.message);
-        this.interceptor = null; // 標記為不可用
+        console.warn('攔截器初始化暫時未就緒，將進入 warming/retry:', error.message);
+        this.modeHealth = 'intercept_warming_up';
+        this.lastSoftFailureReason = error.message;
       }
       
       // 智能選擇最佳模式
@@ -104,29 +119,43 @@ class SubtitleCoordinator {
 
   async selectOptimalMode() {
     try {
-      // 如果攔截器不可用，直接使用 DOM 模式
-      if (!this.interceptor) {
-        this.log('攔截器不可用，直接使用 DOM 監聽模式');
-        await this.setMode('dom');
+      const decision = await this.modeDetector.detectInterceptModeStatus();
+      this.lastModeDecision = decision;
+      this.log('模式檢測結果:', decision);
+
+      if (decision.status === 'hard_fail') {
+        await this.enterDomEmergency(decision.reason);
         return;
       }
-      
-      // 使用模式檢測器決定最佳模式
-      const optimalMode = await this.modeDetector.detectOptimalMode();
-      this.log(`檢測到最佳模式: ${optimalMode}`);
-      
-      // 設置模式並啟動
-      await this.setMode(optimalMode);
-      
+
+      await this.ensureInterceptorInitialized();
+
+      if (decision.status === 'ready') {
+        this.modeHealth = 'intercept_ready';
+        this.interceptFailureCount = 0;
+        this.stopBackgroundUpgrade('intercept-ready');
+      } else {
+        this.modeHealth = 'intercept_warming_up';
+        this.lastSoftFailureReason = decision.reason;
+        this.startBackgroundUpgrade({ reason: decision.reason });
+      }
+
+      await this.setMode('intercept');
+
     } catch (error) {
-      console.error('模式選擇失敗，使用安全後備模式:', error);
-      await this.setMode('dom'); // 安全後備到 DOM 監聽模式
+      console.warn('模式選擇暫時失敗，先維持攔截重試:', error);
+      await this.handleModeFailure(error);
     }
   }
 
   async setMode(mode) {
     if (this.currentMode === mode) {
       this.log(`模式 ${mode} 已經是當前模式，跳過切換`);
+      if (mode === 'intercept' && this.interceptor && !this.interceptor.isActive) {
+        await this.startCurrentMode();
+      } else if (mode === 'dom' && this.domMonitor && !this.domMonitor.isActive) {
+        await this.startCurrentMode();
+      }
       return;
     }
     
@@ -230,13 +259,19 @@ class SubtitleCoordinator {
     console.warn(`當前模式 ${this.currentMode} 出現錯誤:`, error);
     
     if (this.currentMode === 'intercept') {
-      this.log('攔截模式失效，自動降級到 DOM 監聽模式');
-      await this.setMode('dom');
-      
-      // 通知用戶模式已降級
-      if (this.uiManager && this.uiManager.toastManager) {
-        this.uiManager.toastManager.show('攔截模式不可用，已切換到穩定模式', 'warning');
+      this.interceptFailureCount++;
+      this.modeHealth = 'intercept_degraded_retrying';
+      this.lastSoftFailureReason = error?.message || String(error);
+      this.startBackgroundUpgrade({ reason: this.lastSoftFailureReason });
+
+      if (this.interceptFailureCount >= this.maxInterceptFailuresBeforeDom) {
+        await this.enterDomEmergency(`intercept-failed-${this.interceptFailureCount}-times`, error);
       }
+    } else if (!this.currentMode) {
+      this.interceptFailureCount++;
+      this.modeHealth = 'intercept_degraded_retrying';
+      this.lastSoftFailureReason = error?.message || String(error);
+      await this.enterDomEmergency('initial-intercept-unavailable', error);
     } else {
       console.error('DOM 監聽模式也失效，這是嚴重錯誤');
       
@@ -261,9 +296,15 @@ class SubtitleCoordinator {
   getStatus() {
     return {
       currentMode: this.currentMode,
+      modeHealth: this.modeHealth,
       isInitialized: this.isInitialized,
       availableModes: ['dom', 'intercept'],
       lastCheck: new Date().toISOString(),
+      lastModeDecision: this.lastModeDecision,
+      lastSoftFailureReason: this.lastSoftFailureReason,
+      lastDomEmergencyReason: this.lastDomEmergencyReason,
+      interceptFailureCount: this.interceptFailureCount,
+      backgroundUpgrade: { ...this.backgroundUpgradeState },
       lastSubtitle: this.lastSubtitleData ? {
         text: this.lastSubtitleData.text.substring(0, 50) + '...',
         timestamp: this.lastSubtitleData.timestamp,
@@ -285,6 +326,8 @@ class SubtitleCoordinator {
   // 清理資源
   async cleanup() {
     this.log('清理字幕協調器資源...');
+
+    this.stopBackgroundUpgrade('cleanup');
     
     if (this.currentMode) {
       await this.stopCurrentMode();
@@ -329,10 +372,7 @@ class SubtitleCoordinator {
       } else if (this.currentMode === 'intercept' && this.interceptor) {
         this.interceptor.start();
       } else if (this.currentMode === 'intercept' && !this.interceptor) {
-        // 攔截器不可用，自動降級
-        this.log('攔截器不可用，自動降級到 DOM 監聽模式');
-        await this.setMode('dom');
-        return;
+        throw new Error('攔截器尚未初始化');
       }
     } catch (error) {
       console.error(`啟用模式 ${this.currentMode} 失敗:`, error);
@@ -350,57 +390,118 @@ class SubtitleCoordinator {
   /**
    * 啟動背景攔截器升級重試
    */
-  startBackgroundUpgrade() {
+  startBackgroundUpgrade(options = {}) {
     if (this.backgroundRetryTimer) {
       clearInterval(this.backgroundRetryTimer);
     }
 
-    this.log('啟動背景攔截器重試...');
+    this.log('啟動背景攔截器重試...', options.reason);
     
-    const RETRY_INTERVAL = 1000;    // 每秒重試
-    const MAX_RETRY_TIME = 30000;   // 30秒後停止
-    const MAX_ATTEMPTS = 30;        // 最多30次
+    const RETRY_INTERVAL = 2000;    // 避免 SPA 切換期間重疊打 Netflix API
+    const MAX_RETRY_TIME = 120000;  // DOM emergency 期間持續嘗試 2 分鐘
+    const MAX_ATTEMPTS = 60;
     
     let attempts = 0;
     const startTime = Date.now();
+    this.backgroundUpgradeState = {
+      active: true,
+      attempts: 0,
+      reason: options.reason || null,
+      startedAt: startTime,
+      lastResult: null
+    };
     
     this.backgroundRetryTimer = setInterval(async () => {
+      if (this.backgroundRetryInFlight) {
+        return;
+      }
+
       attempts++;
       const elapsed = Date.now() - startTime;
+      this.backgroundUpgradeState.attempts = attempts;
       
       // 超時或達到最大次數則停止
       if (elapsed > MAX_RETRY_TIME || attempts > MAX_ATTEMPTS) {
-        clearInterval(this.backgroundRetryTimer);
-        this.backgroundRetryTimer = null;
+        this.stopBackgroundUpgrade('retry-timeout');
+        this.modeHealth = this.currentMode === 'dom' ? 'dom_emergency' : 'intercept_degraded_retrying';
         this.log('背景重試已停止，繼續使用DOM模式');
         return;
       }
       
       try {
-        if (await this.checkPlayerReady()) {
-          clearInterval(this.backgroundRetryTimer);
-          this.backgroundRetryTimer = null;
-          this.log('播放器準備就緒，開始靜默升級');
-          await this.silentUpgradeToInterceptor();
-        }
+        this.backgroundRetryInFlight = true;
+        const result = await this.tryRecoverInterceptMode();
+        this.backgroundUpgradeState.lastResult = result;
       } catch (error) {
+        this.backgroundUpgradeState.lastResult = {
+          success: false,
+          reason: 'retry-error',
+          error: error.message,
+          timestamp: Date.now()
+        };
         // 靜默處理錯誤，不打擾用戶
+      } finally {
+        this.backgroundRetryInFlight = false;
       }
     }, RETRY_INTERVAL);
+  }
+
+  stopBackgroundUpgrade(reason = 'stopped') {
+    if (this.backgroundRetryTimer) {
+      clearInterval(this.backgroundRetryTimer);
+      this.backgroundRetryTimer = null;
+    }
+
+    this.backgroundRetryInFlight = false;
+    this.backgroundUpgradeState = {
+      ...this.backgroundUpgradeState,
+      active: false,
+      stoppedAt: Date.now(),
+      stopReason: reason
+    };
   }
 
   /**
    * 檢查播放器是否準備就緒
    */
   async checkPlayerReady() {
-    const { sendMessageToPageScript } = await import('../system/messaging.js');
-    
-    const result = await sendMessageToPageScript({
-      type: 'GET_AVAILABLE_LANGUAGES'
-    });
-    
-    const languages = result?.languages || [];
-    return languages.length > 0;  // 有語言列表 = 可以攔截字幕
+    const decision = await this.modeDetector.detectInterceptModeStatus();
+    this.lastModeDecision = decision;
+    return decision.status === 'ready';
+  }
+
+  async tryRecoverInterceptMode() {
+    const decision = await this.modeDetector.detectInterceptModeStatus();
+    this.lastModeDecision = decision;
+
+    if (decision.status === 'hard_fail') {
+      this.modeHealth = this.currentMode === 'dom' ? 'dom_emergency' : 'intercept_degraded_retrying';
+      return {
+        success: false,
+        reason: decision.reason,
+        status: decision.status,
+        timestamp: Date.now()
+      };
+    }
+
+    if (decision.status === 'soft_not_ready') {
+      this.modeHealth = this.currentMode === 'dom' ? 'dom_emergency' : 'intercept_warming_up';
+      this.lastSoftFailureReason = decision.reason;
+      return {
+        success: false,
+        reason: decision.reason,
+        status: decision.status,
+        timestamp: Date.now()
+      };
+    }
+
+    await this.silentUpgradeToInterceptor();
+    return {
+      success: this.currentMode === 'intercept',
+      reason: 'intercept-ready',
+      status: decision.status,
+      timestamp: Date.now()
+    };
   }
 
   /**
@@ -409,41 +510,64 @@ class SubtitleCoordinator {
   async silentUpgradeToInterceptor() {
     try {
       this.log('開始靜默升級到攔截器模式...');
-      
-      // 動態導入攔截器
-      const { SubtitleInterceptor } = await import('./subtitle-interceptor.js');
-      this.interceptor = new SubtitleInterceptor();
-      
-      // 初始化攔截器
-      await this.interceptor.initialize();
-      
-      // 重要：連接字幕檢測回調
-      if (this.eventCallbacks.onSubtitleDetected) {
-        this.interceptor.onSubtitleDetected((subtitleData) => {
-          if (this.currentMode === 'intercept' && this.eventCallbacks.onSubtitleDetected) {
-            const normalizedData = this.normalizeSubtitleData(subtitleData, 'intercept');
-            this.lastSubtitleData = normalizedData;
-            this.eventCallbacks.onSubtitleDetected(normalizedData);
-          }
-        });
-      }
+
+      await this.ensureInterceptorInitialized();
       
       // 載入字幕數據
       await this.interceptor.loadInterceptedSubtitles();
-      
-      // 檢查是否真的準備好了
-      if (this.interceptor.primarySubtitles && this.interceptor.primarySubtitles.length > 0) {
-        // 無縫切換到攔截器模式
-        await this.setMode('intercept');
-        this.log('靜默升級完成！現在支援雙語字幕');
-      } else {
-        throw new Error('攔截器字幕數據無效');
-      }
+
+      this.modeHealth = 'intercept_ready';
+      this.interceptFailureCount = 0;
+      this.lastDomEmergencyReason = null;
+      this.stopBackgroundUpgrade('intercept-recovered');
+      await this.setMode('intercept');
+      this.log('靜默升級完成，已回到攔截模式');
       
     } catch (error) {
-      this.log('靜默升級失敗，繼續使用DOM模式:', error.message);
-      // 清理失敗的攔截器
-      this.interceptor = null;
+      this.modeHealth = this.currentMode === 'dom' ? 'dom_emergency' : 'intercept_degraded_retrying';
+      this.lastSoftFailureReason = error.message;
+      this.log('靜默升級失敗，繼續等待下一輪重試:', error.message);
+      throw error;
+    }
+  }
+
+  async ensureInterceptorInitialized() {
+    if (!this.interceptor) {
+      const { SubtitleInterceptor } = await import('./subtitle-interceptor.js');
+      this.interceptor = new SubtitleInterceptor();
+    }
+
+    if (!this.interceptor.isInitialized) {
+      await this.interceptor.initialize();
+    }
+
+    this.attachInterceptorCallback();
+  }
+
+  attachInterceptorCallback() {
+    if (!this.interceptor || !this.eventCallbacks.onSubtitleDetected) {
+      return;
+    }
+
+    this.interceptor.onSubtitleDetected((subtitleData) => {
+      if (this.currentMode === 'intercept' && this.eventCallbacks.onSubtitleDetected) {
+        const normalizedData = this.normalizeSubtitleData(subtitleData, 'intercept');
+        this.lastSubtitleData = normalizedData;
+        this.eventCallbacks.onSubtitleDetected(normalizedData);
+      }
+    });
+  }
+
+  async enterDomEmergency(reason, error = null) {
+    this.modeHealth = 'dom_emergency';
+    this.lastDomEmergencyReason = reason;
+    this.lastSoftFailureReason = error?.message || this.lastSoftFailureReason;
+    this.startBackgroundUpgrade({ reason });
+
+    await this.setMode('dom');
+
+    if (this.uiManager && this.uiManager.toastManager) {
+      this.uiManager.toastManager.show('攔截模式暫時不可用，已啟用緊急字幕模式並持續重試', 'warning');
     }
   }
 

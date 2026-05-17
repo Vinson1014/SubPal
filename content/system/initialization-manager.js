@@ -516,11 +516,17 @@ class InitializationManager {
     // 訂閱 debugMode 變更（從 SubtitleCoordinator.initialize 遷移過來）
     const { configBridge } = await import('./config/config-bridge.js');
     coordinator.debug = configBridge.get('debugMode');
+    coordinator.primaryLanguage = configBridge.get('subtitle.primaryLanguage');
     this.log(`SubtitleCoordinator 調試模式: ${coordinator.debug}`);
 
     configBridge.subscribe('debugMode', (newValue) => {
       coordinator.debug = newValue;
       this.log(`SubtitleCoordinator 調試模式已更新: ${newValue}`);
+    });
+
+    configBridge.subscribe('subtitle.primaryLanguage', (newValue) => {
+      coordinator.primaryLanguage = newValue;
+      this.log(`SubtitleCoordinator 主要語言已更新: ${newValue}`);
     });
 
     // 設置事件處理器
@@ -540,27 +546,11 @@ class InitializationManager {
     
     // 初始化 DOM 監聽模式（總是可用）
     await coordinator.domMonitor.initialize();
-    
-    // 快速檢查攔截器可用性（不超過3秒）
-    try {
-      const interceptorReady = await this.quickInterceptorCheck();
-      if (interceptorReady) {
-        await coordinator.interceptor.initialize();
-        this.log('攔截器快速檢查成功，初始化完成');
-        await coordinator.selectOptimalMode();
-      } else {
-        throw new Error('播放器未準備就緒');
-      }
-    } catch (error) {
-      this.log('攔截器快速檢查失敗，使用DOM模式並啟動背景重試:', error.message);
-      coordinator.interceptor = null;
-      
-      // 立即啟動 DOM 模式
-      await coordinator.setMode('dom');
-      
-      // 啟動背景攔截器重試
-      coordinator.startBackgroundUpgrade();
-    }
+
+    // 不在初始化階段用語言列表決定生死。Netflix SPA 換片時 player/languages
+    // 經常短暫不可讀，交由 coordinator 的 soft/hard 分類與背景回升處理。
+    await coordinator.interceptor.initialize();
+    await coordinator.selectOptimalMode();
     
     coordinator.isInitialized = true;
     this.log(`字幕協調器初始化完成，使用模式: ${coordinator.currentMode}`);
