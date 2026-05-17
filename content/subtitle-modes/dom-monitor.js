@@ -9,6 +9,7 @@
  */
 
 import { registerInternalEventHandler } from '../system/messaging.js';
+import { getCurrentTimestamp } from '../core/video-info.js';
 
 class DOMMonitor {
   constructor() {
@@ -282,7 +283,7 @@ class DOMMonitor {
         position,
         style: subtitleStyle,
         element: container,
-        timestamp: Date.now(),
+        timestamp: getCurrentTimestamp(),
         isEmpty: false
       };
 

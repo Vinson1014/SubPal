@@ -684,7 +684,7 @@ class SubtitleInterceptor {
         secondaryText: this.dualSubtitleEnabled ? (secondarySubtitle?.text || '') : '',
         primaryLanguage: this.primaryLanguage,
         secondaryLanguage: this.secondaryLanguage,
-        timestamp: primarySubtitle?.startTime || currentTime,
+        timestamp: primarySubtitle?.startTime ?? currentTime,
         primarySubtitle: primarySubtitle,
         secondarySubtitle: this.dualSubtitleEnabled ? secondarySubtitle : null,
         isDualModeEnabled: this.dualSubtitleEnabled
