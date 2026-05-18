@@ -30,6 +30,7 @@ class SubtitleDisplay {
     
     // 雙語樣式支持 (新增)
     this.dualModeStyles = null;
+    this.styleMode = 'custom';
     
     // 字幕樣式（參考原有 ui-manager.js 的 subtitleStyle）
     this.subtitleStyle = {
@@ -62,22 +63,8 @@ class SubtitleDisplay {
       this.debug = configBridge.get('debugMode');
       this.log(`調試模式設置為: ${this.debug}`);
 
-      // 讀取所有字幕樣式配置
-      const primaryFontSize = configBridge.get('subtitle.style.primary.fontSize');
-      const primaryTextColor = configBridge.get('subtitle.style.primary.textColor');
-      const primaryBgColor = configBridge.get('subtitle.style.primary.backgroundColor');
-      const secondaryFontSize = configBridge.get('subtitle.style.secondary.fontSize');
-      const secondaryTextColor = configBridge.get('subtitle.style.secondary.textColor');
-      const secondaryBgColor = configBridge.get('subtitle.style.secondary.backgroundColor');
-      const fontFamily = configBridge.get('subtitle.style.fontFamily');
-
-      // 更新字幕樣式對象
-      this.subtitleStyle.fontSize = `${primaryFontSize}px`;
-      this.subtitleStyle.color = primaryTextColor;
-      this.subtitleStyle.backgroundColor = primaryBgColor;
-      this.subtitleStyle.fontFamily = fontFamily;
-
-      this.log('字幕樣式配置已載入:', this.subtitleStyle);
+      this.styleMode = configBridge.get('subtitle.style.mode') || this.styleMode;
+      this.log('字幕外觀模式已載入:', this.styleMode);
 
       // 訂閱配置變更
       configBridge.subscribe('debugMode', (newValue) => {
@@ -85,45 +72,10 @@ class SubtitleDisplay {
         this.log('調試模式已更新:', newValue);
       });
 
-      // 訂閱主要字幕樣式變更
-      configBridge.subscribe('subtitle.style.primary.fontSize', (newValue) => {
-        this.subtitleStyle.fontSize = `${newValue}px`;
-        this.log('主要字幕字體大小已更新:', newValue);
-        this.applyStyles();
-      });
-
-      configBridge.subscribe('subtitle.style.primary.textColor', (newValue) => {
-        this.subtitleStyle.color = newValue;
-        this.log('主要字幕字體顏色已更新:', newValue);
-        this.applyStyles();
-      });
-
-      configBridge.subscribe('subtitle.style.primary.backgroundColor', (newValue) => {
-        this.subtitleStyle.backgroundColor = newValue;
-        this.log('主要字幕背景顏色已更新:', newValue);
-        this.applyStyles();
-      });
-
-      // 訂閱次要字幕樣式變更
-      configBridge.subscribe('subtitle.style.secondary.fontSize', (newValue) => {
-        this.log('次要字幕字體大小已更新:', newValue);
-        this.applyStyles();
-      });
-
-      configBridge.subscribe('subtitle.style.secondary.textColor', (newValue) => {
-        this.log('次要字幕字體顏色已更新:', newValue);
-        this.applyStyles();
-      });
-
-      configBridge.subscribe('subtitle.style.secondary.backgroundColor', (newValue) => {
-        this.log('次要字幕背景顏色已更新:', newValue);
-        this.applyStyles();
-      });
-
-      configBridge.subscribe('subtitle.style.fontFamily', (newValue) => {
-        this.subtitleStyle.fontFamily = newValue;
-        this.log('字體家族已更新:', newValue);
-        this.applyStyles();
+      // 字幕樣式由 SubtitleStyleManager 統一轉換後注入。
+      // 這裡只保留外觀模式，讓 nativeInherit 可以在渲染當下使用 subtitleData.style。
+      configBridge.subscribe('subtitle.style.mode', (newValue) => {
+        this.setStyleMode(newValue);
       });
 
       // 保存 ConfigBridge 實例供其他方法使用
@@ -449,37 +401,61 @@ class SubtitleDisplay {
       this.element.textContent = displayText;
     }
     
-    // 從 HTML 內容解析字體大小（保留原有邏輯）
-    if (subtitleData.htmlContent) {
-      const fontSizeMatch = subtitleData.htmlContent.match(/font-size:(\d+(\.\d+)?px)/i);
-      if (fontSizeMatch && fontSizeMatch[1]) {
-        this.subtitleStyle.fontSize = fontSizeMatch[1];
-      }
-    }
+    // 不再從 htmlContent 偷改字幕樣式。
+    // 原生樣式繼承只允許走 subtitleData.style + nativeInherit 模式，避免切換影片時被 Netflix HTML 副作用覆蓋。
   }
 
   // 應用字幕樣式（參考原有 applySubtitleStyle 實現）
   applySubtitleStyle() {
     if (!this.element) return;
+    const effectiveStyle = this.getEffectiveSubtitleStyle(this.currentSubtitle);
     
     Object.assign(this.element.style, {
-      fontSize: this.subtitleStyle.fontSize,
-      fontFamily: this.subtitleStyle.fontFamily,
-      fontWeight: this.subtitleStyle.fontWeight,
-      fontStyle: this.subtitleStyle.fontStyle,
-      color: this.subtitleStyle.color,
-      backgroundColor: this.subtitleStyle.backgroundColor,
-      textAlign: this.subtitleStyle.textAlign,
+      fontSize: effectiveStyle.fontSize,
+      fontFamily: effectiveStyle.fontFamily,
+      fontWeight: effectiveStyle.fontWeight,
+      fontStyle: effectiveStyle.fontStyle,
+      color: effectiveStyle.color,
+      backgroundColor: effectiveStyle.backgroundColor,
+      textAlign: effectiveStyle.textAlign,
       padding: '5px 0px',
-      borderRadius: this.subtitleStyle.borderRadius,
-      textShadow: this.subtitleStyle.textShadow,
-      border: this.subtitleStyle.border,
-      opacity: this.subtitleStyle.opacity,
-      maxWidth: this.subtitleStyle.maxWidth,
+      borderRadius: effectiveStyle.borderRadius,
+      textShadow: effectiveStyle.textShadow,
+      border: effectiveStyle.border,
+      opacity: effectiveStyle.opacity,
+      maxWidth: effectiveStyle.maxWidth,
       margin: '0 auto',
       display: 'inline-block',
       boxShadow: '0 0 0 2px rgba(0, 0, 0, 0.75)' // 模擬原生字幕效果
     });
+  }
+
+  getEffectiveSubtitleStyle(subtitleData) {
+    if (this.styleMode !== 'nativeInherit' || !subtitleData?.style) {
+      return this.subtitleStyle;
+    }
+
+    return {
+      ...this.subtitleStyle,
+      ...this.normalizeNativeStyle(subtitleData.style)
+    };
+  }
+
+  normalizeNativeStyle(nativeStyle) {
+    const normalized = {};
+
+    if (nativeStyle.fontSize) normalized.fontSize = nativeStyle.fontSize;
+    if (nativeStyle.fontFamily) normalized.fontFamily = nativeStyle.fontFamily;
+    if (nativeStyle.fontWeight) normalized.fontWeight = nativeStyle.fontWeight;
+    if (nativeStyle.fontStyle) normalized.fontStyle = nativeStyle.fontStyle;
+    if (nativeStyle.color) normalized.color = nativeStyle.color;
+    if (nativeStyle.backgroundColor && nativeStyle.backgroundColor !== 'rgba(0, 0, 0, 0)') {
+      normalized.backgroundColor = nativeStyle.backgroundColor;
+    }
+    if (nativeStyle.textAlign) normalized.textAlign = nativeStyle.textAlign;
+    if (nativeStyle.textShadow && nativeStyle.textShadow !== 'none') normalized.textShadow = nativeStyle.textShadow;
+
+    return normalized;
   }
 
   // 更新位置（修復偏移問題）
@@ -843,6 +819,19 @@ class SubtitleDisplay {
     // 如果當前有顯示的字幕，立即應用新樣式
     if (this.currentSubtitle) {
       this.applySubtitleStyle();
+    }
+  }
+
+  setStyleMode(mode) {
+    this.styleMode = mode || 'custom';
+    this.log('字幕外觀模式已更新:', this.styleMode);
+
+    if (this.currentSubtitle) {
+      if (this.isDualMode) {
+        this.applyDualModeStyles();
+      } else {
+        this.applySubtitleStyle();
+      }
     }
   }
 

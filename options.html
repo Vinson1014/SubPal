@@ -106,6 +106,25 @@
               </div>
             </div>
 
+            <!-- Appearance Mode Controls -->
+            <div class="setting-group style-section">
+              <label class="setting-label">字幕外觀</label>
+              <div class="style-grid">
+                <div class="style-control">
+                  <div class="control-header">
+                    <span>外觀模式</span>
+                  </div>
+                  <select id="subtitleStyleMode"></select>
+                </div>
+                <div class="style-control" id="fontPresetControl">
+                  <div class="control-header">
+                    <span>字體風格</span>
+                  </div>
+                  <select id="subtitleFontPreset"></select>
+                </div>
+              </div>
+            </div>
+
             <!-- Primary Style Controls -->
             <div class="setting-group style-section">
               <label class="setting-label">主要語言樣式</label>
@@ -116,6 +135,12 @@
                     <span class="control-value" id="primaryFontSizeValue">55</span><span class="control-unit">px</span>
                   </div>
                   <input type="range" id="primaryFontSize" min="12" max="100" value="55" step="1">
+                </div>
+                <div class="style-control">
+                  <div class="control-header">
+                    <span>字體粗細</span>
+                  </div>
+                  <select id="primaryFontWeight"></select>
                 </div>
                 <div class="style-control color-control">
                   <div class="control-header">
@@ -156,6 +181,12 @@
                   </div>
                   <input type="range" id="secondaryFontSize" min="12" max="100" value="24" step="1">
                 </div>
+                <div class="style-control">
+                  <div class="control-header">
+                    <span>字體粗細</span>
+                  </div>
+                  <select id="secondaryFontWeight"></select>
+                </div>
                 <div class="style-control color-control">
                   <div class="control-header">
                     <span>文字顏色</span>
@@ -186,7 +217,7 @@
 
             <!-- Live Preview -->
             <div class="setting-group preview-section">
-              <label class="setting-label">即時預覽</label>
+              <label class="setting-label">即時預覽（樣式僅供參考）</label>
               <div class="preview-container">
                 <div class="preview-bg"></div>
                 <div class="preview-content">

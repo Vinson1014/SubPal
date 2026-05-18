@@ -7,6 +7,9 @@
 
 import {
   SUPPORTED_LANGUAGES,
+  SUBTITLE_FONT_PRESETS,
+  SUBTITLE_FONT_WEIGHT_OPTIONS,
+  SUBTITLE_STYLE_MODES,
   getDefaultValues
 } from './content/system/config/config-schema.js';
 
@@ -14,6 +17,30 @@ import {
 
 // 從 config-schema.js 獲取預設值
 const DEFAULT_CONFIG = getDefaultValues();
+
+const PREVIEW_TEXT_BY_LANGUAGE = {
+  'zh-Hant': '這是一段字幕預覽',
+  'zh-Hans': '这是一段字幕预览',
+  en: 'This is a subtitle preview',
+  ja: 'これは字幕プレビューです',
+  ko: '자막 미리보기입니다',
+  es: 'Esta es una vista previa de subtítulos',
+  fr: 'Aperçu des sous-titres',
+  de: 'Dies ist eine Untertitelvorschau',
+  it: 'Anteprima dei sottotitoli',
+  pt: 'Esta é uma prévia da legenda',
+  ru: 'Это предварительный просмотр субтитров',
+  ar: 'هذه معاينة للترجمة',
+  th: 'นี่คือตัวอย่างคำบรรยาย',
+  vi: 'Đây là bản xem trước phụ đề',
+  id: 'Ini adalah pratinjau subtitle',
+  ms: 'Ini ialah pratonton sari kata',
+  hi: 'यह उपशीर्षक पूर्वावलोकन है',
+  tr: 'Bu bir altyazı önizlemesidir',
+  nl: 'Dit is een ondertitelvoorbeeld',
+  pl: 'To jest podgląd napisów',
+  sv: 'Det här är en förhandsvisning av undertexter'
+};
 
 /**
  * 從嵌套對象中獲取值（支援點記法）
@@ -206,9 +233,27 @@ async function restoreOptionsUI() {
       secondaryLanguageSelect.value = config['subtitle.secondaryLanguage'];
     }
 
+    // 字幕外觀模式
+    const styleModeSelect = document.getElementById('subtitleStyleMode');
+    const fontPresetSelect = document.getElementById('subtitleFontPreset');
+    const styleMode = SUBTITLE_STYLE_MODES.some(mode => mode.value === config['subtitle.style.mode'])
+      ? config['subtitle.style.mode']
+      : DEFAULT_CONFIG['subtitle.style.mode'];
+    if (styleModeSelect) {
+      styleModeSelect.value = styleMode;
+    }
+    if (fontPresetSelect) {
+      const fontPreset = SUBTITLE_FONT_PRESETS.some(preset => preset.value === config['subtitle.style.fontPreset'])
+        ? config['subtitle.style.fontPreset']
+        : DEFAULT_CONFIG['subtitle.style.fontPreset'];
+      fontPresetSelect.value = fontPreset;
+    }
+    updateStyleModeUI(styleMode);
+
     // 主要字幕樣式
     updateStyleControls('primary', {
       fontSize: config['subtitle.style.primary.fontSize'],
+      fontWeight: config['subtitle.style.primary.fontWeight'],
       textColor: config['subtitle.style.primary.textColor'],
       backgroundColor: config['subtitle.style.primary.backgroundColor']
     });
@@ -216,6 +261,7 @@ async function restoreOptionsUI() {
     // 次要字幕樣式
     updateStyleControls('secondary', {
       fontSize: config['subtitle.style.secondary.fontSize'],
+      fontWeight: config['subtitle.style.secondary.fontWeight'],
       textColor: config['subtitle.style.secondary.textColor'],
       backgroundColor: config['subtitle.style.secondary.backgroundColor']
     });
@@ -235,6 +281,7 @@ async function restoreOptionsUI() {
 function updateStyleControls(type, styleConfig) {
   const fontSizeSlider = document.getElementById(`${type}FontSize`);
   const fontSizeValue = document.getElementById(`${type}FontSizeValue`);
+  const fontWeightSelect = document.getElementById(`${type}FontWeight`);
   const textColorPicker = document.getElementById(`${type}TextColor`);
   const textColorHex = document.getElementById(`${type}TextColorHex`);
   const backgroundColorPicker = document.getElementById(`${type}BackgroundColor`);
@@ -245,6 +292,10 @@ function updateStyleControls(type, styleConfig) {
   if (fontSizeSlider && fontSizeValue) {
     fontSizeSlider.value = styleConfig.fontSize;
     fontSizeValue.textContent = styleConfig.fontSize;
+  }
+
+  if (fontWeightSelect) {
+    fontWeightSelect.value = styleConfig.fontWeight;
   }
 
   if (textColorPicker) {
@@ -286,6 +337,29 @@ function updateSubtitleModeUI(isDualMode) {
 }
 
 /**
+ * 更新字幕外觀模式 UI
+ */
+function updateStyleModeUI(styleMode) {
+  const isCustom = styleMode === 'custom';
+  const fontPresetControl = document.getElementById('fontPresetControl');
+  const styleControls = document.querySelectorAll(
+    '#primaryFontWeight, #secondaryFontWeight'
+  );
+
+  if (fontPresetControl) {
+    fontPresetControl.style.display = isCustom ? 'flex' : 'none';
+  }
+
+  styleControls.forEach(control => {
+    control.disabled = !isCustom;
+    const wrapper = control.closest('.style-control');
+    if (wrapper) {
+      wrapper.classList.toggle('is-disabled', !isCustom);
+    }
+  });
+}
+
+/**
  * 更新預覽
  */
 async function updatePreview(config = null) {
@@ -297,20 +371,42 @@ async function updatePreview(config = null) {
   const secondaryPreview = document.getElementById('secondaryPreview');
 
   if (primaryPreview) {
+    primaryPreview.textContent = getPreviewText(config['subtitle.primaryLanguage'], 'primary');
     applyPreviewStyles(primaryPreview, {
+      styleMode: config['subtitle.style.mode'],
+      fontFamily: config['subtitle.style.fontFamily'],
       fontSize: config['subtitle.style.primary.fontSize'],
+      fontWeight: config['subtitle.style.primary.fontWeight'],
       textColor: config['subtitle.style.primary.textColor'],
-      backgroundColor: config['subtitle.style.primary.backgroundColor']
+      backgroundColor: config['subtitle.style.primary.backgroundColor'],
+      netflixPreset: getNetflixPresetConfig(config)
     });
   }
 
   if (secondaryPreview && config['subtitle.dualModeEnabled']) {
+    secondaryPreview.textContent = getPreviewText(config['subtitle.secondaryLanguage'], 'secondary');
     applyPreviewStyles(secondaryPreview, {
+      styleMode: config['subtitle.style.mode'],
+      fontFamily: config['subtitle.style.fontFamily'],
       fontSize: config['subtitle.style.secondary.fontSize'],
+      fontWeight: config['subtitle.style.secondary.fontWeight'],
       textColor: config['subtitle.style.secondary.textColor'],
-      backgroundColor: config['subtitle.style.secondary.backgroundColor']
+      backgroundColor: config['subtitle.style.secondary.backgroundColor'],
+      netflixPreset: getNetflixPresetConfig(config)
     });
   }
+}
+
+function getPreviewText(languageCode, type) {
+  if (PREVIEW_TEXT_BY_LANGUAGE[languageCode]) {
+    return PREVIEW_TEXT_BY_LANGUAGE[languageCode];
+  }
+
+  const language = SUPPORTED_LANGUAGES.find(lang => lang.code === languageCode);
+  const languageName = language ? language.name : languageCode;
+  return type === 'secondary'
+    ? `${languageName} subtitle preview`
+    : `${languageName} 字幕預覽`;
 }
 
 /**
@@ -319,19 +415,49 @@ async function updatePreview(config = null) {
 function applyPreviewStyles(element, styleConfig) {
   if (!element || !styleConfig) return;
 
+  const effectiveStyle = getEffectivePreviewStyle(styleConfig);
+
   Object.assign(element.style, {
-    fontSize: `${styleConfig.fontSize}px`,
-    color: styleConfig.textColor,
-    backgroundColor: styleConfig.backgroundColor,
-    fontFamily: 'Arial, sans-serif',
+    fontSize: `${effectiveStyle.fontSize}px`,
+    color: effectiveStyle.textColor,
+    backgroundColor: effectiveStyle.backgroundColor,
+    fontFamily: effectiveStyle.fontFamily,
+    fontWeight: effectiveStyle.fontWeight,
     textAlign: 'center',
     borderRadius: '4px',
-    textShadow: '1px 1px 1px rgba(0, 0, 0, 0.5)',
+    textShadow: effectiveStyle.textShadow,
     padding: '8px 16px',
     display: 'inline-block',
     minWidth: '120px',
     margin: '2px 5px'
   });
+}
+
+function getNetflixPresetConfig(config) {
+  return {
+    fontFamily: config['subtitle.style.netflixPreset.fontFamily'],
+    fontWeight: config['subtitle.style.netflixPreset.fontWeight'],
+    textColor: config['subtitle.style.netflixPreset.textColor'],
+    backgroundColor: config['subtitle.style.netflixPreset.backgroundColor'],
+    textShadow: config['subtitle.style.netflixPreset.textShadow']
+  };
+}
+
+function getEffectivePreviewStyle(styleConfig) {
+  if (styleConfig.styleMode === 'netflixPreset' || styleConfig.styleMode === 'nativeInherit') {
+    return {
+      ...styleConfig,
+      fontFamily: styleConfig.netflixPreset.fontFamily,
+      fontWeight: styleConfig.netflixPreset.fontWeight,
+      textShadow: styleConfig.netflixPreset.textShadow
+    };
+  }
+
+  return {
+    ...styleConfig,
+    fontFamily: styleConfig.fontFamily,
+    textShadow: '1px 1px 1px rgba(0, 0, 0, 0.5)'
+  };
 }
 
 /**
@@ -356,6 +482,35 @@ function populateLanguageSelects() {
   }
 
   console.log(`[Options] 已載入 ${SUPPORTED_LANGUAGES.length} 種語言選項`);
+}
+
+function populateSubtitleStyleSelects() {
+  const styleModeSelect = document.getElementById('subtitleStyleMode');
+  const fontPresetSelect = document.getElementById('subtitleFontPreset');
+  const primaryFontWeightSelect = document.getElementById('primaryFontWeight');
+  const secondaryFontWeightSelect = document.getElementById('secondaryFontWeight');
+
+  if (styleModeSelect) {
+    styleModeSelect.innerHTML = '';
+    for (const mode of SUBTITLE_STYLE_MODES) {
+      styleModeSelect.add(new Option(mode.label, mode.value));
+    }
+  }
+
+  if (fontPresetSelect) {
+    fontPresetSelect.innerHTML = '';
+    for (const preset of SUBTITLE_FONT_PRESETS) {
+      fontPresetSelect.add(new Option(preset.label, preset.value));
+    }
+  }
+
+  for (const select of [primaryFontWeightSelect, secondaryFontWeightSelect]) {
+    if (!select) continue;
+    select.innerHTML = '';
+    for (const weight of SUBTITLE_FONT_WEIGHT_OPTIONS) {
+      select.add(new Option(weight.label, weight.value));
+    }
+  }
 }
 
 // ==================== Tab 切換邏輯 ====================
@@ -439,12 +594,37 @@ function setupEventListeners() {
   if (primaryLanguageSelect) {
     primaryLanguageSelect.addEventListener('change', async (e) => {
       await saveConfig('subtitle.primaryLanguage', e.target.value);
+      await updatePreview();
     });
   }
 
   if (secondaryLanguageSelect) {
     secondaryLanguageSelect.addEventListener('change', async (e) => {
       await saveConfig('subtitle.secondaryLanguage', e.target.value);
+      await updatePreview();
+    });
+  }
+
+  const styleModeSelect = document.getElementById('subtitleStyleMode');
+  if (styleModeSelect) {
+    styleModeSelect.addEventListener('change', async (e) => {
+      await saveConfig('subtitle.style.mode', e.target.value);
+      updateStyleModeUI(e.target.value);
+      await updatePreview();
+    });
+  }
+
+  const fontPresetSelect = document.getElementById('subtitleFontPreset');
+  if (fontPresetSelect) {
+    fontPresetSelect.addEventListener('change', async (e) => {
+      const preset = SUBTITLE_FONT_PRESETS.find(item => item.value === e.target.value);
+      if (!preset) return;
+
+      await saveConfigMultiple({
+        'subtitle.style.fontPreset': preset.value,
+        'subtitle.style.fontFamily': preset.fontFamily
+      });
+      await updatePreview();
     });
   }
 
@@ -507,6 +687,7 @@ function setupEventListeners() {
 function setupStyleControlListeners(type, keyPrefix) {
   const fontSizeSlider = document.getElementById(`${type}FontSize`);
   const fontSizeValue = document.getElementById(`${type}FontSizeValue`);
+  const fontWeightSelect = document.getElementById(`${type}FontWeight`);
   const textColorPicker = document.getElementById(`${type}TextColor`);
   const textColorHex = document.getElementById(`${type}TextColorHex`);
   const backgroundColorPicker = document.getElementById(`${type}BackgroundColor`);
@@ -525,6 +706,16 @@ function setupStyleControlListeners(type, keyPrefix) {
       }
       // 異步保存配置
       await saveConfig(`${keyPrefix}.fontSize`, size);
+    });
+  }
+
+  if (fontWeightSelect) {
+    fontWeightSelect.addEventListener('change', async (e) => {
+      if (preview) {
+        preview.style.fontWeight = e.target.value;
+      }
+      await saveConfig(`${keyPrefix}.fontWeight`, e.target.value);
+      await updatePreview();
     });
   }
 
@@ -746,10 +937,15 @@ async function resetStyles() {
     'subtitle.dualModeEnabled': DEFAULT_CONFIG['subtitle.dualModeEnabled'],
     'subtitle.primaryLanguage': DEFAULT_CONFIG['subtitle.primaryLanguage'],
     'subtitle.secondaryLanguage': DEFAULT_CONFIG['subtitle.secondaryLanguage'],
+    'subtitle.style.mode': DEFAULT_CONFIG['subtitle.style.mode'],
+    'subtitle.style.fontPreset': DEFAULT_CONFIG['subtitle.style.fontPreset'],
+    'subtitle.style.fontFamily': DEFAULT_CONFIG['subtitle.style.fontFamily'],
     'subtitle.style.primary.fontSize': DEFAULT_CONFIG['subtitle.style.primary.fontSize'],
+    'subtitle.style.primary.fontWeight': DEFAULT_CONFIG['subtitle.style.primary.fontWeight'],
     'subtitle.style.primary.textColor': DEFAULT_CONFIG['subtitle.style.primary.textColor'],
     'subtitle.style.primary.backgroundColor': DEFAULT_CONFIG['subtitle.style.primary.backgroundColor'],
     'subtitle.style.secondary.fontSize': DEFAULT_CONFIG['subtitle.style.secondary.fontSize'],
+    'subtitle.style.secondary.fontWeight': DEFAULT_CONFIG['subtitle.style.secondary.fontWeight'],
     'subtitle.style.secondary.textColor': DEFAULT_CONFIG['subtitle.style.secondary.textColor'],
     'subtitle.style.secondary.backgroundColor': DEFAULT_CONFIG['subtitle.style.secondary.backgroundColor']
   };
@@ -900,6 +1096,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 動態生成語言選項
   populateLanguageSelects();
+
+  // 動態生成字幕外觀選項
+  populateSubtitleStyleSelects();
 
   // 設置事件監聯器
   setupEventListeners();

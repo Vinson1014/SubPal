@@ -246,9 +246,12 @@ class DOMMonitor {
       const subtitleStyle = {
         fontSize: style.fontSize,
         fontFamily: style.fontFamily,
+        fontWeight: style.fontWeight,
+        fontStyle: style.fontStyle,
         color: style.color,
         backgroundColor: style.backgroundColor,
-        textAlign: style.textAlign
+        textAlign: style.textAlign,
+        textShadow: style.textShadow
       };
 
       this.log('DOM 字幕偵測:', text);

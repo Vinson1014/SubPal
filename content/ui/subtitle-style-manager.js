@@ -17,16 +17,28 @@ class SubtitleStyleManager {
 
     // 當前樣式配置（從 ConfigBridge 讀取）
     this.currentConfig = {
+      styleMode: 'custom',
+      fontPreset: 'clearSans',
+      fontFamily: 'Arial, sans-serif',
       mode: 'single',
       primary: {
         fontSize: 55,
+        fontWeight: '700',
         textColor: '#ffffff',
         backgroundColor: 'rgba(0, 0, 0, 0.75)'
       },
       secondary: {
         fontSize: 24,
+        fontWeight: '500',
         textColor: '#ffff00',
         backgroundColor: 'rgba(0, 0, 0, 0.75)'
+      },
+      netflixPreset: {
+        fontFamily: 'Arial, Helvetica, sans-serif',
+        fontWeight: '700',
+        textColor: '#ffffff',
+        backgroundColor: 'rgba(0, 0, 0, 0.75)',
+        textShadow: '0 0 2px rgba(0, 0, 0, 0.9)'
       }
     };
 
@@ -57,13 +69,23 @@ class SubtitleStyleManager {
       // 初始化 ConfigBridge 並讀取配置
       const { configBridge } = await import('../system/config/config-bridge.js');
 
-      // 讀取所有樣式配置
+      // 讀取所有樣式配置。ConfigBridge 的預設值來自 config-schema，這裡只負責轉成 render style。
+      this.currentConfig.styleMode = configBridge.get('subtitle.style.mode');
+      this.currentConfig.fontPreset = configBridge.get('subtitle.style.fontPreset');
+      this.currentConfig.fontFamily = configBridge.get('subtitle.style.fontFamily');
       this.currentConfig.primary.fontSize = configBridge.get('subtitle.style.primary.fontSize');
+      this.currentConfig.primary.fontWeight = configBridge.get('subtitle.style.primary.fontWeight');
       this.currentConfig.primary.textColor = configBridge.get('subtitle.style.primary.textColor');
       this.currentConfig.primary.backgroundColor = configBridge.get('subtitle.style.primary.backgroundColor');
       this.currentConfig.secondary.fontSize = configBridge.get('subtitle.style.secondary.fontSize');
+      this.currentConfig.secondary.fontWeight = configBridge.get('subtitle.style.secondary.fontWeight');
       this.currentConfig.secondary.textColor = configBridge.get('subtitle.style.secondary.textColor');
       this.currentConfig.secondary.backgroundColor = configBridge.get('subtitle.style.secondary.backgroundColor');
+      this.currentConfig.netflixPreset.fontFamily = configBridge.get('subtitle.style.netflixPreset.fontFamily');
+      this.currentConfig.netflixPreset.fontWeight = configBridge.get('subtitle.style.netflixPreset.fontWeight');
+      this.currentConfig.netflixPreset.textColor = configBridge.get('subtitle.style.netflixPreset.textColor');
+      this.currentConfig.netflixPreset.backgroundColor = configBridge.get('subtitle.style.netflixPreset.backgroundColor');
+      this.currentConfig.netflixPreset.textShadow = configBridge.get('subtitle.style.netflixPreset.textShadow');
       this.currentConfig.mode = configBridge.get('subtitle.dualModeEnabled') ? 'dual' : 'single';
 
       this.debug = configBridge.get('debugMode');
@@ -72,12 +94,22 @@ class SubtitleStyleManager {
 
       // 訂閱配置變更
       const styleKeys = [
+        'subtitle.style.mode',
+        'subtitle.style.fontPreset',
+        'subtitle.style.fontFamily',
         'subtitle.style.primary.fontSize',
+        'subtitle.style.primary.fontWeight',
         'subtitle.style.primary.textColor',
         'subtitle.style.primary.backgroundColor',
         'subtitle.style.secondary.fontSize',
+        'subtitle.style.secondary.fontWeight',
         'subtitle.style.secondary.textColor',
         'subtitle.style.secondary.backgroundColor',
+        'subtitle.style.netflixPreset.fontFamily',
+        'subtitle.style.netflixPreset.fontWeight',
+        'subtitle.style.netflixPreset.textColor',
+        'subtitle.style.netflixPreset.backgroundColor',
+        'subtitle.style.netflixPreset.textShadow',
         'subtitle.dualModeEnabled',
         'debugMode'
       ];
@@ -113,12 +145,22 @@ class SubtitleStyleManager {
 
     // 映射配置鍵到 currentConfig
     const keyMap = {
+      'subtitle.style.mode': ['styleMode'],
+      'subtitle.style.fontPreset': ['fontPreset'],
+      'subtitle.style.fontFamily': ['fontFamily'],
       'subtitle.style.primary.fontSize': ['primary', 'fontSize'],
+      'subtitle.style.primary.fontWeight': ['primary', 'fontWeight'],
       'subtitle.style.primary.textColor': ['primary', 'textColor'],
       'subtitle.style.primary.backgroundColor': ['primary', 'backgroundColor'],
       'subtitle.style.secondary.fontSize': ['secondary', 'fontSize'],
+      'subtitle.style.secondary.fontWeight': ['secondary', 'fontWeight'],
       'subtitle.style.secondary.textColor': ['secondary', 'textColor'],
       'subtitle.style.secondary.backgroundColor': ['secondary', 'backgroundColor'],
+      'subtitle.style.netflixPreset.fontFamily': ['netflixPreset', 'fontFamily'],
+      'subtitle.style.netflixPreset.fontWeight': ['netflixPreset', 'fontWeight'],
+      'subtitle.style.netflixPreset.textColor': ['netflixPreset', 'textColor'],
+      'subtitle.style.netflixPreset.backgroundColor': ['netflixPreset', 'backgroundColor'],
+      'subtitle.style.netflixPreset.textShadow': ['netflixPreset', 'textShadow'],
       'subtitle.dualModeEnabled': ['mode'],
       'debugMode': ['debug']
     };
@@ -130,6 +172,8 @@ class SubtitleStyleManager {
       this.currentConfig.mode = newValue ? 'dual' : 'single';
     } else if (path[0] === 'debug') {
       this.debug = newValue;
+    } else if (path.length === 1) {
+      this.currentConfig[path[0]] = newValue;
     } else {
       this.currentConfig[path[0]][path[1]] = newValue;
     }
@@ -176,6 +220,10 @@ class SubtitleStyleManager {
     if (this.uiManager.setSubtitleStyle) {
       this.uiManager.setSubtitleStyle(legacyStyle);
     }
+
+    if (this.uiManager.subtitleDisplay?.setStyleMode) {
+      this.uiManager.subtitleDisplay.setStyleMode(this.currentConfig.styleMode);
+    }
   }
 
   /**
@@ -190,6 +238,9 @@ class SubtitleStyleManager {
       };
       
       this.uiManager.subtitleDisplay.setDualModeStyles(styles);
+      if (this.uiManager.subtitleDisplay.setStyleMode) {
+        this.uiManager.subtitleDisplay.setStyleMode(this.currentConfig.styleMode);
+      }
     } else {
       // 降級處理：使用主要語言樣式
       this.log('SubtitleDisplay 不支持雙語樣式，使用主要語言樣式');
@@ -203,16 +254,46 @@ class SubtitleStyleManager {
    * @returns {Object} 轉換後的舊格式樣式
    */
   configToLegacyStyle(styleConfig) {
+    const effectiveStyle = this.getEffectiveBaseStyle(styleConfig);
+
     return {
-      fontSize: `${styleConfig.fontSize}px`,
-      color: styleConfig.textColor,
-      backgroundColor: styleConfig.backgroundColor,
-      // 固定屬性
-      fontFamily: 'Arial, sans-serif',
+      fontSize: `${effectiveStyle.fontSize}px`,
+      color: effectiveStyle.textColor,
+      backgroundColor: effectiveStyle.backgroundColor,
+      fontFamily: effectiveStyle.fontFamily,
+      fontWeight: effectiveStyle.fontWeight,
       textAlign: 'center',
       borderRadius: '4px',
-      textShadow: '1px 1px 1px rgba(0, 0, 0, 0.5)',
+      textShadow: effectiveStyle.textShadow,
       padding: '5px 10px'
+    };
+  }
+
+  /**
+   * 根據外觀模式決定實際要套用的基礎樣式。
+   * nativeInherit 會先使用 Netflix preset，若字幕資料帶有原生 computed style，
+   * SubtitleDisplay 會在渲染當下覆蓋可繼承欄位。
+   */
+  getEffectiveBaseStyle(styleConfig) {
+    if (this.currentConfig.styleMode === 'netflixPreset' ||
+        this.currentConfig.styleMode === 'nativeInherit') {
+      return {
+        fontSize: styleConfig.fontSize,
+        fontFamily: this.currentConfig.netflixPreset.fontFamily,
+        fontWeight: this.currentConfig.netflixPreset.fontWeight,
+        textColor: styleConfig.textColor,
+        backgroundColor: styleConfig.backgroundColor,
+        textShadow: this.currentConfig.netflixPreset.textShadow
+      };
+    }
+
+    return {
+      fontSize: styleConfig.fontSize,
+      fontFamily: this.currentConfig.fontFamily,
+      fontWeight: styleConfig.fontWeight,
+      textColor: styleConfig.textColor,
+      backgroundColor: styleConfig.backgroundColor,
+      textShadow: '1px 1px 1px rgba(0, 0, 0, 0.5)'
     };
   }
 
@@ -236,7 +317,8 @@ class SubtitleStyleManager {
       padding: '8px 16px',
       borderRadius: '4px',
       textAlign: 'center',
-      fontFamily: 'Arial, sans-serif',
+      fontFamily: config.fontFamily || 'Arial, sans-serif',
+      fontWeight: styleConfig.fontWeight || '400',
       textShadow: '1px 1px 1px rgba(0, 0, 0, 0.5)',
       minWidth: '100px',
       margin: '5px'
@@ -378,7 +460,6 @@ class SubtitleStyleManager {
     
     this.isInitialized = false;
     this.uiManager = null;
-    this.currentConfig = { ...DEFAULT_SUBTITLE_STYLE_CONFIG };
     
     this.log('字幕樣式管理器資源清理完成');
   }

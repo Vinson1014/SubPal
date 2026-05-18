@@ -58,6 +58,60 @@ export function getLanguageName(languageCode) {
 }
 
 /**
+ * 字幕外觀模式
+ * custom: 使用 SubPal 自訂樣式
+ * netflixPreset: 使用穩定的 Netflix 原生風格預設
+ */
+export const SUBTITLE_STYLE_MODES = [
+  { value: 'custom', label: '自訂' },
+  { value: 'netflixPreset', label: 'Netflix 原生風格' }
+];
+
+/**
+ * 字幕字體風格預設
+ * UI 顯示簡單名稱，實際渲染使用跨平台 fallback stack。
+ */
+export const SUBTITLE_FONT_PRESETS = [
+  {
+    value: 'system',
+    label: '系統預設',
+    fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", Arial, sans-serif'
+  },
+  {
+    value: 'clearSans',
+    label: '清晰黑體',
+    fontFamily: '"Microsoft JhengHei", "PingFang TC", "Noto Sans TC", "Noto Sans CJK TC", Arial, sans-serif'
+  },
+  {
+    value: 'serif',
+    label: '襯線字體',
+    fontFamily: 'Georgia, "Times New Roman", "Noto Serif TC", "PMingLiU", "Songti TC", serif'
+  },
+  {
+    value: 'code',
+    label: '方正字體',
+    fontFamily: 'Consolas, "Courier New", "SF Mono", "Liberation Mono", Menlo, "Noto Sans Mono CJK TC", monospace'
+  }
+];
+
+export const SUBTITLE_FONT_WEIGHT_OPTIONS = [
+  { value: '400', label: '一般' },
+  { value: '700', label: '粗體' }
+];
+
+export function isSubtitleStyleModeSupported(value) {
+  return SUBTITLE_STYLE_MODES.some(mode => mode.value === value);
+}
+
+export function isSubtitleFontPresetSupported(value) {
+  return SUBTITLE_FONT_PRESETS.some(preset => preset.value === value);
+}
+
+export function isSubtitleFontWeightSupported(value) {
+  return SUBTITLE_FONT_WEIGHT_OPTIONS.some(weight => weight.value === value);
+}
+
+/**
  * 配置 Schema 定義
  *
  * 每個配置項包含：
@@ -145,6 +199,21 @@ export const CONFIG_SCHEMA = {
      */
     style: {
       /**
+       * 字幕外觀模式
+       */
+      mode: {
+        type: 'string',
+        default: 'custom',
+        description: '字幕外觀模式',
+        category: 'subtitle-style',
+        validation: (value) => {
+          if (typeof value !== 'string') return false;
+          return isSubtitleStyleModeSupported(value);
+        },
+        validationError: '不支持的字幕外觀模式'
+      },
+
+      /**
        * 主要語言字幕樣式
        */
       primary: {
@@ -191,6 +260,21 @@ export const CONFIG_SCHEMA = {
             return /^rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*(,\s*[\d.]+\s*)?\)$/.test(value);
           },
           validationError: '背景顏色必須為 rgb 或 rgba 格式'
+        },
+
+        /**
+         * 主要字幕字重
+         */
+        fontWeight: {
+          type: 'string',
+          default: '700',
+          description: '主要字幕字重',
+          category: 'subtitle-style',
+          validation: (value) => {
+            if (typeof value !== 'string') return false;
+            return isSubtitleFontWeightSupported(value);
+          },
+          validationError: '不支持的字幕字重'
         }
       },
 
@@ -241,27 +325,93 @@ export const CONFIG_SCHEMA = {
             return /^rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*(,\s*[\d.]+\s*)?\)$/.test(value);
           },
           validationError: '背景顏色必須為 rgb 或 rgba 格式'
+        },
+
+        /**
+         * 次要字幕字重
+         */
+        fontWeight: {
+          type: 'string',
+          default: '500',
+          description: '次要字幕字重',
+          category: 'subtitle-style',
+          validation: (value) => {
+            if (typeof value !== 'string') return false;
+            return isSubtitleFontWeightSupported(value);
+          },
+          validationError: '不支持的字幕字重'
         }
       },
 
       /**
-       * 字體家族
-       * 預留式設計：暫不開放編輯，但在 schema 中定義以便未來擴展
+       * 字體風格預設
+       */
+      fontPreset: {
+        type: 'string',
+        default: 'clearSans',
+        description: '字幕字體風格',
+        category: 'subtitle-style',
+        validation: (value) => {
+          if (typeof value !== 'string') return false;
+          return isSubtitleFontPresetSupported(value);
+        },
+        validationError: '不支持的字幕字體風格'
+      },
+
+      /**
+       * 實際用於渲染的 CSS font-family fallback stack
        */
       fontFamily: {
         type: 'string',
-        default: 'Arial, sans-serif',
+        default: 'Arial, Helvetica, "Microsoft JhengHei", "PingFang TC", sans-serif',
         description: '字體家族',
         category: 'subtitle-style',
-        editable: false,  // 當前不開放編輯
-        _future: {
-          // 預留未來擴展
-          editable: true,
-          options: [
-            { value: 'Arial, sans-serif', label: 'Arial' },
-            { value: 'Microsoft JhengHei, 微軟正黑體, sans-serif', label: '微軟正黑體' },
-            { value: 'Noto Sans TC, 思源黑體, sans-serif', label: '思源黑體' }
-          ]
+        validation: (value) => {
+          if (typeof value !== 'string') return false;
+          return value.trim().length > 0 && value.length <= 300;
+        },
+        validationError: '字體家族必須為非空字串'
+      },
+
+      /**
+       * Netflix 原生風格預設
+       * 不開放 UI 編輯，用於 netflixPreset/nativeInherit fallback。
+       */
+      netflixPreset: {
+        fontFamily: {
+          type: 'string',
+          default: 'Arial, Helvetica, sans-serif',
+          description: 'Netflix 原生風格字體',
+          category: 'subtitle-style',
+          editable: false
+        },
+        fontWeight: {
+          type: 'string',
+          default: '700',
+          description: 'Netflix 原生風格字重',
+          category: 'subtitle-style',
+          editable: false
+        },
+        textColor: {
+          type: 'string',
+          default: '#ffffff',
+          description: 'Netflix 原生風格文字顏色',
+          category: 'subtitle-style',
+          editable: false
+        },
+        backgroundColor: {
+          type: 'string',
+          default: 'rgba(0, 0, 0, 0.75)',
+          description: 'Netflix 原生風格背景顏色',
+          category: 'subtitle-style',
+          editable: false
+        },
+        textShadow: {
+          type: 'string',
+          default: '0 0 2px rgba(0, 0, 0, 0.9)',
+          description: 'Netflix 原生風格文字陰影',
+          category: 'subtitle-style',
+          editable: false
         }
       }
     }
