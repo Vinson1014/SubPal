@@ -605,31 +605,86 @@ class SubtitleInterceptor {
   }
 
   /**
+   * 同一語言可能同時存在 Netflix 預載/短片段/完整影片 TTML。
+   * 優先選目前時間能命中的資料，避免第一筆短片段 cache 讓字幕被誤判為空。
+   */
+  selectBestLanguageCacheEntry(languageCode) {
+    const currentTime = getCurrentTimestamp();
+    const candidates = [];
+
+    for (const [cacheKey, data] of this.interceptedSubtitles.entries()) {
+      const keyLang = cacheKey.split('_')[0];
+      if (!this.matchesLanguage(keyLang, languageCode) || !this.isSubtitleEntryCurrent(cacheKey, data)) {
+        continue;
+      }
+
+      const subtitles = Array.isArray(data?.subtitles) ? data.subtitles : [];
+      let subtitleAtCurrentTime = null;
+      if (typeof currentTime === 'number' && Number.isFinite(currentTime)) {
+        try {
+          subtitleAtCurrentTime = data.timeIndex ?
+            findSubtitleByTimeIndex(data.timeIndex, currentTime) :
+            findSubtitleByTime(subtitles, currentTime);
+        } catch (error) {
+          this.log(`評估 ${cacheKey} 當前時間字幕失敗:`, error);
+        }
+      }
+
+      candidates.push({
+        cacheKey,
+        data,
+        hasCurrentSubtitle: !!subtitleAtCurrentTime,
+        subtitleCount: subtitles.length,
+        requestTime: data?.requestInfo?.requestTime || data?.timestamp || 0
+      });
+    }
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    candidates.sort((a, b) => {
+      if (a.hasCurrentSubtitle !== b.hasCurrentSubtitle) {
+        return a.hasCurrentSubtitle ? -1 : 1;
+      }
+      if (a.subtitleCount !== b.subtitleCount) {
+        return b.subtitleCount - a.subtitleCount;
+      }
+      return b.requestTime - a.requestTime;
+    });
+
+    const selected = candidates[0];
+    this.recordDebugEvent('LANGUAGE_CACHE_SELECTED', {
+      languageCode,
+      selectedCacheKey: selected.cacheKey,
+      currentTime,
+      candidates: candidates.map(candidate => ({
+        cacheKey: candidate.cacheKey,
+        hasCurrentSubtitle: candidate.hasCurrentSubtitle,
+        subtitleCount: candidate.subtitleCount,
+        requestTime: candidate.requestTime
+      })).slice(0, 10)
+    });
+
+    return selected;
+  }
+
+  /**
    * 從緩存載入語言數據（不觸發語言切換）
    */
   async loadLanguageDataFromCache(languageCode, type) {
     try {
       this.log(`從緩存載入 ${languageCode} (${type}) 字幕數據...`);
-      
-      // 查找匹配的緩存數據（支援 base-code fallback，如 "zh" 匹配 "zh-Hant"）
-      let matchedKey = null;
-      for (const [cacheKey] of this.interceptedSubtitles.entries()) {
-        const keyLanguageCode = cacheKey.split('_')[0];
-        const languageData = this.interceptedSubtitles.get(cacheKey);
-        if (keyLanguageCode &&
-            this.matchesLanguage(keyLanguageCode, languageCode) &&
-            this.isSubtitleEntryCurrent(cacheKey, languageData)) {
-          matchedKey = cacheKey;
-          break;
-        }
-      }
+
+      const selectedEntry = this.selectBestLanguageCacheEntry(languageCode);
+      const matchedKey = selectedEntry?.cacheKey || null;
       
       if (!matchedKey) {
         this.log(`未找到 ${languageCode} 的緩存數據，可用鍵:`, Array.from(this.interceptedSubtitles.keys()));
         return;
       }
       
-      const languageData = this.interceptedSubtitles.get(matchedKey);
+      const languageData = selectedEntry.data;
       if (!languageData || !languageData.subtitles) {
         this.log(`${languageCode} 緩存數據無效`);
         return;
@@ -789,22 +844,12 @@ class SubtitleInterceptor {
       // 步驟4: 檢查本地已解析的字幕緩存
       this.log(`檢查 ${languageCode} 的本地緩存...`);
 
-      // 查找所有匹配語言代碼的數據（支援 base-code fallback）
-      const matchingEntries = [];
-      for (const [cacheKey, data] of this.interceptedSubtitles.entries()) {
-        const keyLang = cacheKey.split('_')[0];
-        if (this.matchesLanguage(keyLang, languageCode) && this.isSubtitleEntryCurrent(cacheKey, data)) {
-          matchingEntries.push({ cacheKey, data });
-        }
-      }
-
-      if (matchingEntries.length === 0) {
+      const selectedEntry = this.selectBestLanguageCacheEntry(languageCode);
+      if (!selectedEntry) {
         this.log(`未找到 ${languageCode} 的字幕數據，可用鍵:`, Array.from(this.interceptedSubtitles.keys()));
         return;
       }
 
-      // 使用第一個匹配的字幕數據
-      const selectedEntry = matchingEntries[0];
       const matchedKey = selectedEntry.cacheKey;
       const languageData = selectedEntry.data;
 
@@ -1176,6 +1221,10 @@ class SubtitleInterceptor {
     };
   }
 
+  isWatchSession(sessionId) {
+    return typeof sessionId === 'string' && sessionId.startsWith('watch-');
+  }
+
   /**
    * 依 PlaybackContext 與 request-time evidence 判斷字幕是否可進入 content 端處理流程。
    */
@@ -1186,6 +1235,13 @@ class SubtitleInterceptor {
     const derived = requestInfo?.derivedSubtitleVideo || null;
     const derivedVideoId = derived?.videoId ? String(derived.videoId) : null;
     const parsedVideoId = parsedKey?.videoId ? String(parsedKey.videoId) : null;
+    const requestSessionId = requestInfo?.sessionIdAtRequest ||
+      requestInfo?.playbackSnapshot?.sessionId ||
+      null;
+    const contextSessionId = context.sessionId || null;
+    const requestTrack = requestInfo?.currentTrackAtRequest ||
+      requestInfo?.playbackSnapshot?.currentTrack ||
+      null;
 
     const baseResult = {
       accepted: false,
@@ -1197,7 +1253,21 @@ class SubtitleInterceptor {
       contextState: context.state,
       evidenceVideoId: derivedVideoId,
       evidenceConfidence: derived?.confidence || null,
-      evidenceReason: derived?.reason || null
+      evidenceReason: derived?.reason || null,
+      requestSessionId,
+      contextSessionId,
+      requestTrack: requestTrack ? {
+        code: requestTrack.code || null,
+        trackId: requestTrack.trackId || null,
+        trackType: requestTrack.trackType || null,
+        rawTrackType: requestTrack.rawTrackType || null
+      } : null,
+      contextTrack: context.currentTrack ? {
+        code: context.currentTrack.code || null,
+        trackId: context.currentTrack.trackId || null,
+        trackType: context.currentTrack.trackType || null,
+        rawTrackType: context.currentTrack.rawTrackType || null
+      } : null
     };
 
     if (!parsedKey) {
@@ -1210,6 +1280,20 @@ class SubtitleInterceptor {
 
     if (context.state === 'transitioning') {
       return { ...baseResult, reason: 'playback-context-transitioning' };
+    }
+
+    // Netflix 首頁 billboard / preview 也可能請求字幕。即使 manifest videoId 看起來正確，
+    // 非 watch session 的 TTML 不能進入目前播放器顯示池，否則會污染同語言 cache。
+    if (requestSessionId && !this.isWatchSession(requestSessionId)) {
+      return { ...baseResult, reason: 'request-session-not-watch' };
+    }
+
+    if (contextSessionId &&
+        requestSessionId &&
+        this.isWatchSession(contextSessionId) &&
+        this.isWatchSession(requestSessionId) &&
+        requestSessionId !== contextSessionId) {
+      return { ...baseResult, reason: 'request-session-mismatch' };
     }
 
     if (derived?.confidence === 'none') {
