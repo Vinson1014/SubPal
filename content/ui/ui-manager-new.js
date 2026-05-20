@@ -15,7 +15,7 @@ import { FullscreenHandler } from './fullscreen-handler.js';
 import { UIAvoidanceHandler } from './ui-avoidance-handler.js';
 import { ToastManager } from './toast-manager.js';
 import { getPlayerAdapter } from './netflix-player-adapter.js';
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
+import { sendMessage, registerInternalEventHandler, dispatchInternalEvent } from '../system/messaging.js';
 import { SubtitleReplacer } from '../core/subtitle-replacer.js';
 
 class UIManager {
@@ -397,6 +397,16 @@ class UIManager {
         
         // 5. 重新隱藏原生字幕（確保新影片的原生字幕被隱藏）
         this.hideNativeSubtitles();
+
+        // 6. 通知依賴 UI 元件的管理器重新同步狀態。
+        // 影片切換會重建 SubtitleDisplay，樣式管理器需重新把使用者設定注入新容器。
+        dispatchInternalEvent({
+          type: 'UI_COMPONENTS_REINITIALIZED',
+          reason: 'VIDEO_ID_CHANGED',
+          oldVideoId: event.oldVideoId,
+          newVideoId: event.newVideoId,
+          timestamp: Date.now()
+        });
         
         this.isInitialized = true;
         this.log('🎉 影片切換UI重新初始化完成！');

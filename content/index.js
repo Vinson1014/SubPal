@@ -90,6 +90,7 @@ class SubPalApp {
       initializationState: initState,
       components: {
         uiManager: this.components.uiManager?.getStatus(),
+        subtitleStyleManager: this.components.subtitleStyleManager?.getStatus(),
         subtitleCoordinator: this.components.subtitleCoordinator?.getStatus(),
         playbackContextManager: this.components.playbackContextManager?.getStatus(),
         dualSubtitleConfig: this.components.dualSubtitleConfig?.getStatus()

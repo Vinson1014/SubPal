@@ -353,8 +353,12 @@ class SubtitleStyleManager {
    * 設置事件處理器
    */
   setupEventHandlers() {
-    // 未來可擴展其他事件處理
-    // 樣式配置更新已由 ConfigBridge 訂閱處理
+    registerInternalEventHandler('UI_COMPONENTS_REINITIALIZED', (event) => {
+      this.log('收到 UI 元件重建事件，重新套用字幕樣式:', event);
+      this.applyCurrentStyle();
+    });
+
+    // 樣式配置更新已由 ConfigBridge 訂閱處理；UI 重建事件只負責重放目前設定。
     this.log('事件處理器設置完成');
   }
 
@@ -441,13 +445,19 @@ class SubtitleStyleManager {
    * 獲取管理器狀態
    */
   getStatus() {
+    const subtitleDisplay = this.uiManager?.subtitleDisplay || null;
+
     return {
       isInitialized: this.isInitialized,
       currentMode: this.currentConfig.mode,
+      styleMode: this.currentConfig.styleMode,
       hasUIManager: !!this.uiManager,
+      hasSubtitleDisplay: !!subtitleDisplay,
       supportsDoubleMode: !!(this.uiManager && 
                             this.uiManager.subtitleDisplay && 
                             this.uiManager.subtitleDisplay.setDualModeStyles),
+      appliedSingleStyle: subtitleDisplay?.subtitleStyle ? { ...subtitleDisplay.subtitleStyle } : null,
+      appliedDualStyles: subtitleDisplay?.getDualModeStyles ? subtitleDisplay.getDualModeStyles() : null,
       currentConfig: { ...this.currentConfig }
     };
   }
