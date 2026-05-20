@@ -12,35 +12,15 @@ import {
   SUBTITLE_STYLE_MODES,
   getDefaultValues
 } from './content/system/config/config-schema.js';
+import {
+  renderSubtitlePreview
+} from './shared/subtitle-preview-renderer.js';
 
 // ==================== 配置管理 ====================
 
 // 從 config-schema.js 獲取預設值
 const DEFAULT_CONFIG = getDefaultValues();
-
-const PREVIEW_TEXT_BY_LANGUAGE = {
-  'zh-Hant': '這是一段字幕預覽',
-  'zh-Hans': '这是一段字幕预览',
-  en: 'This is a subtitle preview',
-  ja: 'これは字幕プレビューです',
-  ko: '자막 미리보기입니다',
-  es: 'Esta es una vista previa de subtítulos',
-  fr: 'Aperçu des sous-titres',
-  de: 'Dies ist eine Untertitelvorschau',
-  it: 'Anteprima dei sottotitoli',
-  pt: 'Esta é uma prévia da legenda',
-  ru: 'Это предварительный просмотр субтитров',
-  ar: 'هذه معاينة للترجمة',
-  th: 'นี่คือตัวอย่างคำบรรยาย',
-  vi: 'Đây là bản xem trước phụ đề',
-  id: 'Ini adalah pratinjau subtitle',
-  ms: 'Ini ialah pratonton sari kata',
-  hi: 'यह उपशीर्षक पूर्वावलोकन है',
-  tr: 'Bu bir altyazı önizlemesidir',
-  nl: 'Dit is een ondertitelvoorbeeld',
-  pl: 'To jest podgląd napisów',
-  sv: 'Det här är en förhandsvisning av undertexter'
-};
+let lastPreviewConfig = { ...DEFAULT_CONFIG };
 
 /**
  * 從嵌套對象中獲取值（支援點記法）
@@ -366,98 +346,47 @@ async function updatePreview(config = null) {
   if (!config) {
     config = await loadConfig();
   }
+  lastPreviewConfig = { ...lastPreviewConfig, ...config };
 
-  const primaryPreview = document.getElementById('primaryPreview');
-  const secondaryPreview = document.getElementById('secondaryPreview');
-
-  if (primaryPreview) {
-    primaryPreview.textContent = getPreviewText(config['subtitle.primaryLanguage'], 'primary');
-    applyPreviewStyles(primaryPreview, {
-      styleMode: config['subtitle.style.mode'],
-      fontFamily: config['subtitle.style.fontFamily'],
-      fontSize: config['subtitle.style.primary.fontSize'],
-      fontWeight: config['subtitle.style.primary.fontWeight'],
-      textColor: config['subtitle.style.primary.textColor'],
-      backgroundColor: config['subtitle.style.primary.backgroundColor'],
-      netflixPreset: getNetflixPresetConfig(config)
-    });
-  }
-
-  if (secondaryPreview && config['subtitle.dualModeEnabled']) {
-    secondaryPreview.textContent = getPreviewText(config['subtitle.secondaryLanguage'], 'secondary');
-    applyPreviewStyles(secondaryPreview, {
-      styleMode: config['subtitle.style.mode'],
-      fontFamily: config['subtitle.style.fontFamily'],
-      fontSize: config['subtitle.style.secondary.fontSize'],
-      fontWeight: config['subtitle.style.secondary.fontWeight'],
-      textColor: config['subtitle.style.secondary.textColor'],
-      backgroundColor: config['subtitle.style.secondary.backgroundColor'],
-      netflixPreset: getNetflixPresetConfig(config)
-    });
-  }
-}
-
-function getPreviewText(languageCode, type) {
-  if (PREVIEW_TEXT_BY_LANGUAGE[languageCode]) {
-    return PREVIEW_TEXT_BY_LANGUAGE[languageCode];
-  }
-
-  const language = SUPPORTED_LANGUAGES.find(lang => lang.code === languageCode);
-  const languageName = language ? language.name : languageCode;
-  return type === 'secondary'
-    ? `${languageName} subtitle preview`
-    : `${languageName} 字幕預覽`;
-}
-
-/**
- * 應用預覽樣式
- */
-function applyPreviewStyles(element, styleConfig) {
-  if (!element || !styleConfig) return;
-
-  const effectiveStyle = getEffectivePreviewStyle(styleConfig);
-
-  Object.assign(element.style, {
-    fontSize: `${effectiveStyle.fontSize}px`,
-    color: effectiveStyle.textColor,
-    backgroundColor: effectiveStyle.backgroundColor,
-    fontFamily: effectiveStyle.fontFamily,
-    fontWeight: effectiveStyle.fontWeight,
-    textAlign: 'center',
-    borderRadius: '4px',
-    textShadow: effectiveStyle.textShadow,
-    padding: '8px 16px',
-    display: 'inline-block',
-    minWidth: '120px',
-    margin: '2px 5px'
+  renderSubtitlePreview({
+    primaryElement: document.getElementById('primaryPreview'),
+    secondaryElement: document.getElementById('secondaryPreview'),
+    config,
+    languages: SUPPORTED_LANGUAGES,
+    scale: 0.72
   });
 }
 
-function getNetflixPresetConfig(config) {
+function getPreviewConfigFromControls() {
+  const selectedPreset = SUBTITLE_FONT_PRESETS.find(
+    item => item.value === document.getElementById('subtitleFontPreset')?.value
+  );
+  const primaryBgHex = document.getElementById('primaryBackgroundColor')?.value || '#000000';
+  const primaryBgOpacity = Number(document.getElementById('primaryBackgroundOpacity')?.value ?? 0.6);
+  const secondaryBgHex = document.getElementById('secondaryBackgroundColor')?.value || '#000000';
+  const secondaryBgOpacity = Number(document.getElementById('secondaryBackgroundOpacity')?.value ?? 0.6);
+
   return {
-    fontFamily: config['subtitle.style.netflixPreset.fontFamily'],
-    fontWeight: config['subtitle.style.netflixPreset.fontWeight'],
-    textColor: config['subtitle.style.netflixPreset.textColor'],
-    backgroundColor: config['subtitle.style.netflixPreset.backgroundColor'],
-    textShadow: config['subtitle.style.netflixPreset.textShadow']
+    ...lastPreviewConfig,
+    'subtitle.dualModeEnabled': document.getElementById('dualMode')?.checked ?? DEFAULT_CONFIG['subtitle.dualModeEnabled'],
+    'subtitle.primaryLanguage': document.getElementById('primaryLanguageSelect')?.value || DEFAULT_CONFIG['subtitle.primaryLanguage'],
+    'subtitle.secondaryLanguage': document.getElementById('secondaryLanguageSelect')?.value || DEFAULT_CONFIG['subtitle.secondaryLanguage'],
+    'subtitle.style.mode': document.getElementById('subtitleStyleMode')?.value || DEFAULT_CONFIG['subtitle.style.mode'],
+    'subtitle.style.fontPreset': selectedPreset?.value || DEFAULT_CONFIG['subtitle.style.fontPreset'],
+    'subtitle.style.fontFamily': selectedPreset?.fontFamily || DEFAULT_CONFIG['subtitle.style.fontFamily'],
+    'subtitle.style.primary.fontSize': Number(document.getElementById('primaryFontSize')?.value || DEFAULT_CONFIG['subtitle.style.primary.fontSize']),
+    'subtitle.style.primary.fontWeight': document.getElementById('primaryFontWeight')?.value || DEFAULT_CONFIG['subtitle.style.primary.fontWeight'],
+    'subtitle.style.primary.textColor': document.getElementById('primaryTextColor')?.value || DEFAULT_CONFIG['subtitle.style.primary.textColor'],
+    'subtitle.style.primary.backgroundColor': toRgba(primaryBgHex, primaryBgOpacity),
+    'subtitle.style.secondary.fontSize': Number(document.getElementById('secondaryFontSize')?.value || DEFAULT_CONFIG['subtitle.style.secondary.fontSize']),
+    'subtitle.style.secondary.fontWeight': document.getElementById('secondaryFontWeight')?.value || DEFAULT_CONFIG['subtitle.style.secondary.fontWeight'],
+    'subtitle.style.secondary.textColor': document.getElementById('secondaryTextColor')?.value || DEFAULT_CONFIG['subtitle.style.secondary.textColor'],
+    'subtitle.style.secondary.backgroundColor': toRgba(secondaryBgHex, secondaryBgOpacity)
   };
 }
 
-function getEffectivePreviewStyle(styleConfig) {
-  if (styleConfig.styleMode === 'netflixPreset' || styleConfig.styleMode === 'nativeInherit') {
-    return {
-      ...styleConfig,
-      fontFamily: styleConfig.netflixPreset.fontFamily,
-      fontWeight: styleConfig.netflixPreset.fontWeight,
-      textShadow: styleConfig.netflixPreset.textShadow
-    };
-  }
-
-  return {
-    ...styleConfig,
-    fontFamily: styleConfig.fontFamily,
-    textShadow: '1px 1px 1px rgba(0, 0, 0, 0.5)'
-  };
+function updatePreviewFromControls() {
+  updatePreview(getPreviewConfigFromControls());
 }
 
 /**
@@ -572,7 +501,7 @@ function setupEventListeners() {
       if (singleModeRadio.checked) {
         await saveConfig('subtitle.dualModeEnabled', false);
         updateSubtitleModeUI(false);
-        // 不需要調用 updatePreview()，因為樣式沒變，只是顯示/隱藏元素
+        updatePreviewFromControls();
       }
     });
   }
@@ -582,7 +511,7 @@ function setupEventListeners() {
       if (dualModeRadio.checked) {
         await saveConfig('subtitle.dualModeEnabled', true);
         updateSubtitleModeUI(true);
-        // 不需要調用 updatePreview()，因為樣式沒變，只是顯示/隱藏元素
+        updatePreviewFromControls();
       }
     });
   }
@@ -594,14 +523,14 @@ function setupEventListeners() {
   if (primaryLanguageSelect) {
     primaryLanguageSelect.addEventListener('change', async (e) => {
       await saveConfig('subtitle.primaryLanguage', e.target.value);
-      await updatePreview();
+      updatePreviewFromControls();
     });
   }
 
   if (secondaryLanguageSelect) {
     secondaryLanguageSelect.addEventListener('change', async (e) => {
       await saveConfig('subtitle.secondaryLanguage', e.target.value);
-      await updatePreview();
+      updatePreviewFromControls();
     });
   }
 
@@ -610,7 +539,7 @@ function setupEventListeners() {
     styleModeSelect.addEventListener('change', async (e) => {
       await saveConfig('subtitle.style.mode', e.target.value);
       updateStyleModeUI(e.target.value);
-      await updatePreview();
+      updatePreviewFromControls();
     });
   }
 
@@ -624,7 +553,7 @@ function setupEventListeners() {
         'subtitle.style.fontPreset': preset.value,
         'subtitle.style.fontFamily': preset.fontFamily
       });
-      await updatePreview();
+      updatePreviewFromControls();
     });
   }
 
@@ -694,16 +623,11 @@ function setupStyleControlListeners(type, keyPrefix) {
   const backgroundColorHex = document.getElementById(`${type}BackgroundColorHex`);
   const backgroundOpacitySlider = document.getElementById(`${type}BackgroundOpacity`);
   const backgroundOpacityValue = document.getElementById(`${type}BackgroundOpacityValue`);
-  const preview = document.getElementById(`${type}Preview`);
-
   if (fontSizeSlider && fontSizeValue) {
     fontSizeSlider.addEventListener('input', async (e) => {
       const size = parseInt(e.target.value);
       fontSizeValue.textContent = size;
-      // 即時更新預覽
-      if (preview) {
-        preview.style.fontSize = `${size}px`;
-      }
+      updatePreviewFromControls();
       // 異步保存配置
       await saveConfig(`${keyPrefix}.fontSize`, size);
     });
@@ -711,20 +635,14 @@ function setupStyleControlListeners(type, keyPrefix) {
 
   if (fontWeightSelect) {
     fontWeightSelect.addEventListener('change', async (e) => {
-      if (preview) {
-        preview.style.fontWeight = e.target.value;
-      }
+      updatePreviewFromControls();
       await saveConfig(`${keyPrefix}.fontWeight`, e.target.value);
-      await updatePreview();
     });
   }
 
   if (textColorPicker) {
     textColorPicker.addEventListener('input', (e) => {
-      // 即時更新預覽
-      if (preview) {
-        preview.style.color = e.target.value;
-      }
+      updatePreviewFromControls();
       // 更新 hex 顯示
       if (textColorHex) {
         textColorHex.textContent = e.target.value;
@@ -741,10 +659,7 @@ function setupStyleControlListeners(type, keyPrefix) {
       const hex = backgroundColorPicker.value;
       const opacity = parseFloat(backgroundOpacitySlider.value);
       const rgba = toRgba(hex, opacity);
-      // 即時更新預覽
-      if (preview) {
-        preview.style.backgroundColor = rgba;
-      }
+      updatePreviewFromControls();
       // 更新 hex 顯示
       if (backgroundColorHex) {
         backgroundColorHex.textContent = hex;

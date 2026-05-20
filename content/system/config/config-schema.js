@@ -251,7 +251,7 @@ export const CONFIG_SCHEMA = {
          */
         backgroundColor: {
           type: 'string',
-          default: 'rgba(0, 0, 0, 0.75)',
+          default: 'rgba(0, 0, 0, 0.6)',
           description: '主要字幕背景顏色',
           category: 'subtitle-style',
           validation: (value) => {
@@ -316,7 +316,7 @@ export const CONFIG_SCHEMA = {
          */
         backgroundColor: {
           type: 'string',
-          default: 'rgba(0, 0, 0, 0.75)',
+          default: 'rgba(0, 0, 0, 0.6)',
           description: '次要字幕背景顏色',
           category: 'subtitle-style',
           validation: (value) => {
@@ -332,7 +332,7 @@ export const CONFIG_SCHEMA = {
          */
         fontWeight: {
           type: 'string',
-          default: '500',
+          default: '400',
           description: '次要字幕字重',
           category: 'subtitle-style',
           validation: (value) => {
@@ -401,7 +401,7 @@ export const CONFIG_SCHEMA = {
         },
         backgroundColor: {
           type: 'string',
-          default: 'rgba(0, 0, 0, 0.75)',
+          default: 'rgba(0, 0, 0, 0.6)',
           description: 'Netflix 原生風格背景顏色',
           category: 'subtitle-style',
           editable: false

@@ -596,18 +596,23 @@ input[type="color"]::-webkit-color-swatch {
   position: relative;
   z-index: 1;
   padding: var(--spacing-xl);
-  text-align: center;
   width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  text-align: center;
 }
 
 .preview-subtitle {
   display: inline-block;
-  padding: 8px 16px;
+  max-width: 100%;
+  padding: 5px 10px;
   border-radius: 4px;
   font-family: Arial, sans-serif;
   text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
-  margin: 4px;
-  transition: all var(--transition-fast);
+  transition: color var(--transition-fast), background-color var(--transition-fast), font-size var(--transition-fast);
 }
 
 .primary-preview {
