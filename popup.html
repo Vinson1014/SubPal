@@ -200,6 +200,7 @@
             align-items: center;
             justify-content: space-between;
             margin-bottom: 14px;
+            gap: 8px;
         }
 
         .subtitle-card-title {
@@ -241,6 +242,12 @@
         .more-settings-link svg {
             width: 12px;
             height: 12px;
+        }
+
+        .subtitle-card-actions {
+            display: flex;
+            align-items: center;
+            gap: 4px;
         }
 
         /* 分段控制器 (單語/雙語切換) */
@@ -616,12 +623,22 @@
                 </svg>
                 字幕設定
             </div>
-            <button class="more-settings-link" id="open-subtitle-options" title="更多設定">
-                進階
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="9 18 15 12 9 6"/>
-                </svg>
-            </button>
+            <div class="subtitle-card-actions">
+                <button class="more-settings-link" id="open-tutorial" title="使用教學">
+                    教學
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M9.09 9a3 3 0 0 1 5.82 1c0 2-3 2-3 4"/>
+                        <path d="M12 17h.01"/>
+                    </svg>
+                </button>
+                <button class="more-settings-link" id="open-subtitle-options" title="更多設定">
+                    進階
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="9 18 15 12 9 6"/>
+                    </svg>
+                </button>
+            </div>
         </div>
 
         <!-- 單語/雙語模式切換 -->

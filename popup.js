@@ -262,6 +262,7 @@ function setupSubtitleCardListeners() {
     const fontSizeSlider = document.getElementById('popup-font-size');
     const fontSizeValue = document.getElementById('popup-font-size-value');
     const openOptionsBtn = document.getElementById('open-subtitle-options');
+    const openTutorialBtn = document.getElementById('open-tutorial');
 
     // 單語模式按鈕
     if (singleModeBtn) {
@@ -341,6 +342,18 @@ function setupSubtitleCardListeners() {
     if (openOptionsBtn) {
         openOptionsBtn.addEventListener('click', () => {
             chrome.runtime.openOptionsPage();
+        });
+    }
+
+    // 使用教學入口
+    if (openTutorialBtn) {
+        openTutorialBtn.addEventListener('click', () => {
+            const tutorialUrl = chrome.runtime.getURL('tutorial.html');
+            if (chrome.tabs?.create) {
+                chrome.tabs.create({ url: tutorialUrl });
+            } else {
+                window.open(tutorialUrl, '_blank');
+            }
         });
     }
 

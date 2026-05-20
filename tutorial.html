@@ -1,363 +1,616 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="zh-Hant">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>字幕助手教學 - SubPal Tutorial</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="options.css">
-    <link rel="stylesheet" href="tutorial.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SubPal 初始設定</title>
+  <link rel="icon" href="icons/icon48.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="tutorial.css">
 </head>
 <body>
-    <!-- 主要教學內容 -->
+  <div class="tutorial-shell">
+    <aside class="tutorial-rail" aria-label="教學進度">
+      <div class="brand-block">
+        <img src="icons/icon48.png" alt="SubPal Logo" class="brand-icon">
+        <div>
+          <div class="brand-name">SubPal</div>
+          <div class="brand-subtitle">字幕助手</div>
+        </div>
+      </div>
+
+      <ol class="step-list" id="step-list">
+        <li class="step-item active" data-step="1" role="button" tabindex="0" aria-current="step">
+          <span class="step-number">1</span>
+          <span class="step-label">開始</span>
+        </li>
+        <li class="step-item" data-step="2" role="button" tabindex="0">
+          <span class="step-number">2</span>
+          <span class="step-label">語言</span>
+        </li>
+        <li class="step-item" data-step="3" role="button" tabindex="0">
+          <span class="step-number">3</span>
+          <span class="step-label">外觀</span>
+        </li>
+        <li class="step-item" data-step="4" role="button" tabindex="0">
+          <span class="step-number">4</span>
+          <span class="step-label">互動</span>
+        </li>
+        <li class="step-item" data-step="5" role="button" tabindex="0">
+          <span class="step-number">5</span>
+          <span class="step-label">Popup</span>
+        </li>
+        <li class="step-item" data-step="6" role="button" tabindex="0">
+          <span class="step-number">6</span>
+          <span class="step-label">完成</span>
+        </li>
+      </ol>
+
+      <div class="rail-note">
+        <span class="status-dot"></span>
+        <span>設定會即時保存到 SubPal</span>
+      </div>
+    </aside>
+
     <main class="tutorial-main">
+      <section class="tutorial-step active" data-step="1" aria-labelledby="step1-title">
+        <div class="intro-layout">
+          <div class="intro-copy">
+            <span class="eyebrow">首次使用設定</span>
+            <h1 id="step1-title">讓 Netflix 字幕先符合你的觀看方式</h1>
+            <p>
+              SubPal 會替換品質較差的字幕，也能讓你提交更好的翻譯。這個流程會先設定語言與字幕外觀，再用模擬播放器教你投票與提交建議。
+            </p>
+            <div class="intro-actions">
+              <button type="button" class="btn btn-primary" data-action="next">開始設定</button>
+              <button type="button" class="btn btn-ghost" id="skip-intro-btn">略過</button>
+            </div>
+          </div>
 
-        <!-- 步驟 1: 歡迎頁面 -->
-        <section class="tutorial-step active" id="step-1">
-            <div class="welcome-page">
-                <div class="welcome-content">
-                    <img src="icons/SubPal_rc.png" alt="SubPal Icon" class="welcome-icon">
-                    <h1>歡迎使用字幕助手</h1>
-                    <p class="welcome-subtitle">由公眾貢獻驅動的 Netflix 字幕改進工具</p>
-                    <div class="feature-list">
-                        <div class="feature-item">
-                            <span class="feature-icon">🔄</span>
-                            <span class="feature-text">自動替換不佳翻譯</span>
-                        </div>
-                        <div class="feature-item">
-                            <span class="feature-icon">✏️</span>
-                            <span class="feature-text">提交更好的翻譯</span>
-                        </div>
-                        <div class="feature-item">
-                            <span class="feature-icon">👥</span>
-                            <span class="feature-text">社群協作改進</span>
-                        </div>
-                    </div>
-                    <div class="welcome-footer">
-                        <p>讓我們開始 30 秒的快速教學</p>
-                    </div>
+          <div class="signal-panel" aria-hidden="true">
+            <div class="mini-player">
+              <div class="mini-player-top">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+              <div class="mini-subtitles">
+                <div class="mini-subtitle primary" id="miniPrimaryPreview">這是一段更準確的字幕</div>
+                <div class="mini-subtitle secondary" id="miniSecondaryPreview">This is a clearer subtitle</div>
+              </div>
+            </div>
+            <div class="metric-strip">
+              <div>
+                <strong>雙語</strong>
+                <span>主要與次要字幕</span>
+              </div>
+              <div>
+                <strong>社群</strong>
+                <span>投票改善品質</span>
+              </div>
+              <div>
+                <strong>客製化</strong>
+                <span>自定義字幕樣式</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tutorial-step" data-step="2" aria-labelledby="step2-title">
+        <div class="step-header">
+          <span class="eyebrow">字幕語言</span>
+          <h2 id="step2-title">選擇你要看的字幕組合</h2>
+          <p>單語模式只顯示主要語言；雙語模式會同時顯示主要與次要語言。</p>
+        </div>
+
+        <div class="settings-layout">
+          <div class="settings-card">
+            <div class="setting-group">
+              <label class="setting-label">字幕模式</label>
+              <div class="mode-toggle">
+                <label class="mode-option">
+                  <input type="radio" name="tutorialSubtitleMode" value="single" id="setupSingleMode">
+                  <span class="mode-box">
+                    <span class="mode-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                        <rect x="4" y="10" width="16" height="4" rx="1.5"></rect>
+                      </svg>
+                    </span>
+                    <span class="mode-name">單語字幕</span>
+                    <span class="mode-desc">專注主要語言</span>
+                  </span>
+                </label>
+                <label class="mode-option">
+                  <input type="radio" name="tutorialSubtitleMode" value="dual" id="setupDualMode">
+                  <span class="mode-box">
+                    <span class="mode-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                        <rect x="4" y="7" width="16" height="4" rx="1.5"></rect>
+                        <rect x="4" y="14" width="12" height="3" rx="1.5"></rect>
+                      </svg>
+                    </span>
+                    <span class="mode-name">雙語字幕</span>
+                    <span class="mode-desc">同時保留原文參照</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div class="setting-group">
+              <label class="setting-label">語言設定</label>
+              <div class="language-grid">
+                <div class="select-wrapper">
+                  <label for="setupPrimaryLanguage">主要語言</label>
+                  <select id="setupPrimaryLanguage"></select>
                 </div>
-            </div>
-        </section>
-
-        <!-- 步驟 2: Netflix 播放器模擬 -->
-        <section class="tutorial-step" id="step-2">
-            <div class="tutorial-instruction">
-                <h2>在 Netflix 觀看時的使用方式</h2>
-                <p>將滑鼠移動到字幕上方，會出現互動按鈕</p>
-            </div>
-            
-            <!-- 模擬 Netflix 播放器 -->
-            <div class="mock-netflix-player">
-                <div class="player-container" id="player-container">
-                    <!-- 播放器頂部控制欄 -->
-                    <div class="player-top-bar">
-                        <div class="player-back-btn">←</div>
-                        <div class="player-title">模擬影片播放</div>
-                    </div>
-                    
-                    <!-- 播放器中央 -->
-                    <div class="player-center">
-                        <div class="play-button">▶</div>
-                    </div>
-                    
-                    <!-- 字幕區域（使用真實的字幕容器結構） -->
-                    <div id="subtitle-assistant-container" class="subtitle-container">
-                        <div id="subtitle-assistant-text" class="subtitle-text">
-                            這是需要改進的字幕翻譯
-                        </div>
-                    </div>
-                    
-                    <!-- 互動按鈕（初始隱藏） -->
-                    <div id="subtitle-assistant-buttons" class="interaction-buttons">
-                        <button class="interaction-btn submit-btn" data-tooltip="提交更好的翻譯">
-                            ✏️
-                        </button>
-                        <button class="interaction-btn vote-btn upvote" data-tooltip="這個翻譯很好">
-                            👍
-                        </button>
-                        <button class="interaction-btn vote-btn downvote" data-tooltip="這個翻譯不好">
-                            👎
-                        </button>
-                    </div>
-                    
-                    <!-- 播放器底部控制欄 -->
-                    <div class="player-bottom-bar">
-                        <div class="player-controls">
-                            <button class="control-btn">⏸</button>
-                            <button class="control-btn">⏭</button>
-                            <span class="time-display">05:23 / 1:42:15</span>
-                        </div>
-                        <div class="player-right-controls">
-                            <button class="control-btn">CC</button>
-                            <button class="control-btn">⚙</button>
-                            <button class="control-btn">⛶</button>
-                        </div>
-                    </div>
+                <div class="select-wrapper" id="setupSecondaryLanguageGroup">
+                  <label for="setupSecondaryLanguage">次要語言</label>
+                  <select id="setupSecondaryLanguage"></select>
                 </div>
-                
-                <!-- 引導箭頭和提示 -->
-                <div class="guide-arrow" id="hover-guide">
-                    <div class="arrow-text">將滑鼠移到字幕上</div>
-                    <div class="arrow-pointer">↑</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="preview-card">
+            <div class="preview-title">即時預覽</div>
+            <div class="subtitle-preview-screen">
+              <div class="preview-scene"></div>
+              <div class="preview-subtitle-stack">
+                <div class="preview-subtitle primary-preview" id="setupPrimaryPreview">這是一段字幕預覽</div>
+                <div class="preview-subtitle secondary-preview" id="setupSecondaryPreview">This is a subtitle preview</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tutorial-step" data-step="3" aria-labelledby="step3-title">
+        <div class="step-header">
+          <span class="eyebrow">字幕外觀</span>
+          <h2 id="step3-title">調整字幕在影片上的可讀性</h2>
+          <p>這裡提供自定義外觀設定，可以讓Netflix 字幕變成你習慣的樣子</p>
+        </div>
+
+        <div class="appearance-layout">
+          <div class="preview-card sticky-preview">
+            <div class="preview-title">樣式預覽</div>
+            <div class="subtitle-preview-screen large">
+              <div class="preview-scene"></div>
+              <div class="preview-subtitle-stack">
+                <div class="preview-subtitle primary-preview" id="stylePrimaryPreview">這是一段字幕預覽</div>
+                <div class="preview-subtitle secondary-preview" id="styleSecondaryPreview">This is a subtitle preview</div>
+              </div>
+            </div>
+            <button type="button" class="btn btn-ghost reset-btn" id="resetStylesBtn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path>
+                <path d="M3 3v5h5"></path>
+              </svg>
+              重置字幕設定
+            </button>
+          </div>
+
+          <div class="settings-card appearance-card">
+            <div class="setting-group">
+              <label class="setting-label">整體外觀</label>
+              <div class="style-grid compact">
+                <div class="style-control">
+                  <div class="control-header">
+                    <span>外觀模式</span>
+                  </div>
+                  <select id="setupStyleMode"></select>
                 </div>
-            </div>
-            
-        </section>
-
-        <!-- 步驟 3: 字幕樣式自定義 -->
-        <section class="tutorial-step" id="step-3">
-            <div class="tutorial-instruction">
-                <h2>設定你的專屬字幕樣式</h2>
-                <p>選擇單語或雙語模式，並調整字幕的外觀設定</p>
+                <div class="style-control" id="setupFontPresetControl">
+                  <div class="control-header">
+                    <span>字體風格</span>
+                  </div>
+                  <select id="setupFontPreset"></select>
+                </div>
+              </div>
             </div>
 
-            <div class="subtitle-customizer">
-                <!-- 左側：即時預覽（模擬影片畫面） -->
-                <div class="customizer-preview">
-                    <div class="preview-screen">
-                        <div class="preview-video-bg">
-                            <div class="video-gradient"></div>
-                            <div class="video-play-icon">▶</div>
-                        </div>
-                        <div class="preview-subtitles">
-                            <div class="preview-sub primary" id="tutorialPrimaryPreview">這是主要語言的字幕預覽</div>
-                            <div class="preview-sub secondary" id="tutorialSecondaryPreview" style="display: none;">This is the secondary subtitle</div>
-                        </div>
+            <div class="style-column">
+              <section class="style-panel">
+                <div class="style-panel-header">
+                  <h3>主要語言</h3>
+                  <span id="primaryLanguageName">繁體中文</span>
+                </div>
+                <div class="style-grid">
+                  <div class="style-control">
+                    <div class="control-header">
+                      <span>字體大小</span>
+                      <strong><span id="primaryFontSizeValue">55</span>px</strong>
                     </div>
-                    <button type="button" id="tutorialResetStyles" class="reset-link">
-                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-                        重置為預設值
+                    <input type="range" id="primaryFontSize" min="12" max="100" value="55" step="1">
+                  </div>
+                  <div class="style-control">
+                    <div class="control-header">
+                      <span>字體粗細</span>
+                    </div>
+                    <select id="primaryFontWeight"></select>
+                  </div>
+                  <div class="style-control color-control">
+                    <div class="control-header">
+                      <span>文字顏色</span>
+                      <strong id="primaryTextColorHex">#ffffff</strong>
+                    </div>
+                    <input type="color" id="primaryTextColor" value="#ffffff">
+                  </div>
+                  <div class="style-control color-control">
+                    <div class="control-header">
+                      <span>背景顏色</span>
+                      <strong id="primaryBackgroundColorHex">#000000</strong>
+                    </div>
+                    <input type="color" id="primaryBackgroundColor" value="#000000">
+                  </div>
+                  <div class="style-control wide">
+                    <div class="control-header">
+                      <span>背景透明度</span>
+                      <strong id="primaryBackgroundOpacityValue">0.60</strong>
+                    </div>
+                    <input type="range" id="primaryBackgroundOpacity" min="0" max="1" value="0.6" step="0.05">
+                  </div>
+                </div>
+              </section>
+
+              <section class="style-panel" id="secondaryStylePanel">
+                <div class="style-panel-header">
+                  <h3>次要語言</h3>
+                  <span id="secondaryLanguageName">English</span>
+                </div>
+                <div class="style-grid">
+                  <div class="style-control">
+                    <div class="control-header">
+                      <span>字體大小</span>
+                      <strong><span id="secondaryFontSizeValue">24</span>px</strong>
+                    </div>
+                    <input type="range" id="secondaryFontSize" min="12" max="100" value="24" step="1">
+                  </div>
+                  <div class="style-control">
+                    <div class="control-header">
+                      <span>字體粗細</span>
+                    </div>
+                    <select id="secondaryFontWeight"></select>
+                  </div>
+                  <div class="style-control color-control">
+                    <div class="control-header">
+                      <span>文字顏色</span>
+                      <strong id="secondaryTextColorHex">#ffff00</strong>
+                    </div>
+                    <input type="color" id="secondaryTextColor" value="#ffff00">
+                  </div>
+                  <div class="style-control color-control">
+                    <div class="control-header">
+                      <span>背景顏色</span>
+                      <strong id="secondaryBackgroundColorHex">#000000</strong>
+                    </div>
+                    <input type="color" id="secondaryBackgroundColor" value="#000000">
+                  </div>
+                  <div class="style-control wide">
+                    <div class="control-header">
+                      <span>背景透明度</span>
+                      <strong id="secondaryBackgroundOpacityValue">0.60</strong>
+                    </div>
+                    <input type="range" id="secondaryBackgroundOpacity" min="0" max="1" value="0.6" step="0.05">
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tutorial-step" data-step="4" aria-labelledby="step4-title">
+        <div class="step-header">
+          <span class="eyebrow">Netflix 互動</span>
+          <h2 id="step4-title">字幕上方就是你的貢獻入口</h2>
+          <p>在 Netflix 播放時，將滑鼠移到 SubPal 字幕上，就能提交修正或對翻譯投票。</p>
+        </div>
+
+        <div class="interaction-layout">
+          <div class="mock-player" id="mockPlayer">
+            <div class="mock-player-top">
+              <span class="mock-back">‹</span>
+              <span>Netflix Watch</span>
+            </div>
+            <div class="mock-play-button" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M8 5v14l11-7z"></path>
+              </svg>
+            </div>
+            <div class="mock-subtitle-zone" id="mockSubtitleZone">
+              <div class="mock-subtitle-stack" id="mockSubtitlePreview">
+                <div class="subtitle-hover-guide" id="subtitleHoverGuide" aria-hidden="true">
+                  <span>將滑鼠移到字幕上方</span>
+                </div>
+                <div class="mock-primary-row">
+                  <div class="mock-subtitle primary-preview" id="mockPrimaryPreview">這是可以被社群改善的字幕翻譯</div>
+                  <div class="mock-toolbar" id="mockToolbar" aria-label="字幕互動按鈕">
+                    <button type="button" class="tool-btn" id="openSubmitDemo" title="提交更好的翻譯">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                        <path d="M12 20h9"></path>
+                        <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path>
+                      </svg>
                     </button>
+                    <button type="button" class="tool-btn" id="mockUpvote" title="這個翻譯很好">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                        <path d="M7 10v12"></path>
+                        <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path>
+                      </svg>
+                    </button>
+                    <button type="button" class="tool-btn" id="mockDownvote" title="這個翻譯不好">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                        <path d="M17 14V2"></path>
+                        <path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path>
+                      </svg>
+                    </button>
+                  </div>
                 </div>
-
-                <!-- 右側：設定面板 -->
-                <div class="customizer-panel">
-                    <!-- 模式 & 語言：同一行 -->
-                    <div class="panel-row top-row">
-                        <div class="mode-switcher">
-                            <span class="row-label">模式</span>
-                            <div class="pill-switch">
-                                <input type="radio" name="tutorialSubtitleMode" value="single" id="tutorialSingleMode" checked>
-                                <label for="tutorialSingleMode">單語</label>
-                                <input type="radio" name="tutorialSubtitleMode" value="dual" id="tutorialDualMode">
-                                <label for="tutorialDualMode">雙語</label>
-                                <span class="pill-bg"></span>
-                            </div>
-                        </div>
-                        <div class="lang-selectors">
-                            <div class="lang-item">
-                                <label>主要</label>
-                                <select id="tutorialPrimaryLanguageSelect"></select>
-                            </div>
-                            <div class="lang-item" id="tutorialSecondaryLanguageGroup">
-                                <label>次要</label>
-                                <select id="tutorialSecondaryLanguageSelect" disabled></select>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 樣式面板：主要 + 次要並排 -->
-                    <div class="style-panels">
-                        <!-- 主要語言樣式 -->
-                        <div class="style-panel" id="tutorialPrimaryPanel">
-                            <div class="panel-header">主要語言</div>
-                            <div class="ctrl-row">
-                                <label>字體大小</label>
-                                <input type="range" id="tutorialPrimaryFontSize" min="12" max="100" value="55">
-                                <span class="val"><span id="tutorialPrimaryFontSizeValue">55</span>px</span>
-                            </div>
-                            <div class="ctrl-row colors">
-                                <div class="color-ctrl">
-                                    <label>文字</label>
-                                    <input type="color" id="tutorialPrimaryTextColor" value="#ffffff">
-                                </div>
-                                <div class="color-ctrl">
-                                    <label>背景</label>
-                                    <input type="color" id="tutorialPrimaryBackgroundColor" value="#000000">
-                                </div>
-                                <div class="opacity-ctrl">
-                                    <label>透明度</label>
-                                    <input type="range" id="tutorialPrimaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05">
-                                    <span class="val" id="tutorialPrimaryBackgroundOpacityValue">0.75</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- 次要語言樣式 -->
-                        <div class="style-panel disabled" id="tutorialSecondaryPanel">
-                            <div class="panel-header">次要語言</div>
-                            <div class="ctrl-row">
-                                <label>字體大小</label>
-                                <input type="range" id="tutorialSecondaryFontSize" min="12" max="100" value="24" disabled>
-                                <span class="val"><span id="tutorialSecondaryFontSizeValue">24</span>px</span>
-                            </div>
-                            <div class="ctrl-row colors">
-                                <div class="color-ctrl">
-                                    <label>文字</label>
-                                    <input type="color" id="tutorialSecondaryTextColor" value="#ffff00" disabled>
-                                </div>
-                                <div class="color-ctrl">
-                                    <label>背景</label>
-                                    <input type="color" id="tutorialSecondaryBackgroundColor" value="#000000" disabled>
-                                </div>
-                                <div class="opacity-ctrl">
-                                    <label>透明度</label>
-                                    <input type="range" id="tutorialSecondaryBackgroundOpacity" min="0" max="1" value="0.75" step="0.05" disabled>
-                                    <span class="val" id="tutorialSecondaryBackgroundOpacityValue">0.75</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                <div class="mock-subtitle secondary-preview" id="mockSecondaryPreview">This translation can be improved by the community</div>
+              </div>
             </div>
-        </section>
+            <div class="mock-controls">
+              <span>05:23</span>
+              <div class="mock-timeline"><span></span></div>
+              <span>1:42:15</span>
+            </div>
+          </div>
 
-        <!-- 步驟 4: 擴充功能面板指導 -->
-        <section class="tutorial-step" id="step-4">
-            <div class="tutorial-instruction">
-                <h2>使用擴充功能面板</h2>
-                <p>點擊右上角的拼圖圖示，然後選擇「字幕助手」</p>
+          <div class="instruction-card">
+            <div class="instruction-item active">
+              <span class="instruction-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path d="M12 20h9"></path>
+                  <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path>
+                </svg>
+              </span>
+              <div>
+                <h3>提交更好的翻譯</h3>
+                <p>看到不自然或錯誤的字幕時，可以提交修正與原因。</p>
+              </div>
             </div>
-            
-            <div class="browser-demo">
-                <!-- 模擬瀏覽器頂部（僅顯示圖示，無互動功能） -->
-                <div class="browser-top-bar">
-                    <div class="browser-tabs">
-                        <div class="browser-tab active">
-                            <span class="tab-icon">N</span>
-                            <span class="tab-title">Netflix</span>
-                        </div>
-                    </div>
-                    <div class="browser-toolbar">
-                        <div class="address-bar">https://www.netflix.com/watch/123456</div>
-                        <div class="browser-controls">
-                            <button class="browser-extension-btn" id="mock-extension-btn" title="擴充功能">
-                                🧩
-                            </button>
-                            <button class="browser-menu-btn" title="選單">
-                                ⋮
-                            </button>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- 恭喜訊息區域 -->
-                <div class="step4-congratulation" id="step4-congratulation">
-                    <div class="congratulation-content">
-                        <div class="congratulation-icon">🎉</div>
-                        <div class="congratulation-text">
-                            <h3>太棒了！</h3>
-                            <p>您已經成功開啟擴充功能面板</p>
-                            <p>現在您可以查看字幕助手的使用統計</p>
-                        </div>
-                    </div>
-                </div>
+            <div class="instruction-item">
+              <span class="instruction-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path d="M7 10v12"></path>
+                  <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path>
+                </svg>
+              </span>
+              <div>
+                <h3>投票建立排序</h3>
+                <p>讚與倒讚會幫助 SubPal 判斷哪些翻譯更適合顯示。</p>
+              </div>
             </div>
-        </section>
-
-        <!-- 步驟 5: 完成教學 -->
-        <section class="tutorial-step" id="step-5">
-            <div class="completion-page">
-                <div class="completion-content">
-                    <div class="completion-icon">🎉</div>
-                    <h2>教學完成！</h2>
-                    <p class="completion-subtitle">您已經學會如何使用字幕助手了</p>
-                    
-                    <div class="completion-summary">
-                        <div class="summary-item">
-                            <span class="summary-icon">🎯</span>
-                            <span class="summary-text">滑鼠移到字幕上查看按鈕</span>
-                        </div>
-                        <div class="summary-item">
-                            <span class="summary-icon">✏️</span>
-                            <span class="summary-text">提交更好的翻譯建議</span>
-                        </div>
-                        <div class="summary-item">
-                            <span class="summary-icon">👍</span>
-                            <span class="summary-text">為翻譯投票選出最佳版本</span>
-                        </div>
-                        <div class="summary-item">
-                            <span class="summary-icon">🧩</span>
-                            <span class="summary-text">透過擴充功能面板查看統計</span>
-                        </div>
-                    </div>
-                    
-                    <div class="completion-actions">
-                        <button id="step5-netflix-btn" class="completion-btn primary">前往 Netflix</button>
-                        <button id="step5-close-btn" class="completion-btn secondary">關閉教學</button>
-                    </div>
-                </div>
+            <div class="instruction-item">
+              <span class="instruction-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <path d="M7 10l5 5 5-5"></path>
+                  <path d="M12 15V3"></path>
+                </svg>
+              </span>
+              <div>
+                <h3>在 Netflix 直接回饋字幕</h3>
+                <p>不用離開播放畫面，就能把有用的判斷回饋給社群排序。</p>
+              </div>
             </div>
-        </section>
-
-        <!-- 導航按鈕區域 -->
-        <div class="navigation-area">
-            <!-- 跳過按鈕（左下角，不明顯） -->
-            <button class="skip-btn" id="skip-btn">跳過教學</button>
-            
-            <!-- 導航按鈕 -->
-            <div class="tutorial-navigation">
-                <button class="nav-btn prev-btn" id="prev-btn" disabled>上一步</button>
-                <button class="nav-btn next-btn" id="next-btn">下一步</button>
-                <button class="nav-btn finish-btn hidden" id="finish-btn">離開教學</button>
-            </div>
+          </div>
         </div>
-        
-        <!-- 步驟指示器（底部置中） -->
-        <div class="step-indicator">
-            <div class="step active" data-step="1"></div>
-            <div class="step" data-step="2"></div>
-            <div class="step" data-step="3"></div>
-            <div class="step" data-step="4"></div>
-            <div class="step" data-step="5"></div>
+      </section>
+
+      <section class="tutorial-step" data-step="5" aria-labelledby="step5-title">
+        <div class="step-header">
+          <span class="eyebrow">工具列 Popup</span>
+          <h2 id="step5-title">從工具列 POPUP 快速管理 SubPal</h2>
+          <p>點 Chrome 右上角的拼圖圖示，從擴充功能清單打開 SubPal popup，裡面可以進行快速設定</p>
         </div>
+
+        <div class="popup-guide-layout">
+          <div class="popup-demo-card popup-open-guide-card">
+            <div class="chrome-window-demo" id="popupChromeDemo" aria-live="polite">
+              <div class="toolbar-sketch-arrow" id="extensionGuideArrow" aria-hidden="true">
+                <span>點擊 Chrome 右上角拼圖圖示</span>
+                <svg viewBox="0 0 420 170" focusable="false">
+                  <path class="arrow-shadow" d="M128 86 C210 78 290 48 387 18"></path>
+                  <path class="arrow-line" d="M128 86 C210 78 290 48 387 18"></path>
+                  <path class="arrow-head" d="M362 5 L392 17 L369 39"></path>
+                </svg>
+              </div>
+
+              <div class="chrome-frame-top" aria-hidden="true">
+                <div class="chrome-tab active">
+                  <span class="chrome-tab-favicon">N</span>
+                  <span>Netflix</span>
+                </div>
+                <div class="chrome-tab-spacer"></div>
+              </div>
+
+              <div class="chrome-frame-toolbar" aria-hidden="true">
+                <div class="chrome-nav-icons">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </div>
+                <div class="chrome-address-mock">https://www.netflix.com/watch/123456</div>
+                <div class="chrome-frame-actions">
+                  <span class="chrome-star-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                      <path d="m12 3 2.6 5.4 5.9.8-4.2 4.1 1 5.8-5.3-2.8-5.3 2.8 1-5.8-4.2-4.1 5.9-.8L12 3Z"></path>
+                    </svg>
+                  </span>
+                  <span class="chrome-puzzle-target" id="mockPuzzleIcon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                      <path d="M8.5 3.5h4.2v1.4a2.1 2.1 0 1 0 4.2 0V3.5h3.6v5h-1.4a2.1 2.1 0 1 0 0 4.2h1.4v5h-5v1.4a2.1 2.1 0 1 1-4.2 0v-1.4h-5v-4.2H4.9a2.1 2.1 0 1 1 0-4.2h1.4v-5h2.2Z"></path>
+                    </svg>
+                  </span>
+                  <span class="chrome-menu-dots">
+                    <i></i>
+                    <i></i>
+                    <i></i>
+                  </span>
+                </div>
+              </div>
+
+              <div class="chrome-frame-viewport">
+                <div class="popup-waiting-state">
+                  <span class="waiting-orbit"></span>
+                  <h3>等待你打開 SubPal popup</h3>
+                  <p>請在真正的 Chrome 工具列點拼圖圖示，然後選擇 SubPal 字幕助手。</p>
+                </div>
+
+                <div class="popup-guide-success" id="popupGuideSuccess">
+                  <span class="success-mark">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                      <path d="M20 6 9 17l-5-5"></path>
+                    </svg>
+                  </span>
+                  <h3>教學完成</h3>
+                  <p>已偵測到 SubPal popup 開啟。之後你可以從這裡快速查看狀態，或進入完整設定頁。</p>
+                </div>
+
+              </div>
+            </div>
+          </div>
+
+          <div class="instruction-card popup-guide-card">
+            <div class="instruction-item active">
+              <span class="instruction-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path d="M4 7h16"></path>
+                  <path d="M4 12h10"></path>
+                  <path d="M4 17h7"></path>
+                </svg>
+              </span>
+              <div>
+                <h3>點 Chrome 右上角拼圖圖示</h3>
+                <p>這一步要操作真正的瀏覽器工具列，不是畫面中的模擬視窗。</p>
+              </div>
+            </div>
+            <div class="instruction-item">
+              <span class="instruction-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path d="M4 7h16"></path>
+                  <path d="M4 12h12"></path>
+                  <path d="M4 17h8"></path>
+                </svg>
+              </span>
+              <div>
+                <h3>從清單打開 SubPal</h3>
+                <p>如果沒有釘選 SubPal 圖示，請在擴充功能清單中選擇 SubPal 字幕助手。</p>
+              </div>
+            </div>
+            <div class="instruction-item">
+              <span class="instruction-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path d="M20 6 9 17l-5-5"></path>
+                </svg>
+              </span>
+              <div>
+                <h3>完成後畫面會自動更新</h3>
+                <p>偵測到 popup 開啟後，左側空白區會顯示完成提示；下一步仍可手動前往。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tutorial-step" data-step="6" aria-labelledby="step6-title">
+        <div class="completion-layout">
+          <div class="completion-card">
+            <span class="eyebrow">設定完成</span>
+            <h2 id="step6-title">SubPal 已準備好在 Netflix 上運作</h2>
+            <p>你可以直接前往 Netflix，也可以從 Chrome 工具列 popup 快速調整字幕，或進入完整設定頁檢查更多選項。</p>
+            <div class="completion-summary">
+              <div>
+                <strong id="summaryMode">雙語字幕</strong>
+                <span>顯示模式</span>
+              </div>
+              <div>
+                <strong id="summaryLanguages">繁體中文 / English</strong>
+                <span>語言組合</span>
+              </div>
+              <div>
+                <strong id="summaryStyle">自訂</strong>
+                <span>字幕外觀</span>
+              </div>
+            </div>
+            <div class="completion-community" aria-label="SubPal 社群連結">
+              <a class="community-button" href="https://discord.gg/Z5KPr2yPfq" target="_blank" rel="noopener noreferrer" title="加入 Discord 社群">
+                <svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                  <path d="M20.317 4.3698a19.7913 19.7913 0 0 0-4.8851-1.5152.0741.0741 0 0 0-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 0 0-.0785-.037 19.7363 19.7363 0 0 0-4.8852 1.515.0699.0699 0 0 0-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 0 0 .0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 0 0 .0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 0 0-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 0 1-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 0 1 .0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 0 1 .0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 0 1-.0066.1276 12.2986 12.2986 0 0 1-1.873.8914.0766.0766 0 0 0-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 0 0 .0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 0 0 .0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 0 0-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"></path>
+                </svg>
+                Discord 社群
+              </a>
+              <a class="community-button" href="https://github.com/Vinson1014/SubPal" target="_blank" rel="noopener noreferrer" title="GitHub Repository">
+                <svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                  <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"></path>
+                </svg>
+                GitHub
+              </a>
+            </div>
+            <div class="completion-actions">
+              <button type="button" class="btn btn-primary" id="openNetflixBtn">前往 Netflix</button>
+              <button type="button" class="btn btn-secondary" id="openOptionsBtn">開啟設定頁</button>
+              <button type="button" class="btn btn-ghost" id="closeTutorialBtn">關閉教學</button>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
-    <!-- 高亮遮罩 -->
-    <div class="highlight-overlay" id="highlight-overlay"></div>
-    <div class="highlight-tooltip" id="highlight-tooltip"></div>
+    <footer class="tutorial-footer">
+      <button type="button" class="btn btn-ghost" id="skipTutorialBtn">跳過教學</button>
+      <div class="footer-actions">
+        <button type="button" class="btn btn-secondary" id="prevBtn">上一步</button>
+        <button type="button" class="btn btn-primary" id="nextBtn">下一步</button>
+      </div>
+    </footer>
+  </div>
 
-    <!-- 模擬提交頁面（全局） -->
-    <div class="tutorial-submit-overlay" id="tutorial-submit-overlay">
-        <div class="tutorial-submit-window" id="tutorial-submit-window">
-            <h3>模擬提交翻譯</h3>
-            <div class="submit-form-group">
-                <label for="tutorial-original-text">原始翻譯</label>
-                <input id="tutorial-original-text" type="text" value="這是需要改進的字幕翻譯" readonly>
-            </div>
-            <div class="submit-form-group">
-                <label for="tutorial-language-select">字幕語言</label>
-                <select id="tutorial-language-select">
-                    <option value="">請選擇語言...</option>
-                    <option value="en">English</option>
-                    <option value="zh-TW" selected>繁體中文</option>
-                    <option value="zh-CN">简体中文</option>
-                    <option value="ja">日本語</option>
-                    <option value="ko">한국어</option>
-                    <option value="es">Español</option>
-                    <option value="fr">Français</option>
-                    <option value="de">Deutsch</option>
-                    <option value="other">其他 (請在原因中註明)</option>
-                </select>
-            </div>
-            <div class="submit-form-group">
-                <label for="tutorial-translation-input">修正翻譯</label>
-                <textarea id="tutorial-translation-input">這是需要改進的字幕翻譯</textarea>
-            </div>
-            <div class="submit-form-group">
-                <label for="tutorial-reason-input">調整原因</label>
-                <textarea id="tutorial-reason-input" placeholder="請簡述為何需要調整翻譯(這只是模擬請隨便亂填)"></textarea>
-            </div>
-            <div class="submit-form-buttons">
-                <button id="tutorial-cancel-btn" class="tutorial-cancel-btn">取消</button>
-                <button id="tutorial-submit-btn" class="tutorial-submit-btn">提交</button>
-            </div>
+  <div class="submit-overlay" id="submitOverlay" aria-hidden="true">
+    <div class="submit-dialog" role="dialog" aria-modal="true" aria-labelledby="submit-title">
+      <div class="dialog-header">
+        <div>
+          <span class="eyebrow">模擬提交</span>
+          <h3 id="submit-title">提交更好的翻譯</h3>
         </div>
+        <button type="button" class="icon-button" id="closeSubmitDemo" aria-label="關閉">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path d="M18 6 6 18"></path>
+            <path d="m6 6 12 12"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="form-grid">
+        <label>
+          <span>原始翻譯</span>
+          <input type="text" value="這是可以被社群改善的字幕翻譯" readonly>
+        </label>
+        <label>
+          <span>字幕語言</span>
+          <select id="submitLanguageSelect"></select>
+        </label>
+        <label>
+          <span>修正翻譯</span>
+          <textarea id="submitTranslationInput">這是一段可以由社群改進的字幕翻譯</textarea>
+        </label>
+        <label>
+          <span>調整原因</span>
+          <textarea id="submitReasonInput" placeholder="例如：語序更自然、意思更貼近原文"></textarea>
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-ghost" id="cancelSubmitDemo">取消</button>
+        <button type="button" class="btn btn-primary" id="submitDemoBtn">提交</button>
+      </div>
     </div>
+  </div>
 
-    <script type="module" src="tutorial.js"></script>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="tutorial.js"></script>
 </body>
 </html>
