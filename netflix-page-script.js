@@ -299,6 +299,7 @@
       this.latestManifestVideoId = null; // 從 licensedmanifest 追蹤的真實 videoId
       this.debugEvents = [];
       this.maxDebugEvents = 50;
+      this.nextRequestId = 1;
     }
 
     /**
@@ -487,8 +488,11 @@
     createSubtitleRequestInfo({ url, method = null, pageUrl = location.href, manifestVideoId = null, source }) {
       const playbackSnapshot = this.getActivePlaybackSnapshot();
       const activePlayerVideoId = playbackSnapshot.playerApiVideoId || playbackSnapshot.movieId || null;
+      const requestTime = Date.now();
+      const requestId = `${source || 'netflix'}-${requestTime}-${this.nextRequestId++}`;
 
       const evidence = {
+        requestId,
         ttmlLanguage: null,
         manifestVideoIdAtRequest: manifestVideoId,
         activePlayerVideoIdAtRequest: activePlayerVideoId,
@@ -497,7 +501,7 @@
         sessionIdAtRequest: playbackSnapshot.sessionId,
         latestManifestVideoIdAtRequest: this.latestManifestVideoId,
         requestUrl: url,
-        requestTime: Date.now(),
+        requestTime,
         source,
         playbackSnapshot
       };
@@ -514,6 +518,49 @@
         ...evidence,
         derivedSubtitleVideo
       };
+    }
+
+    /**
+     * 建立 request/response debug event 共用摘要，避免 candidate 事件被誤認為已確認 TTML。
+     */
+    createNetworkDebugPayload(requestInfo, extra = {}) {
+      return {
+        requestId: requestInfo.requestId,
+        source: requestInfo.source || requestInfo.type,
+        url: requestInfo.url,
+        manifestVideoId: requestInfo.manifestVideoId,
+        activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
+        pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
+        sessionId: requestInfo.sessionIdAtRequest,
+        currentTrack: requestInfo.currentTrackAtRequest,
+        derivedSubtitleVideo: requestInfo.derivedSubtitleVideo,
+        pageUrl: requestInfo.pageUrl,
+        ...extra
+      };
+    }
+
+    /**
+     * 記錄 response-time evidence。這只補診斷資料，不改變既有 cache key 行為。
+     */
+    attachResponseEvidence(requestInfo, responseInfo = {}) {
+      const responseTime = Date.now();
+      const responseTimeEvidence = {
+        responseTime,
+        playbackSnapshot: this.getActivePlaybackSnapshot()
+      };
+
+      requestInfo.responseTime = responseTime;
+      requestInfo.responseTimeEvidence = responseTimeEvidence;
+      requestInfo.responseInfo = {
+        status: responseInfo.status ?? null,
+        contentType: responseInfo.contentType || null,
+        contentLength: responseInfo.contentLength || null,
+        responseType: responseInfo.responseType || null,
+        bodySkipped: !!responseInfo.bodySkipped,
+        skipReason: responseInfo.skipReason || null
+      };
+
+      return responseTimeEvidence;
     }
 
     /**
@@ -562,7 +609,7 @@
             // debugLog('攔截到 Netflix 請求:', this._interceptorUrl);
           }
 
-          if (self.isSubtitleRequest(this._interceptorUrl)) {
+          if (self.isCdnRequestCandidate(this._interceptorUrl)) {
             // 在 send 時再次更新快照，確保捕獲到同步執行中最新的 manifest videoId
             this._interceptorManifestVideoId = self.latestManifestVideoId;
             this._interceptorRequestInfo = self.createSubtitleRequestInfo({
@@ -572,17 +619,10 @@
               manifestVideoId: this._interceptorManifestVideoId,
               source: 'xhr'
             });
-            self.recordDebugEvent('TTML_REQUEST', {
-              source: 'xhr',
-              url: this._interceptorUrl,
-              manifestVideoId: this._interceptorManifestVideoId,
-              activePlayerVideoId: this._interceptorRequestInfo.activePlayerVideoIdAtRequest,
-              pageUrlVideoId: this._interceptorRequestInfo.pageUrlVideoIdAtRequest,
-              sessionId: this._interceptorRequestInfo.sessionIdAtRequest,
-              currentTrack: this._interceptorRequestInfo.currentTrackAtRequest,
-              derivedSubtitleVideo: this._interceptorRequestInfo.derivedSubtitleVideo,
-              pageUrl: this._interceptorPageUrl
-            });
+            self.recordDebugEvent('CDN_REQUEST_CANDIDATE',
+              self.createNetworkDebugPayload(this._interceptorRequestInfo, {
+                classification: 'oca-cdn-candidate'
+              }));
             self.handleXHRRequest(this);
           }
         }
@@ -595,8 +635,8 @@
         const [url] = args;
         if (typeof url === 'string') {
 
-          if (self.isSubtitleRequest(url)) {
-            // debugLog('識別為字幕請求:', url);
+          if (self.isCdnRequestCandidate(url)) {
+            // debugLog('識別為 Netflix CDN candidate:', url);
             const manifestVideoId = self.latestManifestVideoId;  // 快照當前 manifest videoId
             const requestInfo = self.createSubtitleRequestInfo({
               url,
@@ -604,17 +644,10 @@
               manifestVideoId,
               source: 'fetch'
             });
-            self.recordDebugEvent('TTML_REQUEST', {
-              source: 'fetch',
-              url,
-              manifestVideoId,
-              activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
-              pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
-              sessionId: requestInfo.sessionIdAtRequest,
-              currentTrack: requestInfo.currentTrackAtRequest,
-              derivedSubtitleVideo: requestInfo.derivedSubtitleVideo,
-              pageUrl: location.href
-            });
+            self.recordDebugEvent('CDN_REQUEST_CANDIDATE',
+              self.createNetworkDebugPayload(requestInfo, {
+                classification: 'oca-cdn-candidate'
+              }));
             const fetchPromise = self.originalFetch.apply(this, args);
             self.handleFetchRequest(fetchPromise, requestInfo);
             return fetchPromise;
@@ -660,15 +693,11 @@
     }
 
     /**
-     * 檢查是否為字幕請求
+     * 檢查是否為 Netflix CDN response candidate。
+     * 這裡只代表「值得在 response 階段分類」，不代表已確認是字幕。
      */
-    isSubtitleRequest(url) {
-      // 方案1：攔截所有 Netflix CDN 請求，在 response 時檢查是否為 TTML
-      if (url.includes('oca.nflxvideo.net')) {
-        return true;
-      }
-      
-      return false;
+    isCdnRequestCandidate(url) {
+      return typeof url === 'string' && url.includes('oca.nflxvideo.net');
     }
 
     /**
@@ -686,46 +715,30 @@
       // debugLog('攔截到字幕請求:', requestInfo.url);
 
       xhr.addEventListener('load', () => {
+        const responseInfo = {
+          status: xhr.status,
+          contentType: xhr.getResponseHeader('content-type'),
+          contentLength: xhr.getResponseHeader('content-length'),
+          responseType: xhr.responseType || 'text'
+        };
+
         if (xhr.status === 200) {
           try {
-            const contentType = xhr.getResponseHeader('content-type');
-            let content = '';
-            
-            // 根據 responseType 和 contentType 選擇正確的讀取方式
-            if (xhr.responseType === 'arraybuffer' || contentType === 'application/octet-stream') {
-              // debugLog('檢測到 arraybuffer 格式，進行解碼...');
-              
-              // 將 arraybuffer 轉換為文本
-              const arrayBuffer = xhr.response;
-              const uint8Array = new Uint8Array(arrayBuffer);
-              
-              // 嘗試 UTF-8 解碼
-              try {
-                content = new TextDecoder('utf-8').decode(uint8Array);
-                // debugLog('UTF-8 解碼成功');
-              } catch (e) {
-                // 備用解碼方案
-                content = new TextDecoder('latin1').decode(uint8Array);
-                debugLog('Latin1 解碼成功');
-              }
-            } else if (xhr.responseType === '' || xhr.responseType === 'text') {
-              // 只有在確定是文本格式時才使用 responseText
-              content = xhr.responseText;
-              // debugLog('使用 responseText 讀取');
-            } else {
-              // 嘗試直接使用response
-              content = xhr.response;
-              if (typeof content !== 'string') {
-                // debugLog('未支持的responseType:', xhr.responseType);
-                return;
-              }
-              // debugLog('使用 response 直接讀取');
-            }
-            
-            this.processSubtitleContent(content, requestInfo);
+            const readResult = this.readXHRTextCandidate(xhr, responseInfo);
+            this.processSubtitleContent(readResult.content || '', requestInfo, {
+              ...responseInfo,
+              bodySkipped: !!readResult.skipped,
+              skipReason: readResult.skipReason || null
+            });
           } catch (error) {
             console.error('處理字幕響應失敗:', error);
           }
+        } else {
+          this.processSubtitleContent('', requestInfo, {
+            ...responseInfo,
+            bodySkipped: true,
+            skipReason: `http-status-${xhr.status}`
+          });
         }
       });
 
@@ -740,13 +753,157 @@
     async handleFetchRequest(fetchPromise, requestInfo) {
       try {
         const response = await fetchPromise;
+        const responseInfo = {
+          status: response.status,
+          contentType: response.headers.get('content-type'),
+          contentLength: response.headers.get('content-length'),
+          responseType: 'fetch'
+        };
+
         if (response.ok) {
-          const content = await response.clone().text();
-          this.processSubtitleContent(content, requestInfo);
+          const readResult = await this.readFetchTextCandidate(response, responseInfo);
+          this.processSubtitleContent(readResult.content || '', requestInfo, {
+            ...responseInfo,
+            bodySkipped: !!readResult.skipped,
+            skipReason: readResult.skipReason || null
+          });
+        } else {
+          this.processSubtitleContent('', requestInfo, {
+            ...responseInfo,
+            bodySkipped: true,
+            skipReason: `http-status-${response.status}`
+          });
         }
       } catch (error) {
         console.error('處理Fetch字幕請求失敗:', error);
       }
+    }
+
+    normalizeContentType(contentType) {
+      return (contentType || '').toLowerCase();
+    }
+
+    isLikelyBinaryContentType(contentType) {
+      const normalized = this.normalizeContentType(contentType);
+      return normalized.includes('application/octet-stream') ||
+        normalized.includes('video/') ||
+        normalized.includes('audio/');
+    }
+
+    isLikelyXmlContentType(contentType) {
+      const normalized = this.normalizeContentType(contentType);
+      return normalized.includes('text/xml') ||
+        normalized.includes('application/xml') ||
+        normalized.includes('+xml');
+    }
+
+    shouldSkipBodyRead(responseInfo = {}) {
+      return this.isLikelyBinaryContentType(responseInfo.contentType) &&
+        !this.isLikelyXmlContentType(responseInfo.contentType);
+    }
+
+    async readFetchTextCandidate(response, responseInfo) {
+      if (this.shouldSkipBodyRead(responseInfo)) {
+        const arrayBuffer = await response.clone().arrayBuffer();
+        const prefix = this.decodeArrayBufferPrefix(arrayBuffer);
+        if (!this.looksLikeTTMLPrefix(prefix)) {
+          return {
+            content: '',
+            skipped: true,
+            skipReason: 'binary-content-type'
+          };
+        }
+
+        return {
+          content: this.decodeArrayBufferText(arrayBuffer),
+          skipped: false
+        };
+      }
+
+      return {
+        content: await response.clone().text(),
+        skipped: false
+      };
+    }
+
+    decodeArrayBufferPrefix(arrayBuffer, length = 512) {
+      if (!arrayBuffer) {
+        return '';
+      }
+
+      try {
+        const prefix = arrayBuffer.slice(0, Math.min(arrayBuffer.byteLength, length));
+        return new TextDecoder('utf-8').decode(prefix);
+      } catch (error) {
+        return '';
+      }
+    }
+
+    decodeArrayBufferText(arrayBuffer) {
+      const uint8Array = new Uint8Array(arrayBuffer);
+      try {
+        return new TextDecoder('utf-8').decode(uint8Array);
+      } catch (error) {
+        return new TextDecoder('latin1').decode(uint8Array);
+      }
+    }
+
+    looksLikeTTMLPrefix(content) {
+      const prefix = (content || '').trimStart().slice(0, 1024);
+      return prefix.startsWith('<?xml') || prefix.startsWith('<tt') || prefix.includes('<tt ');
+    }
+
+    readXHRTextCandidate(xhr, responseInfo) {
+      const responseType = xhr.responseType || '';
+      const contentType = responseInfo?.contentType || '';
+      const binaryContentType = this.isLikelyBinaryContentType(contentType) &&
+        !this.isLikelyXmlContentType(contentType);
+
+      if (responseType === 'arraybuffer') {
+        const arrayBuffer = xhr.response;
+        const prefix = this.decodeArrayBufferPrefix(arrayBuffer);
+        if (binaryContentType && !this.looksLikeTTMLPrefix(prefix)) {
+          return {
+            content: '',
+            skipped: true,
+            skipReason: 'binary-content-type'
+          };
+        }
+
+        return {
+          content: this.decodeArrayBufferText(arrayBuffer),
+          skipped: false
+        };
+      }
+
+      if (responseType === '' || responseType === 'text') {
+        const content = xhr.responseText || '';
+        if (binaryContentType && !this.looksLikeTTMLPrefix(content)) {
+          return {
+            content: '',
+            skipped: true,
+            skipReason: 'binary-content-type'
+          };
+        }
+
+        return {
+          content,
+          skipped: false
+        };
+      }
+
+      if (typeof xhr.response === 'string') {
+        return {
+          content: xhr.response,
+          skipped: false
+        };
+      }
+
+      return {
+        content: '',
+        skipped: true,
+        skipReason: `unsupported-response-type-${responseType || 'unknown'}`
+      };
     }
 
     /**
@@ -760,6 +917,148 @@
         debugLog('解析TTML語言失敗:', error);
         return 'unknown';
       }
+    }
+
+    parseTTMLTimeToMs(value) {
+      if (!value || typeof value !== 'string') {
+        return null;
+      }
+
+      const trimmed = value.trim();
+      const clockMatch = trimmed.match(/^(\d+):(\d{2}):(\d{2})(?:[.:](\d{1,3}))?/);
+      if (clockMatch) {
+        const hours = Number(clockMatch[1]);
+        const minutes = Number(clockMatch[2]);
+        const seconds = Number(clockMatch[3]);
+        const fraction = clockMatch[4] ? Number(clockMatch[4].padEnd(3, '0').slice(0, 3)) : 0;
+        return ((hours * 3600) + (minutes * 60) + seconds) * 1000 + fraction;
+      }
+
+      const secondsMatch = trimmed.match(/^([\d.]+)s$/);
+      if (secondsMatch) {
+        return Math.round(Number(secondsMatch[1]) * 1000);
+      }
+
+      const msMatch = trimmed.match(/^([\d.]+)ms$/);
+      if (msMatch) {
+        return Math.round(Number(msMatch[1]));
+      }
+
+      return null;
+    }
+
+    createBodyHash(content) {
+      // 診斷用短 hash，避免 debug snapshot 直接依賴完整 TTML body。
+      let hash = 0x811c9dc5;
+      for (let i = 0; i < content.length; i++) {
+        hash ^= content.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193);
+      }
+      return `fnv1a-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+    }
+
+    createUrlKey(url) {
+      try {
+        const urlObj = new URL(url);
+        const params = new URLSearchParams(urlObj.search);
+        const stableParams = ['o', 'v', 'e', 't']
+          .map(name => {
+            const value = params.get(name);
+            return value ? `${name}=${value}` : null;
+          })
+          .filter(Boolean)
+          .join('&');
+        return `${urlObj.hostname}${urlObj.pathname}${stableParams ? `?${stableParams}` : ''}`;
+      } catch (error) {
+        return url || null;
+      }
+    }
+
+    classifyTTMLResponse(content, responseInfo = {}) {
+      const text = content || '';
+      const trimmedStart = text.trimStart().slice(0, 2048);
+      const contentType = responseInfo.contentType || null;
+      const hasXmlDeclaration = trimmedStart.startsWith('<?xml');
+      const hasTTElement = /<tt(?:\s|>)/i.test(trimmedStart) || /<tt(?:\s|>)/i.test(text);
+      const hasTTMLNamespace = /xmlns(?::\w+)?=["'][^"']*ttml/i.test(text);
+      const hasParagraphBegin = /<p\b[^>]*\bbegin=/i.test(text);
+      const xmlLang = this.parseTTMLLanguage(text);
+      const isTTML = !!text &&
+        (this.isLikelyXmlContentType(contentType) || hasXmlDeclaration || hasTTElement) &&
+        hasTTElement &&
+        (hasTTMLNamespace || hasParagraphBegin);
+
+      let reason = 'confirmed-ttml';
+      if (!isTTML) {
+        if (responseInfo.bodySkipped) {
+          reason = responseInfo.skipReason || 'body-skipped';
+        } else if (!text) {
+          reason = 'empty-body';
+        } else if (!hasTTElement) {
+          reason = 'missing-tt-element';
+        } else if (!hasTTMLNamespace && !hasParagraphBegin) {
+          reason = 'missing-ttml-markers';
+        } else {
+          reason = 'not-ttml';
+        }
+      }
+
+      return {
+        isTTML,
+        reason,
+        contentType,
+        hasXmlDeclaration,
+        hasTTElement,
+        hasTTMLNamespace,
+        hasParagraphBegin,
+        xmlLang
+      };
+    }
+
+    extractRawTTMLMetadata(content, requestInfo, responseInfo = {}, classification = {}) {
+      const cueMatches = Array.from(content.matchAll(/<p\b[^>]*>/gi));
+      const cueTimes = cueMatches.map(match => {
+        const tag = match[0];
+        const begin = tag.match(/\bbegin="([^"]+)"/i)?.[1] || null;
+        const end = tag.match(/\bend="([^"]+)"/i)?.[1] || null;
+        return {
+          beginMs: this.parseTTMLTimeToMs(begin),
+          endMs: this.parseTTMLTimeToMs(end)
+        };
+      });
+
+      const firstCueMs = cueTimes.find(time => time.beginMs !== null)?.beginMs ?? null;
+      const latestCueMs = cueTimes.reduce((latest, time) => {
+        const candidate = time.endMs ?? time.beginMs;
+        return candidate !== null && candidate > latest ? candidate : latest;
+      }, -1);
+      const lastCueMs = latestCueMs >= 0 ? latestCueMs : null;
+
+      return {
+        bodyHash: this.createBodyHash(content),
+        xmlLang: classification.xmlLang || this.parseTTMLLanguage(content),
+        nttmUuid: content.match(/nttm:uuid="([^"]+)"/i)?.[1] || null,
+        cueCount: cueMatches.length,
+        firstCueMs,
+        lastCueMs,
+        contentLength: Number(responseInfo.contentLength) || content.length,
+        urlKey: this.createUrlKey(requestInfo.url),
+        requestId: requestInfo.requestId,
+        requestTime: requestInfo.requestTime,
+        responseTime: requestInfo.responseTime || null,
+        requestTimeEvidence: {
+          source: requestInfo.source || requestInfo.type || null,
+          manifestVideoIdAtRequest: requestInfo.manifestVideoIdAtRequest || requestInfo.manifestVideoId || null,
+          activePlayerVideoIdAtRequest: requestInfo.activePlayerVideoIdAtRequest || null,
+          pageUrlVideoIdAtRequest: requestInfo.pageUrlVideoIdAtRequest || null,
+          sessionIdAtRequest: requestInfo.sessionIdAtRequest || null,
+          currentTrackAtRequest: requestInfo.currentTrackAtRequest || null,
+          playbackSnapshot: requestInfo.playbackSnapshot || null,
+          derivedSubtitleVideo: requestInfo.derivedSubtitleVideo || null
+        },
+        responseTimeEvidence: requestInfo.responseTimeEvidence || null,
+        classification
+      };
     }
 
     /**
@@ -786,51 +1085,82 @@
     /**
      * 處理字幕內容
      */
-    processSubtitleContent(content, requestInfo) {
-      if (content.includes('<?xml') && content.includes('<tt')) {
-        const language = this.parseTTMLLanguage(content);
-        requestInfo.ttmlLanguage = language;
+    processSubtitleContent(content, requestInfo, responseInfo = {}) {
+      const responseTimeEvidence = this.attachResponseEvidence(requestInfo, responseInfo);
+      const classification = this.classifyTTMLResponse(content, responseInfo);
 
-        // 生成包含正確語言的 cacheKey（使用 request-time manifest videoId 或 URL）
-        const cacheKey = this.generateCacheKeyWithLanguage(requestInfo.url, language, requestInfo.pageUrl, requestInfo.manifestVideoId);
+      this.recordDebugEvent('CDN_RESPONSE_CANDIDATE',
+        this.createNetworkDebugPayload(requestInfo, {
+          status: responseInfo.status ?? null,
+          contentType: responseInfo.contentType || null,
+          contentLength: responseInfo.contentLength || null,
+          responseType: responseInfo.responseType || null,
+          bodySkipped: !!responseInfo.bodySkipped,
+          skipReason: responseInfo.skipReason || null,
+          classification
+        }));
 
-        // 如果無法生成有效的緩存鍵（例如預覽影片），則跳過緩存
-        if (!cacheKey) {
-          debugLog(`跳過緩存 - 無法生成有效緩存鍵，語言: ${language}`);
-          return;
-        }
+      if (!classification.isTTML) {
+        return;
+      }
 
-        debugLog(`TTML攔截成功: ${language}, 緩存鍵: ${cacheKey}`);
-        this.recordDebugEvent('TTML_RESPONSE', {
-          source: requestInfo.type,
+      const language = classification.xmlLang || this.parseTTMLLanguage(content);
+      const rawMetadata = this.extractRawTTMLMetadata(content, requestInfo, responseInfo, classification);
+      requestInfo.ttmlLanguage = language;
+      requestInfo.rawTtmlMetadata = rawMetadata;
+      requestInfo.responseTimeEvidence = responseTimeEvidence;
+
+      // 生成包含正確語言的 cacheKey（使用 request-time manifest videoId 或 URL）
+      const cacheKey = this.generateCacheKeyWithLanguage(requestInfo.url, language, requestInfo.pageUrl, requestInfo.manifestVideoId);
+
+      // 如果無法生成有效的緩存鍵（例如預覽影片），則跳過緩存
+      if (!cacheKey) {
+        debugLog(`跳過緩存 - 無法生成有效緩存鍵，語言: ${language}`);
+        return;
+      }
+
+      debugLog(`TTML攔截成功: ${language}, 緩存鍵: ${cacheKey}`);
+      this.recordDebugEvent('TTML_RESPONSE_DETECTED',
+        this.createNetworkDebugPayload(requestInfo, {
           language,
           cacheKey,
-          manifestVideoId: requestInfo.manifestVideoId,
-          activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
-          pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
-          sessionId: requestInfo.sessionIdAtRequest,
-          currentTrack: requestInfo.currentTrackAtRequest,
-          derivedSubtitleVideo: requestInfo.derivedSubtitleVideo,
-          requestUrl: requestInfo.url,
-          pageUrl: requestInfo.pageUrl
-        });
+          rawMetadata
+        }));
+      this.recordDebugEvent('TTML_RESPONSE', {
+        requestId: requestInfo.requestId,
+        source: requestInfo.type,
+        language,
+        cacheKey,
+        manifestVideoId: requestInfo.manifestVideoId,
+        activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
+        pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
+        sessionId: requestInfo.sessionIdAtRequest,
+        currentTrack: requestInfo.currentTrackAtRequest,
+        derivedSubtitleVideo: requestInfo.derivedSubtitleVideo,
+        rawMetadata,
+        requestUrl: requestInfo.url,
+        pageUrl: requestInfo.pageUrl
+      });
 
-        // 緩存 raw TTML（混合策略：既緩存又通知）
-        this.interceptedTTMLs.set(cacheKey, {
-          rawContent: content,
-          requestInfo: requestInfo,
-          language: language,
-          timestamp: Date.now()
-        });
+      // 緩存 raw TTML（混合策略：既緩存又通知）
+      this.interceptedTTMLs.set(cacheKey, {
+        rawContent: content,
+        requestInfo: requestInfo,
+        rawMetadata,
+        metadata: rawMetadata,
+        language: language,
+        timestamp: Date.now()
+      });
 
-        // 通知後續模組（即使沒人接收也沒關係）
-        this.notifyRawTTMLIntercepted({
-          cacheKey: cacheKey,
-          rawContent: content,
-          requestInfo: requestInfo,
-          language: language
-        });
-      }
+      // 通知後續模組（即使沒人接收也沒關係）
+      this.notifyRawTTMLIntercepted({
+        cacheKey: cacheKey,
+        rawContent: content,
+        requestInfo: requestInfo,
+        rawMetadata,
+        metadata: rawMetadata,
+        language: language
+      });
     }
 
     // TTML 解析邏輯已移至 subtitle-parser.js
@@ -879,6 +1209,7 @@
         sessionId: data.requestInfo?.sessionIdAtRequest,
         currentTrack: data.requestInfo?.currentTrackAtRequest,
         derivedSubtitleVideo: data.requestInfo?.derivedSubtitleVideo,
+        rawMetadata: data.rawMetadata || data.metadata || data.requestInfo?.rawTtmlMetadata || null,
         requestUrl: data.requestInfo?.url
       });
       
@@ -959,6 +1290,24 @@
      * 獲取字幕攔截診斷快照
      */
     getDebugSnapshot() {
+      const rawTTMLMetadata = Array.from(this.interceptedTTMLs.entries()).map(([cacheKey, value]) => ({
+        cacheKey,
+        language: value.language || null,
+        rawMetadata: value.rawMetadata || value.metadata || value.requestInfo?.rawTtmlMetadata || null,
+        requestInfo: {
+          requestId: value.requestInfo?.requestId || null,
+          source: value.requestInfo?.source || value.requestInfo?.type || null,
+          requestTime: value.requestInfo?.requestTime || value.requestInfo?.timestamp || null,
+          responseTime: value.requestInfo?.responseTime || null,
+          manifestVideoIdAtRequest: value.requestInfo?.manifestVideoIdAtRequest || value.requestInfo?.manifestVideoId || null,
+          activePlayerVideoIdAtRequest: value.requestInfo?.activePlayerVideoIdAtRequest || null,
+          pageUrlVideoIdAtRequest: value.requestInfo?.pageUrlVideoIdAtRequest || null,
+          sessionIdAtRequest: value.requestInfo?.sessionIdAtRequest || null,
+          currentTrackAtRequest: value.requestInfo?.currentTrackAtRequest || null,
+          derivedSubtitleVideo: value.requestInfo?.derivedSubtitleVideo || null
+        }
+      }));
+
       return {
         playback: this.getActivePlaybackSnapshot(),
         latestManifestVideoId: this.latestManifestVideoId,
@@ -966,6 +1315,7 @@
         interceptedSubtitleCacheKeys: Array.from(this.interceptedSubtitles.keys()),
         interceptedTTMLCount: this.interceptedTTMLs.size,
         interceptedSubtitleCount: this.interceptedSubtitles.size,
+        rawTTMLMetadata,
         recentEvents: this.debugEvents.slice(-20)
       };
     }

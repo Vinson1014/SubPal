@@ -35,6 +35,9 @@ class UIManager {
     // 當前狀態
     this.currentSubtitle = null;
     this.currentMode = null;
+    this.nativeSubtitleHidden = false;
+    this.nativeHideReason = 'not-hidden';
+    this.nativeSubtitleVisibilityUpdatedAt = null;
     
     // 懸停事件管理
     this.hoverEventHandlers = null;
@@ -780,6 +783,13 @@ class UIManager {
       isInitialized: this.isInitialized,
       currentMode: this.currentMode,
       hasCurrentSubtitle: !!this.currentSubtitle,
+      nativeSubtitle: {
+        hidden: !!document.getElementById('subpal-hide-native-subtitles'),
+        nativeSubtitleHidden: !!document.getElementById('subpal-hide-native-subtitles'),
+        nativeHideReason: this.nativeHideReason,
+        lastRecordedHiddenState: this.nativeSubtitleHidden,
+        updatedAt: this.nativeSubtitleVisibilityUpdatedAt
+      },
       components: {
         subtitleDisplay: this.subtitleDisplay?.getStatus(),
         interactionPanel: this.interactionPanel?.getStatus(),
@@ -877,6 +887,9 @@ class UIManager {
       styleElement.remove();
       this.log('✅ 已移除CSS規則，恢復Netflix原生字幕');
     }
+    this.nativeSubtitleHidden = false;
+    this.nativeHideReason = 'showNativeSubtitles-called';
+    this.nativeSubtitleVisibilityUpdatedAt = Date.now();
   }
 
   // 隱藏原生字幕
@@ -886,6 +899,9 @@ class UIManager {
     // 檢查是否已經注入過樣式，避免重複注入
     if (document.getElementById('subpal-hide-native-subtitles')) {
       this.log('原生字幕隱藏樣式已存在，無需重複注入');
+      this.nativeSubtitleHidden = true;
+      this.nativeHideReason = 'hideNativeSubtitles-called-style-already-present';
+      this.nativeSubtitleVisibilityUpdatedAt = Date.now();
       return;
     }
     
@@ -903,6 +919,9 @@ class UIManager {
     
     // 將 style 元素添加到 head 中
     document.head.appendChild(styleElement);
+    this.nativeSubtitleHidden = true;
+    this.nativeHideReason = 'hideNativeSubtitles-called-existing-behavior';
+    this.nativeSubtitleVisibilityUpdatedAt = Date.now();
     this.log('✅ 已注入CSS規則隱藏Netflix原生字幕');
   }
 

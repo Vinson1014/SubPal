@@ -52,6 +52,10 @@ class SubtitleInterceptor {
     this.debugEvents = [];
     this.maxDebugEvents = 50;
     this.lastProcessedTTMLEvidence = null;
+    this.lastSubtitleMissingReasons = {
+      primary: null,
+      secondary: null
+    };
   }
 
   recordDebugEvent(type, data = {}) {
@@ -367,6 +371,8 @@ class SubtitleInterceptor {
           cacheKey: cacheKey,
           rawContent: ttmlData.rawContent,
           requestInfo: ttmlData.requestInfo,
+          rawMetadata: ttmlData.rawMetadata || ttmlData.metadata || ttmlData.requestInfo?.rawTtmlMetadata || null,
+          metadata: ttmlData.metadata || ttmlData.rawMetadata || null,
           language: ttmlData.language
         });
       });
@@ -448,6 +454,7 @@ class SubtitleInterceptor {
       return {
         cacheKey,
         language: data?.language || null,
+        rawMetadata: data?.rawMetadata || data?.metadata || data?.requestInfo?.rawTtmlMetadata || null,
         rawLength: rawContent.length,
         rawStart: rawContent.substring(0, 160),
         hasXmlDeclaration: rawContent.includes('<?xml'),
@@ -681,12 +688,20 @@ class SubtitleInterceptor {
       
       if (!matchedKey) {
         this.log(`未找到 ${languageCode} 的緩存數據，可用鍵:`, Array.from(this.interceptedSubtitles.keys()));
+        this.lastSubtitleMissingReasons[type] = 'no-parsed-language-cache';
+        this.recordDebugEvent('LANGUAGE_CACHE_MISSING', {
+          slot: type,
+          languageCode,
+          reason: this.lastSubtitleMissingReasons[type],
+          availableCacheKeys: Array.from(this.interceptedSubtitles.keys())
+        });
         return;
       }
       
       const languageData = selectedEntry.data;
       if (!languageData || !languageData.subtitles) {
         this.log(`${languageCode} 緩存數據無效`);
+        this.lastSubtitleMissingReasons[type] = 'invalid-parsed-language-cache';
         return;
       }
       
@@ -701,10 +716,12 @@ class SubtitleInterceptor {
           this.primarySubtitles = subtitles;
           this.primaryTimeIndex = timeIndex;
           this.primarySubtitleMeta = this.createSubtitleSlotMeta(matchedKey, languageData);
+          this.lastSubtitleMissingReasons.primary = null;
         } else if (type === 'secondary') {
           this.secondarySubtitles = subtitles;
           this.secondaryTimeIndex = timeIndex;
           this.secondarySubtitleMeta = this.createSubtitleSlotMeta(matchedKey, languageData);
+          this.lastSubtitleMissingReasons.secondary = null;
         }
         
         this.log(`${languageCode} (${type}) 字幕從緩存載入完成`);
@@ -847,6 +864,7 @@ class SubtitleInterceptor {
       const selectedEntry = this.selectBestLanguageCacheEntry(languageCode);
       if (!selectedEntry) {
         this.log(`未找到 ${languageCode} 的字幕數據，可用鍵:`, Array.from(this.interceptedSubtitles.keys()));
+        this.lastSubtitleMissingReasons[type] = 'no-parsed-language-cache-after-switch';
         return;
       }
 
@@ -855,6 +873,7 @@ class SubtitleInterceptor {
 
       if (!languageData || !languageData.subtitles) {
         this.log(`${languageCode} 字幕數據無效`);
+        this.lastSubtitleMissingReasons[type] = 'invalid-parsed-language-cache-after-switch';
         return;
       }
 
@@ -871,10 +890,12 @@ class SubtitleInterceptor {
           this.primarySubtitles = subtitles;
           this.primaryTimeIndex = timeIndex;
           this.primarySubtitleMeta = this.createSubtitleSlotMeta(matchedKey, languageData);
+          this.lastSubtitleMissingReasons.primary = null;
         } else if (type === 'secondary') {
           this.secondarySubtitles = subtitles;
           this.secondaryTimeIndex = timeIndex;
           this.secondarySubtitleMeta = this.createSubtitleSlotMeta(matchedKey, languageData);
+          this.lastSubtitleMissingReasons.secondary = null;
         }
         
         this.log(`${languageCode} ${type} 字幕載入完成`);
@@ -1103,6 +1124,8 @@ class SubtitleInterceptor {
 
   // 獲取攔截狀態
   getStatus() {
+    const subtitleReadiness = this.getSubtitleReadinessSnapshot();
+
     return {
       isActive: this.isActive,
       isInitialized: this.isInitialized,
@@ -1116,6 +1139,18 @@ class SubtitleInterceptor {
       playbackContext: this.getCurrentPlaybackContext(),
       interceptedSubtitleCacheKeys: Array.from(this.interceptedSubtitles.keys()),
       lastProcessedTTMLEvidence: this.lastProcessedTTMLEvidence,
+      primaryMissingReason: subtitleReadiness.primary.missingReason,
+      secondaryMissingReason: subtitleReadiness.secondary.missingReason,
+      subtitleReadiness,
+      nativeSubtitleVisibility: subtitleReadiness.nativeSubtitle,
+      rawTTMLMetadata: Array.from(this.interceptedSubtitles.entries()).map(([cacheKey, data]) => ({
+        cacheKey,
+        language: data?.language || null,
+        rawMetadata: data?.rawMetadata || data?.metadata || data?.requestInfo?.rawTtmlMetadata || null,
+        gate: data?.gate || null,
+        subtitleCount: Array.isArray(data?.subtitles) ? data.subtitles.length : 0,
+        playbackContext: data?.playbackContext || null
+      })),
       recentEvents: this.debugEvents.slice(-20),
       hasTimeIndex: {
         primary: !!this.primaryTimeIndex,
@@ -1131,6 +1166,101 @@ class SubtitleInterceptor {
         timestamp: this.lastRenderedSubtitle.timestamp
       } : null
     };
+  }
+
+  getNativeSubtitleVisibilitySnapshot() {
+    const hideStyle = document.getElementById('subpal-hide-native-subtitles');
+    return {
+      hidden: !!hideStyle,
+      nativeSubtitleHidden: !!hideStyle,
+      nativeHideReason: hideStyle ?
+        'subpal-hide-native-subtitles-style-present-existing-behavior' :
+        'native-hide-style-not-present'
+    };
+  }
+
+  getSubtitleReadinessSnapshot() {
+    const context = this.getCurrentPlaybackContext();
+    const nativeSubtitle = this.getNativeSubtitleVisibilitySnapshot();
+    const primaryReady = this.primarySubtitles.length > 0 && this.isSubtitleSlotMetaCurrent(this.primarySubtitleMeta);
+    const secondaryReady = this.secondarySubtitles.length > 0 && this.isSubtitleSlotMetaCurrent(this.secondarySubtitleMeta);
+
+    return {
+      primary: {
+        language: this.primaryLanguage,
+        ready: primaryReady,
+        count: this.primarySubtitles.length,
+        cacheKey: this.primarySubtitleMeta?.cacheKey || null,
+        metaCurrent: this.primarySubtitleMeta ? this.isSubtitleSlotMetaCurrent(this.primarySubtitleMeta) : false,
+        missingReason: primaryReady ? null : this.computeSubtitleMissingReason('primary', this.primaryLanguage, context)
+      },
+      secondary: {
+        language: this.secondaryLanguage,
+        ready: secondaryReady,
+        count: this.secondarySubtitles.length,
+        cacheKey: this.secondarySubtitleMeta?.cacheKey || null,
+        metaCurrent: this.secondarySubtitleMeta ? this.isSubtitleSlotMetaCurrent(this.secondarySubtitleMeta) : false,
+        missingReason: secondaryReady ? null : this.computeSubtitleMissingReason('secondary', this.secondaryLanguage, context)
+      },
+      nativeSubtitleHidden: nativeSubtitle.hidden,
+      nativeHideReason: nativeSubtitle.nativeHideReason,
+      nativeSubtitle,
+      context
+    };
+  }
+
+  computeSubtitleMissingReason(slot, languageCode, context = this.getCurrentPlaybackContext()) {
+    if (!languageCode) {
+      return 'missing-target-language';
+    }
+
+    if (!context.videoId || context.videoId === 'unknown') {
+      return 'missing-current-video-id';
+    }
+
+    if (context.state === 'transitioning') {
+      return 'playback-context-transitioning';
+    }
+
+    const matchingEntries = Array.from(this.interceptedSubtitles.entries())
+      .filter(([, data]) => this.matchesLanguage(data?.language, languageCode));
+
+    if (matchingEntries.length === 0) {
+      return this.lastSubtitleMissingReasons[slot] || 'no-parsed-language-cache';
+    }
+
+    const gateResults = matchingEntries.map(([cacheKey, data]) => {
+      const gate = this.evaluateSubtitleGate(cacheKey, data?.requestInfo);
+      const epochMatches = data?.playbackContext?.epoch === undefined ||
+        context.epoch === null ||
+        data.playbackContext.epoch === context.epoch;
+      return {
+        cacheKey,
+        gate,
+        epochMatches,
+        subtitleCount: Array.isArray(data?.subtitles) ? data.subtitles.length : 0
+      };
+    });
+
+    const currentEntries = gateResults.filter(result => result.gate.accepted && result.epochMatches);
+    if (currentEntries.length === 0) {
+      const rejected = gateResults.find(result => !result.gate.accepted);
+      if (rejected?.gate?.reason) {
+        return `parsed-language-cache-gate-${rejected.gate.reason}`;
+      }
+
+      if (gateResults.some(result => !result.epochMatches)) {
+        return 'parsed-language-cache-epoch-mismatch';
+      }
+
+      return 'parsed-language-cache-not-current';
+    }
+
+    if (!currentEntries.some(result => result.subtitleCount > 0)) {
+      return 'parse-empty';
+    }
+
+    return 'slot-not-assigned';
   }
 
   // 清理資源
@@ -1149,6 +1279,10 @@ class SubtitleInterceptor {
     this.primarySubtitleMeta = null;
     this.secondarySubtitleMeta = null;
     this.interceptedSubtitles.clear();
+    this.lastSubtitleMissingReasons = {
+      primary: null,
+      secondary: null
+    };
     this.pendingLoadInterceptedSubtitles = false;
     this.pendingLoadReason = null;
     if (this.contextReloadTimer) {
@@ -1351,6 +1485,7 @@ class SubtitleInterceptor {
       contextEpoch: context.epoch,
       contextState: context.state,
       gate,
+      rawMetadata: data?.rawMetadata || data?.metadata || data?.requestInfo?.rawTtmlMetadata || null,
       assignedAt: Date.now()
     };
   }
@@ -1395,6 +1530,7 @@ class SubtitleInterceptor {
       this.primarySubtitles = [];
       this.primaryTimeIndex = null;
       this.primarySubtitleMeta = null;
+      this.lastSubtitleMissingReasons.primary = 'active-slot-cleared-by-gate';
       changed = true;
     }
 
@@ -1407,6 +1543,7 @@ class SubtitleInterceptor {
       this.secondarySubtitles = [];
       this.secondaryTimeIndex = null;
       this.secondarySubtitleMeta = null;
+      this.lastSubtitleMissingReasons.secondary = 'active-slot-cleared-by-gate';
       changed = true;
     }
 
@@ -1457,6 +1594,7 @@ class SubtitleInterceptor {
    */
   handleRawTTMLIntercepted(event) {
     const { cacheKey, rawContent, requestInfo, language } = event;
+    const rawMetadata = event.rawMetadata || event.metadata || requestInfo?.rawTtmlMetadata || null;
     
     this.log(`接收到 raw TTML: ${language}, 緩存鍵: ${cacheKey}`);
     
@@ -1483,10 +1621,17 @@ class SubtitleInterceptor {
 
     if (!gate.accepted) {
       this.log('RAW TTML 不符合目前 PlaybackContext，丟棄避免覆蓋 UI:', gate);
+      if (this.matchesLanguage(language, this.primaryLanguage)) {
+        this.lastSubtitleMissingReasons.primary = `raw-ttml-gate-${gate.reason}`;
+      }
+      if (this.matchesLanguage(language, this.secondaryLanguage)) {
+        this.lastSubtitleMissingReasons.secondary = `raw-ttml-gate-${gate.reason}`;
+      }
       this.recordDebugEvent('RAW_TTML_REJECTED_BY_GATE', {
         cacheKey,
         language,
         requestInfo,
+        rawMetadata,
         gate
       });
       if (gate.reason === 'playback-context-transitioning') {
@@ -1519,6 +1664,7 @@ class SubtitleInterceptor {
       currentVideoId,
       isCurrentVideo,
       requestInfo,
+      rawMetadata,
       playbackContext: this.getCurrentPlaybackContext(),
       gate,
       handledAt: Date.now()
@@ -1537,6 +1683,8 @@ class SubtitleInterceptor {
         this.interceptedSubtitles.set(cacheKey, {
           subtitles: subtitles,
           requestInfo: requestInfo,
+          rawMetadata,
+          metadata: rawMetadata,
           language: language,
           timeIndex: timeIndex,
           regionConfigs: regionConfigs,
@@ -1559,13 +1707,21 @@ class SubtitleInterceptor {
             timeIndex,
             playbackContext: this.getCurrentPlaybackContext(),
             gate,
-            requestInfo
+            requestInfo,
+            rawMetadata
           });
         }
       } else {
+        if (this.matchesLanguage(language, this.primaryLanguage)) {
+          this.lastSubtitleMissingReasons.primary = 'parse-empty';
+        }
+        if (this.matchesLanguage(language, this.secondaryLanguage)) {
+          this.lastSubtitleMissingReasons.secondary = 'parse-empty';
+        }
         this.recordDebugEvent('RAW_TTML_PARSE_EMPTY', {
           cacheKey,
           language,
+          rawMetadata,
           rawLength: rawContent?.length || 0,
           rawStart: rawContent?.substring(0, 160) || '',
           gate
@@ -1573,9 +1729,16 @@ class SubtitleInterceptor {
       }
     } catch (error) {
       console.error(`解析 ${language} TTML 失敗:`, error);
+      if (this.matchesLanguage(language, this.primaryLanguage)) {
+        this.lastSubtitleMissingReasons.primary = 'parse-error';
+      }
+      if (this.matchesLanguage(language, this.secondaryLanguage)) {
+        this.lastSubtitleMissingReasons.secondary = 'parse-error';
+      }
       this.recordDebugEvent('RAW_TTML_PARSE_ERROR', {
         cacheKey,
         language,
+        rawMetadata,
         rawLength: rawContent?.length || 0,
         rawStart: rawContent?.substring(0, 160) || '',
         error: error.message,
@@ -1599,8 +1762,10 @@ class SubtitleInterceptor {
         contextEpoch: metadata.playbackContext?.epoch ?? null,
         contextState: metadata.playbackContext?.state || null,
         gate: metadata.gate || null,
+        rawMetadata: metadata.rawMetadata || metadata.requestInfo?.rawTtmlMetadata || null,
         assignedAt: Date.now()
       };
+      this.lastSubtitleMissingReasons.primary = null;
       this.log(`主要語言字幕已更新: ${language} (目標: ${this.primaryLanguage})`);
     } else if (this.matchesLanguage(language, this.secondaryLanguage) && this.dualSubtitleEnabled) {
       this.secondarySubtitles = subtitles;
@@ -1612,8 +1777,10 @@ class SubtitleInterceptor {
         contextEpoch: metadata.playbackContext?.epoch ?? null,
         contextState: metadata.playbackContext?.state || null,
         gate: metadata.gate || null,
+        rawMetadata: metadata.rawMetadata || metadata.requestInfo?.rawTtmlMetadata || null,
         assignedAt: Date.now()
       };
+      this.lastSubtitleMissingReasons.secondary = null;
       this.log(`次要語言字幕已更新: ${language} (目標: ${this.secondaryLanguage})`);
     }
   }
