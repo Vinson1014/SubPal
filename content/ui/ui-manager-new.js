@@ -38,6 +38,7 @@ class UIManager {
     this.nativeSubtitleHidden = false;
     this.nativeHideReason = 'not-hidden';
     this.nativeSubtitleVisibilityUpdatedAt = null;
+    this.acquisitionToastKeys = new Set();
     
     // 懸停事件管理
     this.hoverEventHandlers = null;
@@ -377,6 +378,7 @@ class UIManager {
   setupEventHandlers() {
     registerInternalEventHandler('SUBTITLE_READINESS_CHANGED', (event) => {
       this.syncNativeSubtitleVisibility(event.readiness?.renderReadiness, event.reason || 'subtitle-readiness-changed');
+      this.handleAcquisitionFailureNotification(event);
     });
 
     // 監聽影片切換事件 - 統一重新初始化所有UI組件
@@ -385,6 +387,7 @@ class UIManager {
       
       try {
         this.showNativeSubtitles('video-id-changing');
+        this.acquisitionToastKeys.clear();
 
         // 1. 清理所有UI組件
         this.cleanup();
@@ -832,6 +835,59 @@ class UIManager {
     this.showNativeSubtitles(renderReadiness.nativeHideReason || renderReadiness.primaryMissingReason || reason);
   }
 
+  handleAcquisitionFailureNotification(event) {
+    if (event?.reason !== 'language-acquisition-failed' || event.slot !== 'primary') {
+      return;
+    }
+
+    const failureReason = event.failureReason ||
+      event.readiness?.primary?.missingReason ||
+      'unknown';
+
+    // transitioning 期間仍會安排 context ready 後重試，不過早宣告最終失敗。
+    if (failureReason === 'playback-context-transitioning') {
+      return;
+    }
+
+    const context = event.readiness?.context || {};
+    const contextKey = [
+      context.videoId || 'unknown-video',
+      context.epoch ?? 'unknown-epoch',
+      event.languageCode || 'unknown-language',
+      failureReason
+    ].join('|');
+
+    if (this.acquisitionToastKeys.has(contextKey)) {
+      return;
+    }
+
+    this.acquisitionToastKeys.add(contextKey);
+    if (this.acquisitionToastKeys.size > 50) {
+      const oldestKey = this.acquisitionToastKeys.values().next().value;
+      this.acquisitionToastKeys.delete(oldestKey);
+    }
+
+    this.showWarningToast(this.createAcquisitionFailureMessage(failureReason), {
+      duration: 8000,
+      showIcon: true
+    });
+  }
+
+  createAcquisitionFailureMessage(reason) {
+    const reasonText = {
+      'only-billboard-ttml': '目前只找到預覽或非播放頁字幕資料',
+      'switch-track-timeout': '切換字幕軌後仍未收到可用字幕資料',
+      'parse-error': '字幕資料解析失敗',
+      'parse-empty': '字幕資料沒有可用時間軸內容',
+      'response-not-ttml': 'Netflix 回應不是可用字幕格式',
+      'no-watch-session-ttml': '尚未找到目前播放影片的字幕資料',
+      'missing-current-video-id': '暫時無法確認目前播放影片',
+      'playback-context-transitioning': '播放內容正在切換'
+    }[reason] || '尚未找到可用字幕資料';
+
+    return `SubPal 未能建立自訂主字幕：${reasonText}。目前會保留 Netflix 原生字幕。`;
+  }
+
   // 獲取當前狀態
   getStatus() {
     return {
@@ -844,6 +900,9 @@ class UIManager {
         nativeHideReason: this.nativeHideReason,
         lastRecordedHiddenState: this.nativeSubtitleHidden,
         updatedAt: this.nativeSubtitleVisibilityUpdatedAt
+      },
+      acquisitionNotifications: {
+        shownKeys: this.acquisitionToastKeys.size
       },
       components: {
         subtitleDisplay: this.subtitleDisplay?.getStatus(),
@@ -935,6 +994,7 @@ class UIManager {
     this.isInitialized = false;
     this.currentSubtitle = null;
     this.currentMode = null;
+    this.acquisitionToastKeys.clear();
     this.eventCallbacks = {};
     
     this.log('UI 管理器資源清理完成');

@@ -56,6 +56,12 @@ class SubtitleInterceptor {
       primary: null,
       secondary: null
     };
+    this.lastAcquisitionResults = {
+      primary: null,
+      secondary: null
+    };
+    this.acquisitionWaiters = new Map();
+    this.nextAcquisitionWaiterId = 1;
   }
 
   recordDebugEvent(type, data = {}) {
@@ -169,6 +175,7 @@ class SubtitleInterceptor {
     
     // 停止渲染循環
     this.stopRenderLoop();
+    this.clearAcquisitionWaiters('interceptor-stopped');
 
     if (this.contextReloadTimer) {
       clearTimeout(this.contextReloadTimer);
@@ -237,27 +244,19 @@ class SubtitleInterceptor {
     
     try {
       // 階段1: 緩存檢查與分析
-      const existingCache = await this.checkExistingCache();
-      const cacheStatus = this.analyzeCacheStatus(existingCache);
+      await this.checkExistingCache();
       
       // 階段2: 記錄 Netflix 預設語言
       const defaultLanguage = await this.recordDefaultLanguage();
       
-      // 階段3: 根據緩存狀態決定策略
-      const strategy = this.determineStrategy(cacheStatus);
-      this.log('執行策略:', strategy);
-      
-      // 階段4: 執行字幕獲取策略
-      await this.executeStrategy(strategy, defaultLanguage);
-
-      // 階段5: 確保 primarySubtitles/secondarySubtitles 指向當前影片的資料
-      // 無論策略為何，都從快取重新載入，避免預載場景下殘留舊集數的字幕
-      await this.loadLanguageDataFromCache(this.primaryLanguage, 'primary');
+      // 階段3: 逐一確保目標語言存在有效 watch-session TTML。
+      // ensureLanguageAvailable 會先用 parsed/raw cache，再必要時切換或 refresh Netflix 字幕軌。
+      await this.ensureLanguageAvailable(this.primaryLanguage, 'primary', { defaultLanguage });
       if (this.dualSubtitleEnabled) {
-        await this.loadLanguageDataFromCache(this.secondaryLanguage, 'secondary');
+        await this.ensureLanguageAvailable(this.secondaryLanguage, 'secondary', { defaultLanguage });
       }
 
-      // 階段6: 切回預設語言
+      // 階段4: 切回預設語言
       await this.restoreDefaultLanguage(defaultLanguage);
       
       this.log('字幕數據載入完成，已恢復用戶原始設定');
@@ -512,8 +511,8 @@ class SubtitleInterceptor {
    */
   analyzeCacheStatus(existingCache) {
     // 使用 base-code fallback 檢查緩存（如 "zh" 匹配 "zh-Hant"）
-    const hasPrimary = Array.from(existingCache.keys()).some(k => this.matchesLanguage(k, this.primaryLanguage));
-    const hasSecondary = Array.from(existingCache.keys()).some(k => this.matchesLanguage(k, this.secondaryLanguage));
+    const hasPrimary = Array.from(existingCache.keys()).some(k => this.matchesLanguageForAcquisition(k, this.primaryLanguage));
+    const hasSecondary = Array.from(existingCache.keys()).some(k => this.matchesLanguageForAcquisition(k, this.secondaryLanguage));
     
     const status = {
       hasPrimary,
@@ -605,7 +604,7 @@ class SubtitleInterceptor {
       // 但仍要等待可能的攔截事件
       await this.waitForInterception(languageCode);
       // 重要：等待後需要從緩存載入字幕數據到對應的屬性
-      const type = this.matchesLanguage(languageCode, this.primaryLanguage) ? 'primary' : 'secondary';
+      const type = this.resolveLanguageRole(languageCode, 'auto');
       await this.loadLanguageDataFromCache(languageCode, type);
     } else {
       this.log(`切換到 ${languageCode}`);
@@ -623,7 +622,7 @@ class SubtitleInterceptor {
 
     for (const [cacheKey, data] of this.interceptedSubtitles.entries()) {
       const keyLang = cacheKey.split('_')[0];
-      if (!this.matchesLanguage(keyLang, languageCode) || !this.isSubtitleEntryCurrent(cacheKey, data)) {
+      if (!this.matchesLanguageForAcquisition(keyLang, languageCode) || !this.isSubtitleEntryCurrent(cacheKey, data)) {
         continue;
       }
 
@@ -737,29 +736,428 @@ class SubtitleInterceptor {
     }
   }
 
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  isLanguageSlotReady(languageCode, role) {
+    this.ensureActiveSubtitleSlotsCurrent();
+
+    const subtitles = role === 'primary' ? this.primarySubtitles : this.secondarySubtitles;
+    const meta = role === 'primary' ? this.primarySubtitleMeta : this.secondarySubtitleMeta;
+    if (!Array.isArray(subtitles) || subtitles.length === 0 || !meta) {
+      return false;
+    }
+
+    if (!this.isSubtitleSlotMetaCurrent(meta)) {
+      return false;
+    }
+
+    const parsedLanguage = this.parseCacheKey(meta.cacheKey || '')?.language;
+    return this.matchesLanguageForAcquisition(parsedLanguage, languageCode);
+  }
+
+  setLanguageAcquisitionResult(role, result) {
+    const normalized = {
+      role,
+      timestamp: Date.now(),
+      ...result
+    };
+    this.lastAcquisitionResults[role] = normalized;
+
+    if (!normalized.success && normalized.reason) {
+      this.lastSubtitleMissingReasons[role] = normalized.reason;
+      this.dispatchSubtitleReadinessChanged('language-acquisition-failed', {
+        slot: role,
+        languageCode: normalized.languageCode,
+        failureReason: normalized.reason
+      });
+    }
+
+    return normalized;
+  }
+
+  async tryLoadLanguageFromCaches(languageCode, role, reason) {
+    await this.checkExistingCache();
+    await this.loadLanguageDataFromCache(languageCode, role);
+
+    const ready = this.isLanguageSlotReady(languageCode, role);
+    this.recordDebugEvent('LANGUAGE_ACQUISITION_CACHE_CHECK', {
+      role,
+      languageCode,
+      reason,
+      ready,
+      subtitleCount: role === 'primary' ? this.primarySubtitles.length : this.secondarySubtitles.length
+    });
+
+    return ready;
+  }
+
+  async ensureLanguageAvailable(languageCode, role, options = {}) {
+    const startedAt = Date.now();
+    const context = this.getCurrentPlaybackContext();
+
+    this.recordDebugEvent('LANGUAGE_ACQUISITION_STARTED', {
+      role,
+      languageCode,
+      context,
+      defaultLanguage: options.defaultLanguage || null
+    });
+
+    if (context.state === 'transitioning') {
+      this.scheduleReloadAfterContextReady('language-acquisition-context-transitioning', context);
+      return this.setLanguageAcquisitionResult(role, {
+        success: false,
+        languageCode,
+        reason: 'playback-context-transitioning',
+        context,
+        durationMs: Date.now() - startedAt
+      });
+    }
+
+    if (!context.videoId || context.videoId === 'unknown') {
+      return this.setLanguageAcquisitionResult(role, {
+        success: false,
+        languageCode,
+        reason: 'missing-current-video-id',
+        context,
+        durationMs: Date.now() - startedAt
+      });
+    }
+
+    if (await this.tryLoadLanguageFromCaches(languageCode, role, 'initial-cache-check')) {
+      return this.setLanguageAcquisitionResult(role, {
+        success: true,
+        languageCode,
+        source: 'cache',
+        durationMs: Date.now() - startedAt
+      });
+    }
+
+    const currentLanguage = await this.getCurrentNetflixLanguage();
+    const currentMatchesTarget = this.matchesLanguageForAcquisition(currentLanguage?.code, languageCode);
+    const trackAcquisition = currentMatchesTarget ?
+      await this.refreshLanguageTrack(languageCode, role, currentLanguage, options) :
+      await this.switchLanguageAndWait(languageCode, role, {
+        reason: 'target-language-not-current',
+        timeoutMs: 10000
+      });
+
+    if (trackAcquisition.ready || await this.tryLoadLanguageFromCaches(languageCode, role, 'post-track-acquisition-cache-check')) {
+      return this.setLanguageAcquisitionResult(role, {
+        success: true,
+        languageCode,
+        source: currentMatchesTarget ? 'track-refresh' : 'track-switch',
+        currentLanguage,
+        durationMs: Date.now() - startedAt
+      });
+    }
+
+    const diagnosis = await this.diagnoseLanguageAvailability(languageCode, role);
+    const directReason = trackAcquisition.reason && trackAcquisition.reason !== 'not-ready' ?
+      trackAcquisition.reason :
+      null;
+    return this.setLanguageAcquisitionResult(role, {
+      success: false,
+      languageCode,
+      reason: directReason || diagnosis.reason,
+      currentLanguage,
+      diagnosis,
+      trackAcquisition,
+      durationMs: Date.now() - startedAt
+    });
+  }
+
+  async getCurrentNetflixLanguage() {
+    try {
+      const result = await sendMessageToPageScript({
+        type: 'GET_CURRENT_LANGUAGE'
+      });
+      return result?.language || null;
+    } catch (error) {
+      this.recordDebugEvent('LANGUAGE_ACQUISITION_CURRENT_LANGUAGE_FAILED', {
+        error: error.message
+      });
+      return null;
+    }
+  }
+
+  async getAvailableNetflixLanguages() {
+    try {
+      const result = await sendMessageToPageScript({
+        type: 'GET_AVAILABLE_LANGUAGES'
+      });
+      return Array.isArray(result?.languages) ? result.languages : [];
+    } catch (error) {
+      this.recordDebugEvent('LANGUAGE_ACQUISITION_AVAILABLE_LANGUAGES_FAILED', {
+        error: error.message
+      });
+      return [];
+    }
+  }
+
+  findAlternateLanguage(targetLanguage, availableLanguages, preferredLanguage = null) {
+    const candidates = (availableLanguages || [])
+      .filter(language => language?.code && !this.matchesLanguageForAcquisition(language.code, targetLanguage));
+
+    if (preferredLanguage) {
+      const preferred = candidates.find(language => this.matchesLanguageForAcquisition(language.code, preferredLanguage));
+      if (preferred) {
+        return preferred;
+      }
+    }
+
+    return candidates[0] || null;
+  }
+
+  resolveLanguageRole(languageCode, requestedRole = 'auto') {
+    if (requestedRole === 'primary' || requestedRole === 'secondary') {
+      return requestedRole;
+    }
+
+    if (this.matchesLanguageForAcquisition(languageCode, this.primaryLanguage)) {
+      return 'primary';
+    }
+
+    if (this.matchesLanguageForAcquisition(languageCode, this.secondaryLanguage)) {
+      return 'secondary';
+    }
+
+    return 'primary';
+  }
+
+  async switchNetflixLanguage(languageCode, reason) {
+    this.recordDebugEvent('LANGUAGE_ACQUISITION_SWITCH_LANGUAGE', {
+      languageCode,
+      reason
+    });
+
+    const switchResult = await sendMessageToPageScript({
+      type: 'SWITCH_LANGUAGE',
+      languageCode
+    });
+
+    if (!switchResult?.success) {
+      throw new Error(switchResult?.error || `switch-language-failed-${languageCode}`);
+    }
+
+    await this.sleep(600);
+    return switchResult;
+  }
+
+  async switchLanguageAndWait(languageCode, role, options = {}) {
+    const timeoutMs = options.timeoutMs || 10000;
+    const reason = options.reason || 'switch-language';
+
+    const waitPromise = this.waitForInterception(languageCode, timeoutMs);
+    try {
+      await this.switchNetflixLanguage(languageCode, reason);
+    } catch (error) {
+      this.clearAcquisitionWaiters('switch-language-failed');
+      this.recordDebugEvent('LANGUAGE_ACQUISITION_SWITCH_FAILED', {
+        role,
+        languageCode,
+        reason,
+        error: error.message
+      });
+      this.lastSubtitleMissingReasons[role] = 'switch-track-timeout';
+      return {
+        ready: false,
+        reason: 'switch-track-timeout',
+        error: error.message
+      };
+    }
+
+    const interception = await waitPromise;
+    await this.tryLoadLanguageFromCaches(languageCode, role, `after-${reason}`);
+
+    const ready = this.isLanguageSlotReady(languageCode, role);
+    this.recordDebugEvent('LANGUAGE_ACQUISITION_SWITCH_RESULT', {
+      role,
+      languageCode,
+      reason,
+      ready,
+      interception
+    });
+
+    if (!ready && interception?.reason === 'timeout') {
+      this.lastSubtitleMissingReasons[role] = 'switch-track-timeout';
+    }
+
+    return {
+      ready,
+      reason: ready ? null : (interception?.reason === 'timeout' ? 'switch-track-timeout' : (interception?.reason || 'not-ready')),
+      interception
+    };
+  }
+
+  async refreshLanguageTrack(languageCode, role, currentLanguage, options = {}) {
+    const availableLanguages = await this.getAvailableNetflixLanguages();
+    const alternateLanguage = this.findAlternateLanguage(
+      languageCode,
+      availableLanguages,
+      options.defaultLanguage
+    );
+
+    this.recordDebugEvent('LANGUAGE_ACQUISITION_REFRESH_STARTED', {
+      role,
+      languageCode,
+      currentLanguage,
+      alternateLanguage,
+      availableLanguageCodes: availableLanguages.map(language => language.code)
+    });
+
+    if (alternateLanguage?.code) {
+      try {
+        await this.switchNetflixLanguage(alternateLanguage.code, 'refresh-away-from-target-language');
+      } catch (error) {
+        this.recordDebugEvent('LANGUAGE_ACQUISITION_REFRESH_AWAY_FAILED', {
+          role,
+          languageCode,
+          alternateLanguage,
+          error: error.message
+        });
+      }
+    }
+
+    return await this.switchLanguageAndWait(languageCode, role, {
+      reason: alternateLanguage?.code ? 'refresh-back-to-target-language' : 'refresh-target-language-no-alternate',
+      timeoutMs: 10000
+    });
+  }
+
+  async diagnoseLanguageAvailability(languageCode, role = null) {
+    const context = this.getCurrentPlaybackContext();
+    const matchingParsedEntries = Array.from(this.interceptedSubtitles.entries())
+      .filter(([, data]) => this.matchesLanguageForAcquisition(data?.language, languageCode));
+
+    let rawEntries = [];
+    let rawError = null;
+    try {
+      const response = await sendMessageToPageScript({
+        type: 'GET_ALL_INTERCEPTED_TTML'
+      });
+      rawEntries = Object.entries(response?.allTTMLs || {})
+        .filter(([cacheKey, data]) => {
+          const parsedKey = this.parseCacheKey(cacheKey);
+          return this.matchesLanguageForAcquisition(data?.language || parsedKey?.language, languageCode);
+        })
+        .map(([cacheKey, data]) => ({
+          cacheKey,
+          language: data?.language || null,
+          gate: this.evaluateSubtitleGate(cacheKey, data?.requestInfo),
+          rawMetadata: data?.rawMetadata || data?.metadata || data?.requestInfo?.rawTtmlMetadata || null
+        }));
+    } catch (error) {
+      rawError = error.message;
+    }
+
+    let recentNonTTMLCandidateCount = 0;
+    try {
+      const debugResponse = await sendMessageToPageScript({
+        type: 'GET_SUBPAL_DEBUG_SNAPSHOT'
+      });
+      recentNonTTMLCandidateCount = (debugResponse?.debugSnapshot?.recentEvents || [])
+        .filter(event => event.type === 'CDN_RESPONSE_CANDIDATE' && event.classification?.isTTML === false)
+        .length;
+    } catch (error) {
+      // Debug snapshot 失敗只影響診斷摘要，不影響 acquisition 流程。
+    }
+
+    const gateReasonCounts = rawEntries.reduce((counts, entry) => {
+      const reason = entry.gate?.reason || 'unknown';
+      counts[reason] = (counts[reason] || 0) + 1;
+      return counts;
+    }, {});
+
+    let reason = 'no-watch-session-ttml';
+    if (context.state === 'transitioning') {
+      reason = 'playback-context-transitioning';
+    } else if (role && this.lastSubtitleMissingReasons[role] === 'parse-error') {
+      reason = 'parse-error';
+    } else if (matchingParsedEntries.some(([, data]) => Array.isArray(data?.subtitles) && data.subtitles.length === 0)) {
+      reason = 'parse-empty';
+    } else if (rawEntries.length === 0 && recentNonTTMLCandidateCount > 0) {
+      reason = 'response-not-ttml';
+    } else if (rawEntries.length > 0 && rawEntries.every(entry => entry.gate?.reason === 'request-session-not-watch')) {
+      reason = 'only-billboard-ttml';
+    } else if (rawEntries.length > 0 && rawEntries.some(entry => entry.gate?.accepted)) {
+      reason = 'parse-empty';
+    }
+
+    return {
+      reason,
+      context,
+      rawEntryCount: rawEntries.length,
+      parsedEntryCount: matchingParsedEntries.length,
+      gateReasonCounts,
+      recentNonTTMLCandidateCount,
+      rawError,
+      rawEntries: rawEntries.slice(0, 10)
+    };
+  }
+
   /**
    * 等待攔截事件
    */
-  async waitForInterception(languageCode) {
+  async waitForInterception(languageCode, timeoutMs = 3000) {
     return new Promise((resolve) => {
+      const waiterId = this.nextAcquisitionWaiterId++;
       const timeout = setTimeout(() => {
+        this.acquisitionWaiters.delete(waiterId);
         this.log(`等待 ${languageCode} 攔截事件超時`);
-        resolve();
-      }, 3000);
-      
-      const handleInterception = (event) => {
-        const gate = this.evaluateSubtitleGate(event.cacheKey, event.requestInfo);
-        if (this.matchesLanguage(event.language, languageCode) && gate.accepted) {
-          clearTimeout(timeout);
-          this.log(`收到 ${languageCode} 攔截事件 (TTML lang: ${event.language})`);
-          resolve();
-        } else if (this.matchesLanguage(event.language, languageCode)) {
-          this.log(`忽略不符合目前 PlaybackContext 的 ${languageCode} 攔截事件:`, gate);
-        }
-      };
-      
-      registerInternalEventHandler('RAW_TTML_INTERCEPTED', handleInterception);
+        resolve({
+          matched: false,
+          reason: 'timeout'
+        });
+      }, timeoutMs);
+
+      this.acquisitionWaiters.set(waiterId, {
+        languageCode,
+        timeout,
+        resolve,
+        createdAt: Date.now()
+      });
     });
+  }
+
+  resolveAcquisitionWaiters(event) {
+    if (!this.acquisitionWaiters.size) {
+      return;
+    }
+
+    const gate = this.evaluateSubtitleGate(event.cacheKey, event.requestInfo);
+    for (const [waiterId, waiter] of this.acquisitionWaiters.entries()) {
+      if (!this.matchesLanguageForAcquisition(event.language, waiter.languageCode)) {
+        continue;
+      }
+
+      if (!gate.accepted) {
+        this.log(`忽略不符合目前 PlaybackContext 的 ${waiter.languageCode} 攔截事件:`, gate);
+        continue;
+      }
+
+      clearTimeout(waiter.timeout);
+      this.acquisitionWaiters.delete(waiterId);
+      this.log(`收到 ${waiter.languageCode} 攔截事件 (TTML lang: ${event.language})`);
+      waiter.resolve({
+        matched: true,
+        cacheKey: event.cacheKey,
+        language: event.language,
+        gate
+      });
+    }
+  }
+
+  clearAcquisitionWaiters(reason = 'cleared') {
+    for (const [, waiter] of this.acquisitionWaiters.entries()) {
+      clearTimeout(waiter.timeout);
+      waiter.resolve({
+        matched: false,
+        reason
+      });
+    }
+    this.acquisitionWaiters.clear();
   }
 
   /**
@@ -783,136 +1181,20 @@ class SubtitleInterceptor {
   // 為特定語言載入字幕（使用事件通知的攔截邏輯）
   async loadSubtitleForLanguage(languageCode, type) {
     this.log(`載入 ${type} 語言字幕: ${languageCode}`);
-    
-    try {
-      // 步驟0: 確保攔截器已準備就緒
-      const interceptorStatus = await sendMessageToPageScript({
-        type: 'TEST_SUBTITLE_FETCH'
+
+    const role = this.resolveLanguageRole(languageCode, type);
+    const result = await this.switchLanguageAndWait(languageCode, role, {
+      reason: 'legacy-load-subtitle-for-language',
+      timeoutMs: 10000
+    });
+
+    if (!result.ready) {
+      this.lastSubtitleMissingReasons[role] = result.reason || 'switch-track-timeout';
+      this.dispatchSubtitleReadinessChanged('language-cache-missing-after-switch', {
+        slot: role,
+        languageCode,
+        failureReason: this.lastSubtitleMissingReasons[role]
       });
-      
-      if (!interceptorStatus || !interceptorStatus.success || !interceptorStatus.interceptorActive) {
-        this.log('攔截器未準備就緒，等待...');
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-      
-      // 不檢查當前語言，直接切換 - 這樣可以觸發重新請求
-      // 即使當前已經是目標語言，Netflix 也會響應切換指令並可能重新發送字幕
-      this.log(`準備切換到 ${languageCode} `);
-      
-      // 檢查當前語言僅用於調試
-      try {
-        const currentLangResult = await sendMessageToPageScript({
-          type: 'GET_CURRENT_LANGUAGE'
-        });
-        const currentLanguage = currentLangResult?.language?.code;
-        this.log(`當前語言: ${currentLanguage}, 目標語言: ${languageCode}`);
-      } catch (error) {
-        this.log('無法獲取當前語言，繼續切換流程');
-      }
-      
-      // 步驟1: 監聽字幕攔截成功事件
-      const subtitleReadyPromise = new Promise((resolve, reject) => {
-        let isResolved = false;
-        
-        const timeout = setTimeout(() => {
-          if (!isResolved) {
-            isResolved = true;
-            reject(new Error(`等待 ${languageCode} 字幕攔截超時`));
-          }
-        }, 10000); // 10秒超時
-        
-        const handler = (event) => {
-          const { cacheKey } = event;
-          this.log(`收到字幕準備就緒事件: ${cacheKey}`);
-          
-          // 檢查是否是我們等待的語言（支援 base-code fallback）
-          const cacheKeyLang = cacheKey.split('_')[0];
-          const gate = this.evaluateSubtitleGate(cacheKey, event.requestInfo);
-          if (this.matchesLanguage(cacheKeyLang, languageCode) && gate.accepted && !isResolved) {
-            this.log(`匹配到 ${languageCode} 的字幕攔截事件 (cache key lang: ${cacheKeyLang})`);
-            isResolved = true;
-            clearTimeout(timeout);
-            resolve(cacheKey);
-          } else if (this.matchesLanguage(cacheKeyLang, languageCode)) {
-            this.log(`忽略不符合目前 PlaybackContext 的字幕準備事件: ${cacheKey}`, gate);
-          }
-        };
-        
-        // 註冊一次性事件監聽器
-        registerInternalEventHandler('RAW_TTML_INTERCEPTED', handler);
-      });
-      
-      // 步驟2: 切換到指定語言軌，觸發 Netflix 發送 TTML 字幕請求
-      this.log(`切換到 ${languageCode} 語言軌...`);
-      const switchResult = await sendMessageToPageScript({
-        type: 'SWITCH_LANGUAGE',
-        languageCode: languageCode
-      });
-      
-      if (!switchResult || !switchResult.success) {
-        this.log(`切換到 ${languageCode} 失敗:`, switchResult?.error);
-        return;
-      }
-      
-      this.log(`成功切換到 ${languageCode}，等待字幕攔截事件...`);
-      
-      // 步驟3: 等待字幕攔截完成
-      try {
-        const cacheKey = await subtitleReadyPromise;
-        this.log(`${languageCode} 字幕攔截完成，緩存鍵: ${cacheKey}`);
-      } catch (error) {
-        this.log(`等待 ${languageCode} 字幕攔截超時，檢查現有數據...`);
-      }
-      
-      // 步驟4: 檢查本地已解析的字幕緩存
-      this.log(`檢查 ${languageCode} 的本地緩存...`);
-
-      const selectedEntry = this.selectBestLanguageCacheEntry(languageCode);
-      if (!selectedEntry) {
-        this.log(`未找到 ${languageCode} 的字幕數據，可用鍵:`, Array.from(this.interceptedSubtitles.keys()));
-        this.lastSubtitleMissingReasons[type] = 'no-parsed-language-cache-after-switch';
-        this.dispatchSubtitleReadinessChanged('language-cache-missing-after-switch', { slot: type, languageCode });
-        return;
-      }
-
-      const matchedKey = selectedEntry.cacheKey;
-      const languageData = selectedEntry.data;
-
-      if (!languageData || !languageData.subtitles) {
-        this.log(`${languageCode} 字幕數據無效`);
-        this.lastSubtitleMissingReasons[type] = 'invalid-parsed-language-cache-after-switch';
-        this.dispatchSubtitleReadinessChanged('invalid-language-cache-after-switch', { slot: type, languageCode });
-        return;
-      }
-
-      const subtitles = languageData.subtitles;
-      this.log(`從鍵 "${matchedKey}" 找到 ${languageCode} 的 ${subtitles.length} 個字幕條目`);
-      
-      if (subtitles.length > 0) {
-        // 使用已建立的時間索引
-        const timeIndex = languageData.timeIndex;
-        this.log(`${languageCode} 時間索引大小:`, timeIndex?.size || 0);
-        
-        // 儲存到相應的屬性
-        if (type === 'primary') {
-          this.primarySubtitles = subtitles;
-          this.primaryTimeIndex = timeIndex;
-          this.primarySubtitleMeta = this.createSubtitleSlotMeta(matchedKey, languageData);
-          this.lastSubtitleMissingReasons.primary = null;
-          this.dispatchSubtitleReadinessChanged('primary-cache-loaded-after-switch', { slot: type, languageCode, cacheKey: matchedKey });
-        } else if (type === 'secondary') {
-          this.secondarySubtitles = subtitles;
-          this.secondaryTimeIndex = timeIndex;
-          this.secondarySubtitleMeta = this.createSubtitleSlotMeta(matchedKey, languageData);
-          this.lastSubtitleMissingReasons.secondary = null;
-          this.dispatchSubtitleReadinessChanged('secondary-cache-loaded-after-switch', { slot: type, languageCode, cacheKey: matchedKey });
-        }
-        
-        this.log(`${languageCode} ${type} 字幕載入完成`);
-      }
-      
-    } catch (error) {
-      console.error(`載入 ${languageCode} 字幕時出錯:`, error);
     }
   }
 
@@ -1154,6 +1436,8 @@ class SubtitleInterceptor {
       primaryMissingReason: subtitleReadiness.primary.missingReason,
       secondaryMissingReason: subtitleReadiness.secondary.missingReason,
       subtitleReadiness,
+      lastAcquisitionResults: this.lastAcquisitionResults,
+      pendingAcquisitionWaiters: this.acquisitionWaiters.size,
       nativeSubtitleVisibility: subtitleReadiness.nativeSubtitle,
       rawTTMLMetadata: Array.from(this.interceptedSubtitles.entries()).map(([cacheKey, data]) => ({
         cacheKey,
@@ -1278,7 +1562,7 @@ class SubtitleInterceptor {
     }
 
     const matchingEntries = Array.from(this.interceptedSubtitles.entries())
-      .filter(([, data]) => this.matchesLanguage(data?.language, languageCode));
+      .filter(([, data]) => this.matchesLanguageForAcquisition(data?.language, languageCode));
 
     if (matchingEntries.length === 0) {
       return this.lastSubtitleMissingReasons[slot] || 'no-parsed-language-cache';
@@ -1334,7 +1618,12 @@ class SubtitleInterceptor {
     this.primarySubtitleMeta = null;
     this.secondarySubtitleMeta = null;
     this.interceptedSubtitles.clear();
+    this.clearAcquisitionWaiters('interceptor-cleanup');
     this.lastSubtitleMissingReasons = {
+      primary: null,
+      secondary: null
+    };
+    this.lastAcquisitionResults = {
       primary: null,
       secondary: null
     };
@@ -1362,6 +1651,34 @@ class SubtitleInterceptor {
     const baseA = langA.split('-')[0].toLowerCase();
     const baseB = langB.split('-')[0].toLowerCase();
     return baseA === baseB;
+  }
+
+  normalizeLanguageCode(languageCode) {
+    return (languageCode || '').trim().toLowerCase();
+  }
+
+  /**
+   * Phase 3 acquisition 使用嚴格語言匹配，避免 zh-Hant / zh-Hans / generic zh 互相污染。
+   * 若未來需要 generic fallback，必須在呼叫端明確傳入 allowGenericFallback。
+   */
+  matchesLanguageForAcquisition(actualLanguage, targetLanguage, options = {}) {
+    const actual = this.normalizeLanguageCode(actualLanguage);
+    const target = this.normalizeLanguageCode(targetLanguage);
+    if (!actual || !target) {
+      return false;
+    }
+
+    if (actual === target) {
+      return true;
+    }
+
+    if (!options.allowGenericFallback) {
+      return false;
+    }
+
+    const [actualBase, actualScript] = actual.split('-');
+    const [targetBase, targetScript] = target.split('-');
+    return actualBase === targetBase && (!actualScript || !targetScript);
   }
 
   /**
@@ -1680,10 +1997,10 @@ class SubtitleInterceptor {
 
     if (!gate.accepted) {
       this.log('RAW TTML 不符合目前 PlaybackContext，丟棄避免覆蓋 UI:', gate);
-      if (this.matchesLanguage(language, this.primaryLanguage)) {
+      if (this.matchesLanguageForAcquisition(language, this.primaryLanguage)) {
         this.lastSubtitleMissingReasons.primary = `raw-ttml-gate-${gate.reason}`;
       }
-      if (this.matchesLanguage(language, this.secondaryLanguage)) {
+      if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage)) {
         this.lastSubtitleMissingReasons.secondary = `raw-ttml-gate-${gate.reason}`;
       }
       this.recordDebugEvent('RAW_TTML_REJECTED_BY_GATE', {
@@ -1757,7 +2074,7 @@ class SubtitleInterceptor {
 
         // 只有當前影片才觸發即時處理
         if (isCurrentVideo) {
-          if (this.matchesLanguage(language, this.primaryLanguage) && Object.keys(regionConfigs).length > 0) {
+          if (this.matchesLanguageForAcquisition(language, this.primaryLanguage) && Object.keys(regionConfigs).length > 0) {
             this.log(`更新 netflix-player-adapter 的 region 配置 (主要語言: ${language})`);
             setRegionConfigs(regionConfigs);
           }
@@ -1772,10 +2089,10 @@ class SubtitleInterceptor {
           });
         }
       } else {
-        if (this.matchesLanguage(language, this.primaryLanguage)) {
+        if (this.matchesLanguageForAcquisition(language, this.primaryLanguage)) {
           this.lastSubtitleMissingReasons.primary = 'parse-empty';
         }
-        if (this.matchesLanguage(language, this.secondaryLanguage)) {
+        if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage)) {
           this.lastSubtitleMissingReasons.secondary = 'parse-empty';
         }
         this.dispatchSubtitleReadinessChanged('raw-ttml-parse-empty', { cacheKey, language });
@@ -1790,10 +2107,10 @@ class SubtitleInterceptor {
       }
     } catch (error) {
       console.error(`解析 ${language} TTML 失敗:`, error);
-      if (this.matchesLanguage(language, this.primaryLanguage)) {
+      if (this.matchesLanguageForAcquisition(language, this.primaryLanguage)) {
         this.lastSubtitleMissingReasons.primary = 'parse-error';
       }
-      if (this.matchesLanguage(language, this.secondaryLanguage)) {
+      if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage)) {
         this.lastSubtitleMissingReasons.secondary = 'parse-error';
       }
       this.dispatchSubtitleReadinessChanged('raw-ttml-parse-error', { cacheKey, language, error: error.message });
@@ -1814,7 +2131,7 @@ class SubtitleInterceptor {
    */
   checkAndProcessLanguage(language, subtitles, metadata = {}) {
     // 檢查是否是我們需要的語言（支援 base-code fallback）
-    if (this.matchesLanguage(language, this.primaryLanguage)) {
+    if (this.matchesLanguageForAcquisition(language, this.primaryLanguage)) {
       this.primarySubtitles = subtitles;
       this.primaryTimeIndex = metadata.timeIndex || this.primaryTimeIndex;
       this.primarySubtitleMeta = {
@@ -1833,7 +2150,7 @@ class SubtitleInterceptor {
         language
       });
       this.log(`主要語言字幕已更新: ${language} (目標: ${this.primaryLanguage})`);
-    } else if (this.matchesLanguage(language, this.secondaryLanguage) && this.dualSubtitleEnabled) {
+    } else if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage) && this.dualSubtitleEnabled) {
       this.secondarySubtitles = subtitles;
       this.secondaryTimeIndex = metadata.timeIndex || this.secondaryTimeIndex;
       this.secondarySubtitleMeta = {
@@ -1926,7 +2243,7 @@ class SubtitleInterceptor {
     for (const [cacheKey, data] of this.interceptedSubtitles) {
       const parsedKey = this.parseCacheKey(cacheKey);
       if (parsedKey &&
-          this.matchesLanguage(parsedKey.language, language) &&
+          this.matchesLanguageForAcquisition(parsedKey.language, language) &&
           parsedKey.videoId === currentVideoId &&
           this.isSubtitleEntryCurrent(cacheKey, data)) {
         return true;
@@ -1940,6 +2257,7 @@ class SubtitleInterceptor {
     // 監聽 raw TTML 攔截事件
     registerInternalEventHandler('RAW_TTML_INTERCEPTED', (event) => {
       this.handleRawTTMLIntercepted(event);
+      this.resolveAcquisitionWaiters(event);
     });
 
     // 監聽影片 ID 變化事件
@@ -1951,6 +2269,7 @@ class SubtitleInterceptor {
 
       // 步驟1: 清理舊影片的緩存數據
       this.cleanupOldVideoCache(newVideoId);
+      this.clearAcquisitionWaiters('video-id-changed');
       this.lastSubtitleMissingReasons.primary = 'video-id-changed-primary-not-ready';
       this.lastSubtitleMissingReasons.secondary = 'video-id-changed-secondary-not-ready';
       this.dispatchSubtitleReadinessChanged('video-id-changed', { oldVideoId, newVideoId });
