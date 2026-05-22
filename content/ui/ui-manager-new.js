@@ -132,6 +132,8 @@ class UIManager {
       console.error('UI 管理器未初始化');
       return;
     }
+
+    this.syncNativeSubtitleVisibilityForSubtitle(subtitleData, 'show-subtitle');
     
     // 檢查是否需要更新（避免重複處理相同字幕）
     if (this.shouldUpdateSubtitle(subtitleData)) {
@@ -373,11 +375,17 @@ class UIManager {
 
   // 設置事件處理器
   setupEventHandlers() {
+    registerInternalEventHandler('SUBTITLE_READINESS_CHANGED', (event) => {
+      this.syncNativeSubtitleVisibility(event.readiness?.renderReadiness, event.reason || 'subtitle-readiness-changed');
+    });
+
     // 監聽影片切換事件 - 統一重新初始化所有UI組件
     registerInternalEventHandler('VIDEO_ID_CHANGED', async (event) => {
       this.log(`🎬 檢測到影片切換: ${event.oldVideoId} -> ${event.newVideoId}`);
       
       try {
+        this.showNativeSubtitles('video-id-changing');
+
         // 1. 清理所有UI組件
         this.cleanup();
         this.log('✅ UI組件清理完成');
@@ -398,8 +406,8 @@ class UIManager {
         this.setupComponentInteractions();
         this.log('✅ 組件關聯重新設置完成');
         
-        // 5. 重新隱藏原生字幕（確保新影片的原生字幕被隱藏）
-        this.hideNativeSubtitles();
+        // 5. 新影片 primary TTML 尚未 ready 前，保留 Netflix 原生字幕。
+        this.showNativeSubtitles('video-id-changed-primary-not-ready');
 
         // 6. 通知依賴 UI 元件的管理器重新同步狀態。
         // 影片切換會重建 SubtitleDisplay，樣式管理器需重新把使用者設定注入新容器。
@@ -456,8 +464,8 @@ class UIManager {
     
     this.log('所有UI組件初始化完成');
     
-    // 初始化完成後隱藏原生字幕
-    this.hideNativeSubtitles();
+    // 攔截模式需等待 primary TTML ready 後才隱藏原生字幕。
+    this.showNativeSubtitles('ui-initialized-primary-not-ready');
   }
 
   // 處理重新初始化錯誤
@@ -736,8 +744,8 @@ class UIManager {
     return this.showToast(message, 'info', options);
   }
 
-  // 模式選擇回調（由字幕協調器調用）
-  onModeSelected(mode) {
+  // 模式選擇處理（由字幕協調器調用）
+  handleModeSelected(mode) {
     this.log(`字幕模式已選定: ${mode}`);
     this.currentMode = mode;
     
@@ -759,6 +767,7 @@ class UIManager {
         showSubmitButton: true,
         position: 'bottom'
       });
+      this.showNativeSubtitles('intercept-mode-primary-not-ready');
     } else if (mode === 'dom') {
       // DOM 監聽模式：基本功能
       this.interactionPanel.configure({
@@ -766,6 +775,7 @@ class UIManager {
         showSubmitButton: true,
         position: 'bottom'
       });
+      this.hideNativeSubtitles('dom-mode-active');
     }
   }
 
@@ -775,6 +785,51 @@ class UIManager {
       this.subtitleDisplay.setStyle(styleOptions);
       this.log('字幕樣式已更新');
     }
+  }
+
+  syncNativeSubtitleVisibilityForSubtitle(subtitleData, reason = 'subtitle-data-update') {
+    if (!subtitleData) {
+      this.showNativeSubtitles(`${reason}-no-subtitle-data`);
+      return;
+    }
+
+    if (subtitleData.mode === 'dom') {
+      this.hideNativeSubtitles(`${reason}-dom-mode`);
+      return;
+    }
+
+    if (subtitleData.mode !== 'intercept') {
+      return;
+    }
+
+    const renderReadiness = subtitleData.renderReadiness ||
+      subtitleData.dualSubtitleData?.renderReadiness ||
+      null;
+
+    if (renderReadiness) {
+      this.syncNativeSubtitleVisibility(renderReadiness, reason);
+      return;
+    }
+
+    if (subtitleData.text || subtitleData.dualSubtitleData?.primaryText) {
+      this.hideNativeSubtitles(`${reason}-intercept-primary-text-present`);
+    } else {
+      this.showNativeSubtitles(`${reason}-intercept-primary-missing`);
+    }
+  }
+
+  syncNativeSubtitleVisibility(renderReadiness, reason = 'render-readiness-update') {
+    if (!renderReadiness) {
+      this.showNativeSubtitles(`${reason}-missing-readiness`);
+      return;
+    }
+
+    if (renderReadiness.canHideNativeSubtitles) {
+      this.hideNativeSubtitles(renderReadiness.nativeHideReason || reason);
+      return;
+    }
+
+    this.showNativeSubtitles(renderReadiness.nativeHideReason || renderReadiness.primaryMissingReason || reason);
   }
 
   // 獲取當前狀態
@@ -802,8 +857,13 @@ class UIManager {
   }
 
   // 註冊事件回調
-  onModeSelected(callback) {
-    this.eventCallbacks.onModeSelected = callback;
+  onModeSelected(value) {
+    if (typeof value === 'function') {
+      this.eventCallbacks.onModeSelected = value;
+      return;
+    }
+
+    this.handleModeSelected(value);
   }
 
   onUIReady(callback) {
@@ -881,26 +941,26 @@ class UIManager {
   }
 
   // 恢復原生字幕（移除隱藏CSS）
-  showNativeSubtitles() {
+  showNativeSubtitles(reason = 'showNativeSubtitles-called') {
     const styleElement = document.getElementById('subpal-hide-native-subtitles');
     if (styleElement) {
       styleElement.remove();
       this.log('✅ 已移除CSS規則，恢復Netflix原生字幕');
     }
     this.nativeSubtitleHidden = false;
-    this.nativeHideReason = 'showNativeSubtitles-called';
+    this.nativeHideReason = reason;
     this.nativeSubtitleVisibilityUpdatedAt = Date.now();
   }
 
   // 隱藏原生字幕
-  hideNativeSubtitles() {
+  hideNativeSubtitles(reason = 'hideNativeSubtitles-called') {
     this.log('隱藏Netflix原生字幕...');
     
     // 檢查是否已經注入過樣式，避免重複注入
     if (document.getElementById('subpal-hide-native-subtitles')) {
       this.log('原生字幕隱藏樣式已存在，無需重複注入');
       this.nativeSubtitleHidden = true;
-      this.nativeHideReason = 'hideNativeSubtitles-called-style-already-present';
+      this.nativeHideReason = `${reason}-style-already-present`;
       this.nativeSubtitleVisibilityUpdatedAt = Date.now();
       return;
     }
@@ -920,7 +980,7 @@ class UIManager {
     // 將 style 元素添加到 head 中
     document.head.appendChild(styleElement);
     this.nativeSubtitleHidden = true;
-    this.nativeHideReason = 'hideNativeSubtitles-called-existing-behavior';
+    this.nativeHideReason = reason;
     this.nativeSubtitleVisibilityUpdatedAt = Date.now();
     this.log('✅ 已注入CSS規則隱藏Netflix原生字幕');
   }

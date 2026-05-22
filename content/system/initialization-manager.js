@@ -601,8 +601,12 @@ class InitializationManager {
         uiManager.hideSubtitle();
         uiManager.showNativeSubtitles();
       } else {
-        // 開啟：隱藏Netflix原生字幕 + 恢復字幕處理
-        uiManager.hideNativeSubtitles();
+        // 開啟：恢復字幕處理；是否隱藏原生字幕交由 render readiness 控制。
+        if (subtitleCoordinator.currentMode === 'dom') {
+          uiManager.hideNativeSubtitles('global-enabled-dom-mode-active');
+        } else {
+          uiManager.showNativeSubtitles('global-enabled-awaiting-render-readiness');
+        }
         subtitleCoordinator.startCurrentMode();
       }
     });
@@ -618,6 +622,7 @@ class InitializationManager {
 
         // 處理字幕替換（如果需要）
         const processedSubtitle = await this.processSubtitleReplacement(subtitleData);
+        uiManager.syncNativeSubtitleVisibilityForSubtitle(processedSubtitle, 'subtitle-detected');
 
         // 顯示字幕
         if (processedSubtitle && processedSubtitle.text) {
