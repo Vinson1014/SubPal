@@ -1741,8 +1741,13 @@ class SubtitleInterceptor {
     const derived = requestInfo?.derivedSubtitleVideo || null;
     const derivedVideoId = derived?.videoId ? String(derived.videoId) : null;
     const parsedVideoId = parsedKey?.videoId ? String(parsedKey.videoId) : null;
+    const snapshotSessionConfidence = requestInfo?.sessionSelectionConfidenceAtRequest ||
+      requestInfo?.playbackSnapshot?.sessionSelectionConfidence ||
+      null;
+    const canUseSnapshotSession = !snapshotSessionConfidence ||
+      ['high', 'medium'].includes(snapshotSessionConfidence);
     const requestSessionId = requestInfo?.sessionIdAtRequest ||
-      requestInfo?.playbackSnapshot?.sessionId ||
+      (canUseSnapshotSession ? requestInfo?.playbackSnapshot?.sessionId : null) ||
       null;
     const contextSessionId = context.sessionId || null;
     const requestTrack = requestInfo?.currentTrackAtRequest ||

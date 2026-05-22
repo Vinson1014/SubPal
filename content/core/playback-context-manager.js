@@ -27,7 +27,9 @@ class PlaybackContextManager {
       startedAt: Date.now(),
       updatedAt: Date.now(),
       source: 'initial',
-      snapshot: null
+      snapshot: null,
+      selectedSessionReason: null,
+      sessionSelectionConfidence: 'none'
     };
   }
 
@@ -120,6 +122,8 @@ class PlaybackContextManager {
         videoId: this.context.videoId,
         sessionId: this.context.sessionId,
         state: this.context.state,
+        selectedSessionReason: this.context.selectedSessionReason,
+        sessionSelectionConfidence: this.context.sessionSelectionConfidence,
         currentTrack: this.context.currentTrack
       });
 
@@ -137,6 +141,17 @@ class PlaybackContextManager {
   }
 
   deriveContextFromPlayback(playback, source) {
+    const selectedSessionId = playback?.selectedSessionId || playback?.sessionId || null;
+    const selectedSessionIdString = selectedSessionId ? String(selectedSessionId) : null;
+    const selectedSessionReason = playback?.selectedSessionReason || null;
+    const sessionSelectionConfidence = playback?.sessionSelectionConfidence || 'none';
+    const hasTrustedWatchSession =
+      selectedSessionIdString &&
+      selectedSessionIdString.startsWith('watch-') &&
+      ['high', 'medium'].includes(sessionSelectionConfidence) &&
+      selectedSessionReason !== 'player-helper-session-fallback' &&
+      selectedSessionReason !== 'first-open-session-fallback';
+
     const activeVideoId = playback?.playerApiVideoId ||
       playback?.movieId ||
       playback?.pageUrlVideoId ||
@@ -153,13 +168,15 @@ class PlaybackContextManager {
     return {
       epoch: this.context.epoch,
       videoId: activeVideoId ? String(activeVideoId) : null,
-      sessionId: playback?.sessionId || null,
+      sessionId: selectedSessionIdString,
       currentTrack,
-      state: activeVideoId ? 'ready' : 'transitioning',
+      state: activeVideoId && hasTrustedWatchSession ? 'ready' : 'transitioning',
       startedAt: this.context.startedAt,
       updatedAt: Date.now(),
       source,
-      snapshot: playback
+      snapshot: playback,
+      selectedSessionReason,
+      sessionSelectionConfidence
     };
   }
 
@@ -168,6 +185,8 @@ class PlaybackContextManager {
       current.videoId !== next.videoId ||
       current.sessionId !== next.sessionId ||
       current.state !== next.state ||
+      current.selectedSessionReason !== next.selectedSessionReason ||
+      current.sessionSelectionConfidence !== next.sessionSelectionConfidence ||
       this.getTrackKey(current.currentTrack) !== this.getTrackKey(next.currentTrack)
     );
   }

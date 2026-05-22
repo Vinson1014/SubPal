@@ -22,6 +22,172 @@
     }
   }
 
+  function isWatchSessionId(sessionId) {
+    return typeof sessionId === 'string' && sessionId.startsWith('watch-');
+  }
+
+  function isLikelyPreviewSessionId(sessionId) {
+    return typeof sessionId === 'string' && /preview|billboard|browse|details|trailer/i.test(sessionId);
+  }
+
+  function isReasonablePlaybackState(session) {
+    return typeof session.currentTime === 'number' &&
+      typeof session.duration === 'number' &&
+      session.duration > 0 &&
+      session.currentTime >= 0 &&
+      session.currentTime <= session.duration + 60;
+  }
+
+  function getPlaybackReasonablenessScore(session) {
+    if (!session || session.isLikelyPreview || !session.hasReasonablePlaybackState) {
+      return 0;
+    }
+
+    let score = 100;
+    if (session.duration > 60) score += 30;
+    if (session.duration > 300) score += 20;
+    if (session.currentTime > 0) score += 20;
+    if (session.currentTime < session.duration - 5) score += 10;
+    if (session.currentTrack) score += 10;
+    return score;
+  }
+
+  function getNetflixPlayerAPI() {
+    try {
+      return window.netflix?.appContext?.state?.playerApp?.getAPI?.() || null;
+    } catch (error) {
+      debugLog('取得 Netflix player API 失敗:', error.message);
+      return null;
+    }
+  }
+
+  function buildPlaybackSessionDetails(api) {
+    let sessions = [];
+    try {
+      sessions = api?.getOpenPlaybackSessions?.() || [];
+    } catch (error) {
+      debugLog('取得 open playback sessions 失敗:', error.message);
+    }
+
+    return sessions.map(session => {
+      const sessionId = session?.sessionId || null;
+      const detail = {
+        sessionId,
+        videoId: session?.videoId ? String(session.videoId) : null,
+        playerApiVideoId: null,
+        movieId: null,
+        currentTime: null,
+        duration: null,
+        isWatchSession: isWatchSessionId(sessionId),
+        isLikelyPreview: isLikelyPreviewSessionId(sessionId),
+        errors: {}
+      };
+
+      if (sessionId && typeof api?.getVideoIdBySessionId === 'function') {
+        try {
+          const videoId = api.getVideoIdBySessionId(sessionId);
+          detail.playerApiVideoId = videoId ? String(videoId) : null;
+        } catch (error) {
+          detail.errors.playerApiVideoId = error.message;
+        }
+      }
+
+      let videoPlayer = null;
+      if (sessionId) {
+        try {
+          videoPlayer = api?.videoPlayer?.getVideoPlayerBySessionId?.(sessionId) || null;
+        } catch (error) {
+          detail.errors.videoPlayer = error.message;
+        }
+      }
+
+      if (videoPlayer) {
+        try {
+          const movieId = videoPlayer.getMovieId?.();
+          detail.movieId = movieId ? String(movieId) : null;
+        } catch (error) {
+          detail.errors.movieId = error.message;
+        }
+
+        try {
+          const currentTime = videoPlayer.getCurrentTime?.();
+          detail.currentTime = typeof currentTime === 'number' ? currentTime : null;
+        } catch (error) {
+          detail.errors.currentTime = error.message;
+        }
+
+        try {
+          const duration = videoPlayer.getDuration?.();
+          detail.duration = typeof duration === 'number' ? duration : null;
+        } catch (error) {
+          detail.errors.duration = error.message;
+        }
+
+        try {
+          const currentTrack = videoPlayer.getTimedTextTrack?.();
+          detail.currentTrack = currentTrack ? {
+            code: currentTrack.bcp47,
+            name: currentTrack.displayName,
+            trackId: currentTrack.trackId,
+            trackType: currentTrack.trackType,
+            rawTrackType: currentTrack.rawTrackType
+          } : null;
+        } catch (error) {
+          detail.errors.currentTrack = error.message;
+        }
+      }
+
+      detail.hasReasonablePlaybackState = isReasonablePlaybackState(detail);
+      detail.playbackReasonablenessScore = getPlaybackReasonablenessScore(detail);
+      return detail;
+    });
+  }
+
+  function selectActivePlaybackSession(api, pageUrlVideoId, fallbackSessionId = null) {
+    const openSessions = buildPlaybackSessionDetails(api);
+    const watchSessions = openSessions.filter(session => session.isWatchSession);
+    const select = (session, reason, confidence) => ({
+      selectedSessionId: session?.sessionId || null,
+      selectedSessionReason: reason,
+      sessionSelectionConfidence: confidence,
+      selectedSession: session || null,
+      openSessions
+    });
+
+    if (pageUrlVideoId) {
+      const playerApiMatch = watchSessions.find(session => session.playerApiVideoId === pageUrlVideoId);
+      if (playerApiMatch) {
+        return select(playerApiMatch, 'watch-player-api-video-id-match', 'high');
+      }
+
+      const movieIdMatch = watchSessions.find(session => session.movieId === pageUrlVideoId);
+      if (movieIdMatch) {
+        return select(movieIdMatch, 'watch-movie-id-match', 'high');
+      }
+    }
+
+    const reasonableWatchSessions = watchSessions
+      .filter(session => session.playbackReasonablenessScore > 0)
+      .sort((a, b) => b.playbackReasonablenessScore - a.playbackReasonablenessScore);
+    const reasonableWatch = reasonableWatchSessions[0] || null;
+    const nextReasonableWatch = reasonableWatchSessions[1] || null;
+    if (reasonableWatch && (!nextReasonableWatch ||
+        reasonableWatch.playbackReasonablenessScore > nextReasonableWatch.playbackReasonablenessScore)) {
+      return select(reasonableWatch, 'watch-reasonable-playback-state', 'medium');
+    }
+
+    const helperFallback = openSessions.find(session => session.sessionId === fallbackSessionId);
+    if (helperFallback) {
+      return select(helperFallback, 'player-helper-session-fallback', 'low');
+    }
+
+    if (openSessions[0]) {
+      return select(openSessions[0], 'first-open-session-fallback', 'low');
+    }
+
+    return select(null, 'no-open-playback-session', 'none');
+  }
+
   /**
    * Netflix播放器助手類
    */
@@ -56,20 +222,29 @@
         }
 
         // 獲取播放會話
-        const sessions = this.playerAPI.getOpenPlaybackSessions();
-        if (!sessions || sessions.length === 0) {
+        const pageUrlVideoId = subtitleInterceptor?.extractVideoIdFromUrl?.(location.href) || null;
+        const selection = selectActivePlaybackSession(this.playerAPI, pageUrlVideoId, this.sessionId);
+        if (!selection.selectedSessionId) {
           throw new Error('沒有找到播放會話');
         }
 
-        this.sessionId = sessions[0].sessionId;
-        this.videoPlayer = this.playerAPI.videoPlayer.getVideoPlayerBySessionId(this.sessionId);
+        this.sessionId = selection.selectedSessionId;
+        try {
+          this.videoPlayer = this.playerAPI.videoPlayer?.getVideoPlayerBySessionId?.(this.sessionId) || null;
+        } catch (error) {
+          throw new Error(`無法獲取視頻播放器實例: ${error.message}`);
+        }
         
         if (!this.videoPlayer) {
           throw new Error('無法獲取視頻播放器實例');
         }
 
         this.isInitialized = true;
-        debugLog('Netflix播放器助手初始化成功');
+        debugLog('Netflix播放器助手初始化成功', {
+          selectedSessionId: selection.selectedSessionId,
+          reason: selection.selectedSessionReason,
+          confidence: selection.sessionSelectionConfidence
+        });
         return true;
       } catch (error) {
         console.error('初始化Netflix播放器助手失敗:', error);
@@ -262,8 +437,11 @@
     hasActiveSession() {
       try {
         if (!this.playerAPI) return false;
-        const sessions = this.playerAPI.getOpenPlaybackSessions();
-        return sessions && sessions.length > 0;
+        const pageUrlVideoId = subtitleInterceptor?.extractVideoIdFromUrl?.(location.href) || null;
+        const selection = selectActivePlaybackSession(this.playerAPI, pageUrlVideoId, this.sessionId);
+        return !!selection.selectedSessionId &&
+          isWatchSessionId(selection.selectedSessionId) &&
+          ['high', 'medium'].includes(selection.sessionSelectionConfidence);
       } catch (error) {
         return false;
       }
@@ -342,6 +520,9 @@
         latestManifestVideoId: this.latestManifestVideoId,
         playerHelperInitialized: !!playerHelper?.isInitialized,
         sessionId: null,
+        selectedSessionId: null,
+        selectedSessionReason: null,
+        sessionSelectionConfidence: 'none',
         playerApiVideoId: null,
         movieId: null,
         currentTime: null,
@@ -353,60 +534,38 @@
       };
 
       try {
-        let api = playerHelper?.playerAPI;
-
-        if (!api && window.netflix?.appContext?.state?.playerApp) {
-          api = window.netflix.appContext.state.playerApp.getAPI();
-        }
+        let api = playerHelper?.playerAPI || getNetflixPlayerAPI();
 
         if (!api) {
           snapshot.error = 'Netflix player API unavailable';
           return snapshot;
         }
 
-        const sessions = api.getOpenPlaybackSessions?.() || [];
-        snapshot.openSessions = sessions.map(session => ({
-          sessionId: session.sessionId,
-          videoId: session.videoId || null
-        }));
+        const selection = selectActivePlaybackSession(api, snapshot.pageUrlVideoId, playerHelper?.sessionId || null);
+        const sessionId = selection.selectedSessionId;
+        snapshot.selectedSessionId = sessionId;
+        snapshot.sessionId = sessionId; // legacy alias
+        snapshot.selectedSessionReason = selection.selectedSessionReason;
+        snapshot.sessionSelectionConfidence = selection.sessionSelectionConfidence;
+        snapshot.openSessions = selection.openSessions;
 
-        const sessionId = playerHelper?.sessionId || sessions[0]?.sessionId || null;
-        snapshot.sessionId = sessionId;
+        if (selection.selectedSession) {
+          snapshot.playerApiVideoId = selection.selectedSession.playerApiVideoId;
+          snapshot.movieId = selection.selectedSession.movieId;
+          snapshot.currentTime = selection.selectedSession.currentTime;
+          snapshot.duration = selection.selectedSession.duration;
+        }
 
-        if (sessionId && typeof api.getVideoIdBySessionId === 'function') {
+        let videoPlayer = null;
+        if (sessionId) {
           try {
-            const videoId = api.getVideoIdBySessionId(sessionId);
-            snapshot.playerApiVideoId = videoId ? String(videoId) : null;
+            videoPlayer = api.videoPlayer?.getVideoPlayerBySessionId?.(sessionId) || null;
           } catch (error) {
-            snapshot.playerApiVideoIdError = error.message;
+            snapshot.videoPlayerError = error.message;
           }
         }
 
-        const videoPlayer = playerHelper?.videoPlayer ||
-          (sessionId && api.videoPlayer?.getVideoPlayerBySessionId?.(sessionId));
-
         if (videoPlayer) {
-          try {
-            const movieId = videoPlayer.getMovieId?.();
-            snapshot.movieId = movieId ? String(movieId) : null;
-          } catch (error) {
-            snapshot.movieIdError = error.message;
-          }
-
-          try {
-            const currentTime = videoPlayer.getCurrentTime?.();
-            snapshot.currentTime = typeof currentTime === 'number' ? currentTime : null;
-          } catch (error) {
-            snapshot.currentTimeError = error.message;
-          }
-
-          try {
-            const duration = videoPlayer.getDuration?.();
-            snapshot.duration = typeof duration === 'number' ? duration : null;
-          } catch (error) {
-            snapshot.durationError = error.message;
-          }
-
           try {
             const currentTrack = videoPlayer.getTimedTextTrack?.();
             snapshot.currentTrack = currentTrack ? {
@@ -487,7 +646,13 @@
      */
     createSubtitleRequestInfo({ url, method = null, pageUrl = location.href, manifestVideoId = null, source }) {
       const playbackSnapshot = this.getActivePlaybackSnapshot();
-      const activePlayerVideoId = playbackSnapshot.playerApiVideoId || playbackSnapshot.movieId || null;
+      const selectedSessionId = playbackSnapshot.selectedSessionId || null;
+      const hasTrustedWatchSelection = isWatchSessionId(selectedSessionId) &&
+        ['high', 'medium'].includes(playbackSnapshot.sessionSelectionConfidence);
+      const activePlayerVideoId = hasTrustedWatchSelection ?
+        (playbackSnapshot.playerApiVideoId || playbackSnapshot.movieId || null) :
+        null;
+      const sessionIdAtRequest = hasTrustedWatchSelection ? selectedSessionId : null;
       const requestTime = Date.now();
       const requestId = `${source || 'netflix'}-${requestTime}-${this.nextRequestId++}`;
 
@@ -498,7 +663,9 @@
         activePlayerVideoIdAtRequest: activePlayerVideoId,
         pageUrlVideoIdAtRequest: playbackSnapshot.pageUrlVideoId,
         currentTrackAtRequest: playbackSnapshot.currentTrack,
-        sessionIdAtRequest: playbackSnapshot.sessionId,
+        sessionIdAtRequest,
+        selectedSessionReasonAtRequest: playbackSnapshot.selectedSessionReason,
+        sessionSelectionConfidenceAtRequest: playbackSnapshot.sessionSelectionConfidence,
         latestManifestVideoIdAtRequest: this.latestManifestVideoId,
         requestUrl: url,
         requestTime,
@@ -532,6 +699,8 @@
         activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
         pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
         sessionId: requestInfo.sessionIdAtRequest,
+        selectedSessionReason: requestInfo.selectedSessionReasonAtRequest,
+        sessionSelectionConfidence: requestInfo.sessionSelectionConfidenceAtRequest,
         currentTrack: requestInfo.currentTrackAtRequest,
         derivedSubtitleVideo: requestInfo.derivedSubtitleVideo,
         pageUrl: requestInfo.pageUrl,
@@ -1052,6 +1221,8 @@
           activePlayerVideoIdAtRequest: requestInfo.activePlayerVideoIdAtRequest || null,
           pageUrlVideoIdAtRequest: requestInfo.pageUrlVideoIdAtRequest || null,
           sessionIdAtRequest: requestInfo.sessionIdAtRequest || null,
+          selectedSessionReasonAtRequest: requestInfo.selectedSessionReasonAtRequest || null,
+          sessionSelectionConfidenceAtRequest: requestInfo.sessionSelectionConfidenceAtRequest || null,
           currentTrackAtRequest: requestInfo.currentTrackAtRequest || null,
           playbackSnapshot: requestInfo.playbackSnapshot || null,
           derivedSubtitleVideo: requestInfo.derivedSubtitleVideo || null
@@ -1135,6 +1306,8 @@
         activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
         pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
         sessionId: requestInfo.sessionIdAtRequest,
+        selectedSessionReason: requestInfo.selectedSessionReasonAtRequest,
+        sessionSelectionConfidence: requestInfo.sessionSelectionConfidenceAtRequest,
         currentTrack: requestInfo.currentTrackAtRequest,
         derivedSubtitleVideo: requestInfo.derivedSubtitleVideo,
         rawMetadata,
@@ -1207,6 +1380,8 @@
         activePlayerVideoId: data.requestInfo?.activePlayerVideoIdAtRequest,
         pageUrlVideoId: data.requestInfo?.pageUrlVideoIdAtRequest,
         sessionId: data.requestInfo?.sessionIdAtRequest,
+        selectedSessionReason: data.requestInfo?.selectedSessionReasonAtRequest,
+        sessionSelectionConfidence: data.requestInfo?.sessionSelectionConfidenceAtRequest,
         currentTrack: data.requestInfo?.currentTrackAtRequest,
         derivedSubtitleVideo: data.requestInfo?.derivedSubtitleVideo,
         rawMetadata: data.rawMetadata || data.metadata || data.requestInfo?.rawTtmlMetadata || null,
@@ -1303,6 +1478,8 @@
           activePlayerVideoIdAtRequest: value.requestInfo?.activePlayerVideoIdAtRequest || null,
           pageUrlVideoIdAtRequest: value.requestInfo?.pageUrlVideoIdAtRequest || null,
           sessionIdAtRequest: value.requestInfo?.sessionIdAtRequest || null,
+          selectedSessionReasonAtRequest: value.requestInfo?.selectedSessionReasonAtRequest || null,
+          sessionSelectionConfidenceAtRequest: value.requestInfo?.sessionSelectionConfidenceAtRequest || null,
           currentTrackAtRequest: value.requestInfo?.currentTrackAtRequest || null,
           derivedSubtitleVideo: value.requestInfo?.derivedSubtitleVideo || null
         }
