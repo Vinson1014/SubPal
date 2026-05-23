@@ -474,7 +474,8 @@
       this.originalFetch = null;
       this.lastRequestTime = 0;
       this.requestCache = new Map();
-      this.latestManifestVideoId = null; // 從 licensedmanifest 追蹤的真實 videoId
+      this.latestManifestVideoId = null; // 從 licensedmanifest 追蹤的真實 videoId（僅供 legacy 診斷用）
+      this.latestManifestEvidence = null; // 診斷用，記錄最新 licensedmanifest encrypted wrapper 證據，含 manifestEncrypted/mappingAvailable 狀態
       this.debugEvents = [];
       this.maxDebugEvents = 50;
       this.nextRequestId = 1;
@@ -517,7 +518,8 @@
       const snapshot = {
         pageUrl: location.href,
         pageUrlVideoId: this.extractVideoIdFromUrl(location.href),
-        latestManifestVideoId: this.latestManifestVideoId,
+        latestManifestVideoId: this.latestManifestVideoId, // legacy 診斷用
+        latestManifestEvidence: this.latestManifestEvidence, // manifest encrypted wrapper 狀態
         playerHelperInitialized: !!playerHelper?.isInitialized,
         sessionId: null,
         selectedSessionId: null,
@@ -590,39 +592,17 @@
      * 依 request-time evidence 推導字幕可能歸屬的 videoId（僅記錄，不改變現有 cache key 行為）
      */
     deriveSubtitleVideoId(evidence) {
-      const manifestVideoId = evidence.manifestVideoIdAtRequest;
+      // Phase 5: 優先使用可信的 active player videoId，不再依賴全域 manifest state。
+      // manifestVideoIdAtRequest 已設為 null，encrypted manifest 證據僅供診斷。
       const activePlayerVideoId = evidence.activePlayerVideoIdAtRequest;
       const pageUrlVideoId = evidence.pageUrlVideoIdAtRequest;
-
-      if (manifestVideoId && activePlayerVideoId && manifestVideoId === activePlayerVideoId) {
-        return {
-          videoId: manifestVideoId,
-          confidence: 'high',
-          reason: 'manifest-matches-active-player'
-        };
-      }
-
-      if (manifestVideoId && activePlayerVideoId && manifestVideoId !== activePlayerVideoId) {
-        return {
-          videoId: manifestVideoId,
-          confidence: 'ambiguous',
-          reason: 'manifest-differs-from-active-player'
-        };
-      }
+      const manifestEvidence = evidence.manifestEvidenceAtRequest;
 
       if (activePlayerVideoId) {
         return {
           videoId: activePlayerVideoId,
-          confidence: 'medium',
+          confidence: 'high',
           reason: 'active-player-only'
-        };
-      }
-
-      if (manifestVideoId) {
-        return {
-          videoId: manifestVideoId,
-          confidence: 'medium',
-          reason: 'manifest-only'
         };
       }
 
@@ -644,7 +624,7 @@
     /**
      * 建立字幕 request-time metadata。保留舊欄位，並追加 evidence 供後續 gate 使用。
      */
-    createSubtitleRequestInfo({ url, method = null, pageUrl = location.href, manifestVideoId = null, source }) {
+    createSubtitleRequestInfo({ url, method = null, pageUrl = location.href, source }) {
       const playbackSnapshot = this.getActivePlaybackSnapshot();
       const selectedSessionId = playbackSnapshot.selectedSessionId || null;
       const hasTrustedWatchSelection = isWatchSessionId(selectedSessionId) &&
@@ -659,14 +639,15 @@
       const evidence = {
         requestId,
         ttmlLanguage: null,
-        manifestVideoIdAtRequest: manifestVideoId,
+        manifestVideoIdAtRequest: null, // 不再從全域 manifest state 回填；使用 playback snapshot 為主要證據
         activePlayerVideoIdAtRequest: activePlayerVideoId,
         pageUrlVideoIdAtRequest: playbackSnapshot.pageUrlVideoId,
         currentTrackAtRequest: playbackSnapshot.currentTrack,
         sessionIdAtRequest,
         selectedSessionReasonAtRequest: playbackSnapshot.selectedSessionReason,
         sessionSelectionConfidenceAtRequest: playbackSnapshot.sessionSelectionConfidence,
-        latestManifestVideoIdAtRequest: this.latestManifestVideoId,
+        latestManifestVideoIdAtRequest: this.latestManifestVideoId, // legacy 診斷用
+        manifestEvidenceAtRequest: this.latestManifestEvidence, // encrypted wrapper 證據
         requestUrl: url,
         requestTime,
         source,
@@ -679,7 +660,6 @@
         url,
         method,
         pageUrl,
-        manifestVideoId, // legacy: 現有 cache key 邏輯仍使用此欄位
         timestamp: evidence.requestTime,
         type: source,
         ...evidence,
@@ -695,7 +675,8 @@
         requestId: requestInfo.requestId,
         source: requestInfo.source || requestInfo.type,
         url: requestInfo.url,
-        manifestVideoId: requestInfo.manifestVideoId,
+        manifestVideoId: null, // Phase 5: 不再使用全域 manifest state
+        manifestEvidenceAtRequest: requestInfo.manifestEvidenceAtRequest || null,
         activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
         pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
         sessionId: requestInfo.sessionIdAtRequest,
@@ -754,23 +735,35 @@
         this._interceptorUrl = url;
         this._interceptorMethod = method;
         this._interceptorPageUrl = location.href;  // 記錄 request-time URL
-        this._interceptorManifestVideoId = self.latestManifestVideoId;  // 快照當前 manifest videoId
         return self.originalXHROpen.apply(this, [method, url, ...args]);
       };
 
       XMLHttpRequest.prototype.send = function(body) {
         if (this._interceptorUrl) {
-          // 攔截 licensedmanifest 請求，追蹤真實 videoId
+          // 攔截 licensedmanifest 請求，記錄 encrypted wrapper 證據（不解析 payload 作為字幕 mapping）
           if (this._interceptorUrl.includes('licensedmanifest')) {
             const manifestVideoId = self.extractManifestVideoId(this._interceptorUrl);
+            const manifestEvidence = {
+              videoId: manifestVideoId,
+              url: this._interceptorUrl,
+              requestId: `licensedmanifest-${Date.now()}-${self.nextRequestId++}`,
+              requestTime: Date.now(),
+              source: 'xhr-licensedmanifest',
+              manifestEncrypted: true,
+              mappingAvailable: false,
+              mappingReason: 'msl-wrapper-encrypted'
+            };
+            self.latestManifestEvidence = manifestEvidence;
+            // 僅保留 legacy 診斷用 videoId，不作為字幕所有權判斷依據
             if (manifestVideoId) {
               self.latestManifestVideoId = manifestVideoId;
-              self.recordDebugEvent('licensedmanifest', {
-                manifestVideoId,
-                url: this._interceptorUrl
-              });
-              debugLog('從 manifest 更新 videoId:', manifestVideoId);
             }
+            self.recordDebugEvent('licensedmanifest', {
+              manifestVideoId,
+              url: this._interceptorUrl,
+              manifestEvidence
+            });
+            debugLog('licensedmanifest encrypted wrapper 證據:', manifestEvidence);
           }
 
           // 只記錄 Netflix 相關的請求
@@ -779,13 +772,10 @@
           }
 
           if (self.isCdnRequestCandidate(this._interceptorUrl)) {
-            // 在 send 時再次更新快照，確保捕獲到同步執行中最新的 manifest videoId
-            this._interceptorManifestVideoId = self.latestManifestVideoId;
             this._interceptorRequestInfo = self.createSubtitleRequestInfo({
               url: this._interceptorUrl,
               method: this._interceptorMethod,
               pageUrl: this._interceptorPageUrl,
-              manifestVideoId: this._interceptorManifestVideoId,
               source: 'xhr'
             });
             self.recordDebugEvent('CDN_REQUEST_CANDIDATE',
@@ -806,11 +796,9 @@
 
           if (self.isCdnRequestCandidate(url)) {
             // debugLog('識別為 Netflix CDN candidate:', url);
-            const manifestVideoId = self.latestManifestVideoId;  // 快照當前 manifest videoId
             const requestInfo = self.createSubtitleRequestInfo({
               url,
               pageUrl: location.href,
-              manifestVideoId,
               source: 'fetch'
             });
             self.recordDebugEvent('CDN_REQUEST_CANDIDATE',
@@ -877,7 +865,6 @@
         url: xhr._interceptorUrl,
         method: xhr._interceptorMethod,
         pageUrl: xhr._interceptorPageUrl,
-        manifestVideoId: xhr._interceptorManifestVideoId,
         source: 'xhr'
       });
 
@@ -1217,7 +1204,7 @@
         responseTime: requestInfo.responseTime || null,
         requestTimeEvidence: {
           source: requestInfo.source || requestInfo.type || null,
-          manifestVideoIdAtRequest: requestInfo.manifestVideoIdAtRequest || requestInfo.manifestVideoId || null,
+          manifestVideoIdAtRequest: requestInfo.manifestVideoIdAtRequest || null,
           activePlayerVideoIdAtRequest: requestInfo.activePlayerVideoIdAtRequest || null,
           pageUrlVideoIdAtRequest: requestInfo.pageUrlVideoIdAtRequest || null,
           sessionIdAtRequest: requestInfo.sessionIdAtRequest || null,
@@ -1225,7 +1212,8 @@
           sessionSelectionConfidenceAtRequest: requestInfo.sessionSelectionConfidenceAtRequest || null,
           currentTrackAtRequest: requestInfo.currentTrackAtRequest || null,
           playbackSnapshot: requestInfo.playbackSnapshot || null,
-          derivedSubtitleVideo: requestInfo.derivedSubtitleVideo || null
+          derivedSubtitleVideo: requestInfo.derivedSubtitleVideo || null,
+          manifestEvidenceAtRequest: requestInfo.manifestEvidenceAtRequest || null
         },
         responseTimeEvidence: requestInfo.responseTimeEvidence || null,
         classification
@@ -1235,10 +1223,10 @@
     /**
      * 生成包含語言和視頻 ID 的緩存鍵
      */
-    generateCacheKeyWithLanguage(url, language, pageUrl, requestManifestVideoId) {
-      // 優先使用 request-time 的 manifest videoId（每個請求獨立快照，避免被後續 manifest 覆蓋）
-      // 降級使用全域 latestManifestVideoId，最後降級使用 URL 中的 videoId
-      const videoId = requestManifestVideoId || this.latestManifestVideoId || this.extractVideoIdFromUrl(pageUrl);
+    generateCacheKeyWithLanguage(url, language, pageUrl, resolvedVideoId) {
+      // Phase 5: 使用 request-level 解析的 videoId（來自 playback snapshot），
+      // 不再依賴全域 latestManifestVideoId。降級使用 URL 中的 videoId。
+      const videoId = resolvedVideoId || this.extractVideoIdFromUrl(pageUrl);
       if (!videoId) {
         debugLog('無法獲取 videoID，跳過緩存 - 可能是預覽影片');
         return null; // 返回 null 表示不應該緩存
@@ -1281,8 +1269,9 @@
       requestInfo.rawTtmlMetadata = rawMetadata;
       requestInfo.responseTimeEvidence = responseTimeEvidence;
 
-      // 生成包含正確語言的 cacheKey（使用 request-time manifest videoId 或 URL）
-      const cacheKey = this.generateCacheKeyWithLanguage(requestInfo.url, language, requestInfo.pageUrl, requestInfo.manifestVideoId);
+      // 生成包含正確語言的 cacheKey（使用 request-level 解析的 videoId 或 URL）
+      const resolvedVideoId = requestInfo.derivedSubtitleVideo?.videoId || null;
+      const cacheKey = this.generateCacheKeyWithLanguage(requestInfo.url, language, requestInfo.pageUrl, resolvedVideoId);
 
       // 如果無法生成有效的緩存鍵（例如預覽影片），則跳過緩存
       if (!cacheKey) {
@@ -1302,7 +1291,8 @@
         source: requestInfo.type,
         language,
         cacheKey,
-        manifestVideoId: requestInfo.manifestVideoId,
+        manifestVideoId: null, // Phase 5: 不再使用全域 manifest state 為字幕所有權證據
+        manifestEvidenceAtRequest: requestInfo.manifestEvidenceAtRequest || null,
         activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
         pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
         sessionId: requestInfo.sessionIdAtRequest,
@@ -1376,7 +1366,8 @@
       this.recordDebugEvent('RAW_TTML_INTERCEPTED', {
         cacheKey: data.cacheKey,
         language: data.language,
-        manifestVideoId: data.requestInfo?.manifestVideoId,
+        manifestVideoId: null, // Phase 5: 不再使用全域 manifest state
+        manifestEvidenceAtRequest: data.requestInfo?.manifestEvidenceAtRequest || null,
         activePlayerVideoId: data.requestInfo?.activePlayerVideoIdAtRequest,
         pageUrlVideoId: data.requestInfo?.pageUrlVideoIdAtRequest,
         sessionId: data.requestInfo?.sessionIdAtRequest,
@@ -1474,7 +1465,8 @@
           source: value.requestInfo?.source || value.requestInfo?.type || null,
           requestTime: value.requestInfo?.requestTime || value.requestInfo?.timestamp || null,
           responseTime: value.requestInfo?.responseTime || null,
-          manifestVideoIdAtRequest: value.requestInfo?.manifestVideoIdAtRequest || value.requestInfo?.manifestVideoId || null,
+          manifestVideoIdAtRequest: null, // Phase 5: 不再使用全域 manifest state
+          manifestEvidenceAtRequest: value.requestInfo?.manifestEvidenceAtRequest || null,
           activePlayerVideoIdAtRequest: value.requestInfo?.activePlayerVideoIdAtRequest || null,
           pageUrlVideoIdAtRequest: value.requestInfo?.pageUrlVideoIdAtRequest || null,
           sessionIdAtRequest: value.requestInfo?.sessionIdAtRequest || null,
@@ -1487,7 +1479,10 @@
 
       return {
         playback: this.getActivePlaybackSnapshot(),
-        latestManifestVideoId: this.latestManifestVideoId,
+        latestManifestVideoId: this.latestManifestVideoId, // legacy 診斷用
+        latestManifestEvidence: this.latestManifestEvidence, // manifest encrypted wrapper 狀態
+        manifestMappingAvailable: !!(this.latestManifestEvidence && this.latestManifestEvidence.mappingAvailable),
+        manifestEncrypted: !!(this.latestManifestEvidence && this.latestManifestEvidence.manifestEncrypted),
         interceptedTTMLCacheKeys: Array.from(this.interceptedTTMLs.keys()),
         interceptedSubtitleCacheKeys: Array.from(this.interceptedSubtitles.keys()),
         interceptedTTMLCount: this.interceptedTTMLs.size,
