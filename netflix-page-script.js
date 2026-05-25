@@ -1,6 +1,6 @@
 /**
  * Netflix Page Script - 注入到Netflix頁面context中
- * 
+ *
  * 此腳本運行在Netflix頁面的context中，能夠直接訪問Netflix的內部API
  * 負責：
  * 1. 直接訪問 window.netflix
@@ -15,7 +15,7 @@
 
   // 調試模式
   let debugMode = true;
-  
+
   function debugLog(...args) {
     if (debugMode) {
       console.log('[NetflixPageScript]', ...args);
@@ -204,7 +204,7 @@
      */
     async initialize() {
       debugLog('初始化Netflix播放器助手...');
-      
+
       try {
         // 檢查Netflix API是否可用
         if (!window.netflix || !window.netflix.appContext) {
@@ -234,7 +234,7 @@
         } catch (error) {
           throw new Error(`無法獲取視頻播放器實例: ${error.message}`);
         }
-        
+
         if (!this.videoPlayer) {
           throw new Error('無法獲取視頻播放器實例');
         }
@@ -338,14 +338,14 @@
 
       } catch (error) {
         console.error(`切換到 ${languageCode} 失敗:`, error);
-        
+
         // 如果切換失敗，嘗試一次重新初始化後再試
         debugLog('語言切換失敗，嘗試重新初始化後重試...');
         try {
           await this.reinitialize();
           const trackList = this.videoPlayer.getTimedTextTrackList();
           const targetTrack = trackList.find(track => track.bcp47 === languageCode);
-          
+
           if (targetTrack) {
             await this.videoPlayer.setTimedTextTrack(targetTrack);
             debugLog(`✅ 重試成功切換到 ${languageCode}`);
@@ -354,7 +354,7 @@
         } catch (retryError) {
           debugLog('重試也失敗:', retryError);
         }
-        
+
         throw error;
       }
     }
@@ -456,7 +456,7 @@
       this.playerAPI = null;
       this.videoPlayer = null;
       this.sessionId = null;
-      
+
       return await this.initialize();
     }
   }
@@ -592,7 +592,7 @@
      * 依 request-time evidence 推導字幕可能歸屬的 videoId（僅記錄，不改變現有 cache key 行為）
      */
     deriveSubtitleVideoId(evidence) {
-      // Phase 5: 優先使用可信的 active player videoId，不再依賴全域 manifest state。
+      // 優先使用可信的 active player videoId，不再依賴全域 manifest state。
       // manifestVideoIdAtRequest 已設為 null，encrypted manifest 證據僅供診斷。
       const activePlayerVideoId = evidence.activePlayerVideoIdAtRequest;
       const pageUrlVideoId = evidence.pageUrlVideoIdAtRequest;
@@ -675,7 +675,7 @@
         requestId: requestInfo.requestId,
         source: requestInfo.source || requestInfo.type,
         url: requestInfo.url,
-        manifestVideoId: null, // Phase 5: 不再使用全域 manifest state
+        manifestVideoId: null, // 不再使用全域 manifest state
         manifestEvidenceAtRequest: requestInfo.manifestEvidenceAtRequest || null,
         activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
         pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
@@ -1224,7 +1224,7 @@
      * 生成包含語言和視頻 ID 的緩存鍵
      */
     generateCacheKeyWithLanguage(url, language, pageUrl, resolvedVideoId) {
-      // Phase 5: 使用 request-level 解析的 videoId（來自 playback snapshot），
+      // 使用 request-level 解析的 videoId（來自 playback snapshot），
       // 不再依賴全域 latestManifestVideoId。降級使用 URL 中的 videoId。
       const videoId = resolvedVideoId || this.extractVideoIdFromUrl(pageUrl);
       if (!videoId) {
@@ -1234,7 +1234,7 @@
 
       const urlObj = new URL(url);
       const params = new URLSearchParams(urlObj.search);
-      
+
       // 格式: {language}_{videoID}_{其他參數}
       const cacheKey = `${language}_${videoId}_${params.get('o')}_${params.get('v')}_${params.get('e')}`;
       debugLog('生成緩存鍵:', cacheKey);
@@ -1291,7 +1291,7 @@
         source: requestInfo.type,
         language,
         cacheKey,
-        manifestVideoId: null, // Phase 5: 不再使用全域 manifest state 為字幕所有權證據
+        manifestVideoId: null, // 不再使用全域 manifest state 為字幕所有權證據
         manifestEvidenceAtRequest: requestInfo.manifestEvidenceAtRequest || null,
         activePlayerVideoId: requestInfo.activePlayerVideoIdAtRequest,
         pageUrlVideoId: requestInfo.pageUrlVideoIdAtRequest,
@@ -1306,6 +1306,7 @@
       });
 
       // 緩存 raw TTML（混合策略：既緩存又通知）
+      this.evictOldTTMLEntries();
       this.interceptedTTMLs.set(cacheKey, {
         rawContent: content,
         requestInfo: requestInfo,
@@ -1340,7 +1341,7 @@
     generateCacheKey(url) {
       const urlObj = new URL(url);
       const params = new URLSearchParams(urlObj.search);
-      
+
       // 獲取當前語言作為 key 的一部分
       let currentLanguage = 'unknown';
       try {
@@ -1351,7 +1352,7 @@
       } catch (error) {
         debugLog('獲取當前語言失敗，使用 unknown:', error.message);
       }
-      
+
       // 包含語言信息避免覆蓋
       return `${currentLanguage}_${params.get('o')}_${params.get('v')}_${params.get('e')}`;
     }
@@ -1361,12 +1362,12 @@
      */
     notifyRawTTMLIntercepted(data) {
       const messageId = this.generateMessageId();
-      
+
       debugLog('發送 raw TTML 攔截消息:', { messageId, cacheKey: data.cacheKey, language: data.language });
       this.recordDebugEvent('RAW_TTML_INTERCEPTED', {
         cacheKey: data.cacheKey,
         language: data.language,
-        manifestVideoId: null, // Phase 5: 不再使用全域 manifest state
+        manifestVideoId: null, // 不再使用全域 manifest state
         manifestEvidenceAtRequest: data.requestInfo?.manifestEvidenceAtRequest || null,
         activePlayerVideoId: data.requestInfo?.activePlayerVideoIdAtRequest,
         pageUrlVideoId: data.requestInfo?.pageUrlVideoIdAtRequest,
@@ -1378,7 +1379,7 @@
         rawMetadata: data.rawMetadata || data.metadata || data.requestInfo?.rawTtmlMetadata || null,
         requestUrl: data.requestInfo?.url
       });
-      
+
       // 觸發 messageToContentScript 事件，符合 SubPal 架構
       window.dispatchEvent(new CustomEvent('messageToContentScript', {
         detail: {
@@ -1399,9 +1400,9 @@
     notifySubtitleReady(cacheKey, subtitles) {
       // 使用SubPal的CustomEvent消息傳遞機制
       const messageId = this.generateMessageId();
-      
+
       debugLog('發送字幕準備就緒消息:', { messageId, cacheKey, subtitleCount: subtitles.length });
-      
+
       // 觸發 messageToContentScript 事件，符合 SubPal 架構
       window.dispatchEvent(new CustomEvent('messageToContentScript', {
         detail: {
@@ -1465,7 +1466,7 @@
           source: value.requestInfo?.source || value.requestInfo?.type || null,
           requestTime: value.requestInfo?.requestTime || value.requestInfo?.timestamp || null,
           responseTime: value.requestInfo?.responseTime || null,
-          manifestVideoIdAtRequest: null, // Phase 5: 不再使用全域 manifest state
+          manifestVideoIdAtRequest: null, // 不再使用全域 manifest state
           manifestEvidenceAtRequest: value.requestInfo?.manifestEvidenceAtRequest || null,
           activePlayerVideoIdAtRequest: value.requestInfo?.activePlayerVideoIdAtRequest || null,
           pageUrlVideoIdAtRequest: value.requestInfo?.pageUrlVideoIdAtRequest || null,
@@ -1493,11 +1494,38 @@
     }
 
     /**
-     * 清除字幕緩存
+     * 清理過舊或過多的 raw TTML 快取（純時間/數量淘汰，不依賴 videoId）
+     */
+    evictOldTTMLEntries() {
+      const now = Date.now();
+      const MAX_AGE_MS = 30 * 60 * 1000; // 30 分鐘
+      const MAX_SIZE = 50;
+
+      // 1) 移除超過 30 分鐘的條目
+      for (const [key, value] of this.interceptedTTMLs) {
+        if (now - value.timestamp > MAX_AGE_MS) {
+          this.interceptedTTMLs.delete(key);
+        }
+      }
+
+      // 2) 若仍超過硬上限，移除最舊的條目
+      if (this.interceptedTTMLs.size > MAX_SIZE) {
+        const entries = Array.from(this.interceptedTTMLs.entries());
+        entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+        const toDelete = entries.slice(0, this.interceptedTTMLs.size - MAX_SIZE);
+        for (const [key] of toDelete) {
+          this.interceptedTTMLs.delete(key);
+        }
+      }
+    }
+
+    /**
+     * 清除字幕快取（含 raw TTML 快取）
      */
     clearCache() {
       this.interceptedSubtitles.clear();
-      debugLog('字幕緩存已清除');
+      this.interceptedTTMLs.clear();
+      debugLog('字幕快取已清除');
     }
   }
 
@@ -1513,13 +1541,13 @@
     try {
       const hasNetflixAPI = !!(window.netflix && window.netflix.appContext);
       const hasPlayerApp = !!(hasNetflixAPI && window.netflix.appContext.state.playerApp);
-      
+
       debugLog('Netflix API可用性檢查:', {
         hasNetflixAPI,
         hasPlayerApp,
         available: hasNetflixAPI && hasPlayerApp
       });
-      
+
       return hasNetflixAPI && hasPlayerApp;
     } catch (error) {
       console.error('檢查API可用性時出錯:', error);
@@ -1531,7 +1559,7 @@
    * 消息處理器
    */
   function handleMessage(event) {
-    if (event.data.source !== 'subpal-content-script' || 
+    if (event.data.source !== 'subpal-content-script' ||
         event.data.target !== 'subpal-page-script') {
       return;
     }
@@ -1648,11 +1676,11 @@
             response.error = '缺少語言代碼參數';
             break;
           }
-          
+
           try {
             // 獲取指定語言的攔截字幕數據
             const allSubtitles = subtitleInterceptor.getAllInterceptedSubtitles();
-            
+
             // 由於緩存鍵格式是 "語言代碼_參數"，需要按語言代碼查找
             let languageSubtitles = null;
             for (const [cacheKey, subtitleData] of Object.entries(allSubtitles)) {
@@ -1661,7 +1689,7 @@
                 break;
               }
             }
-            
+
             if (languageSubtitles && languageSubtitles.subtitles) {
               response.subtitles = languageSubtitles.subtitles;
               response.success = true;
@@ -1699,7 +1727,7 @@
         newVideoId
       });
       debugLog(`檢測到影片切換 (${oldVideoId} -> ${newVideoId})，重新初始化播放器助手`);
-      
+
       // 使用重試機制等待播放會話就緒
       retryPlayerInitialization(5, 1000).then(() => {
         debugLog('播放器助手重新初始化完成');
@@ -1718,32 +1746,32 @@
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         debugLog(`播放器助手初始化嘗試 ${attempt}/${maxRetries}...`);
-        
+
         // 檢查播放會話是否可用
         if (!checkAPIAvailability()) {
           throw new Error('Netflix API不可用');
         }
-        
+
         const playerApp = window.netflix.appContext.state.playerApp;
         const playerAPI = playerApp.getAPI();
         const sessions = playerAPI.getOpenPlaybackSessions();
-        
+
         if (!sessions || sessions.length === 0) {
           throw new Error('沒有找到播放會話');
         }
-        
+
         // 播放會話可用，開始重新初始化
         await playerHelper.reinitialize();
         debugLog(`✅ 播放器助手在第 ${attempt} 次嘗試中成功初始化`);
         return;
-        
+
       } catch (error) {
         debugLog(`❌ 第 ${attempt} 次初始化失敗: ${error.message}`);
-        
+
         if (attempt === maxRetries) {
           throw new Error(`播放器助手初始化在 ${maxRetries} 次嘗試後仍然失敗: ${error.message}`);
         }
-        
+
         // 等待後重試
         debugLog(`⏳ 等待 ${delay}ms 後重試...`);
         await new Promise(resolve => setTimeout(resolve, delay));
@@ -1753,13 +1781,13 @@
 
   // 初始化
   debugLog('Netflix Page Script 已載入');
-  
+
   // 檢查API可用性
   if (checkAPIAvailability()) {
     debugLog('Netflix API可用，準備就緒');
   } else {
     debugLog('Netflix API不可用，等待頁面加載完成');
-    
+
     // 等待頁面加載完成後再次檢查
     setTimeout(() => {
       if (checkAPIAvailability()) {
