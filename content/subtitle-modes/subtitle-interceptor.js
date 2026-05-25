@@ -2444,7 +2444,8 @@ class SubtitleInterceptor {
       selectedScore: null,
       lastFailureReason: null,
       toastShown: false,
-      _startedContext: { videoId: context.videoId, epoch: context.epoch }
+      _startedContext: { videoId: context.videoId, epoch: context.epoch },
+      _domSampleEventFired: false
     };
 
     this.recordDebugEvent('PRIMARY_DISCOVERY_STARTED', {
@@ -2685,6 +2686,22 @@ class SubtitleInterceptor {
     if (sample) {
       this.primaryDiscovery.lastSample = sample;
       this.primaryDiscovery.sampleCount++;
+
+      // 觸發 DOM sample 檢測事件（每個 discovery context 只觸發一次），
+      // 供 UI 層判斷啟動 long recovery 逾時
+      if (!this.primaryDiscovery._domSampleEventFired) {
+        this.primaryDiscovery._domSampleEventFired = true;
+        const eventContext = this.getCurrentPlaybackContext();
+        dispatchInternalEvent({
+          type: 'PRIMARY_DISCOVERY_DOM_SAMPLE_DETECTED',
+          source: 'subtitle-interceptor',
+          videoId: eventContext.videoId,
+          epoch: eventContext.epoch,
+          sampleCount: this.primaryDiscovery.sampleCount,
+          timestamp: Date.now()
+        });
+      }
+
       this.recordDebugEvent('PRIMARY_DISCOVERY_DOM_SAMPLE', {
         sampleCount: this.primaryDiscovery.sampleCount,
         textLength: sample.text.length,
@@ -2860,6 +2877,21 @@ class SubtitleInterceptor {
         source: 'mutation-observer'
       };
       this.primaryDiscovery.sampleCount++;
+
+      // 觸發 DOM sample 檢測事件（每個 discovery context 只觸發一次），
+      // 供 UI 層判斷啟動 long recovery 逾時
+      if (!this.primaryDiscovery._domSampleEventFired) {
+        this.primaryDiscovery._domSampleEventFired = true;
+        const domEventContext = this.getCurrentPlaybackContext();
+        dispatchInternalEvent({
+          type: 'PRIMARY_DISCOVERY_DOM_SAMPLE_DETECTED',
+          source: 'subtitle-interceptor',
+          videoId: domEventContext.videoId,
+          epoch: domEventContext.epoch,
+          sampleCount: this.primaryDiscovery.sampleCount,
+          timestamp: Date.now()
+        });
+      }
     }
 
     if (result.matched) {

@@ -40,6 +40,10 @@ class UIManager {
     this.nativeSubtitleVisibilityUpdatedAt = null;
     this.acquisitionToastKeys = new Set();
     
+    // 備援通知狀態機（fallback/recovery toast 控制）
+    this.recoveryNotificationState = null;
+    this._pendingRecoveryIsTransition = false;
+
     // 懸停事件管理
     this.hoverEventHandlers = null;
     this.lastSubtitleContainer = null;
@@ -378,13 +382,27 @@ class UIManager {
   setupEventHandlers() {
     registerInternalEventHandler('SUBTITLE_READINESS_CHANGED', (event) => {
       this.syncNativeSubtitleVisibility(event.readiness?.renderReadiness, event.reason || 'subtitle-readiness-changed');
-      this.handleAcquisitionFailureNotification(event);
+      this.handleFallbackNotification(event);
+    });
+
+    // 監聽 primary discovery DOM sample 檢測事件
+    registerInternalEventHandler('PRIMARY_DISCOVERY_DOM_SAMPLE_DETECTED', (event) => {
+      this.handleDomSampleDetected(event);
     });
 
     // 監聽影片切換事件 - 統一重新初始化所有UI組件
     registerInternalEventHandler('VIDEO_ID_CHANGED', async (event) => {
       this.log(`🎬 檢測到影片切換: ${event.oldVideoId} -> ${event.newVideoId}`);
-      
+
+      // 清除備援通知計時器與狀態
+      this.clearRecoveryNotificationTimers();
+      this.recoveryNotificationState = null;
+      this._pendingRecoveryIsTransition = false;
+
+      // 判斷是否為有效的新舊影片轉場
+      const isValidVideoTransition = event.oldVideoId && event.oldVideoId !== 'unknown' &&
+                                     event.newVideoId && event.newVideoId !== 'unknown';
+
       try {
         this.showNativeSubtitles('video-id-changing');
         this.acquisitionToastKeys.clear();
@@ -423,6 +441,13 @@ class UIManager {
         });
         
         this.isInitialized = true;
+
+        // ★ 有效影片轉場標記：下次 SUBTITLE_READINESS_CHANGED 收到新的 valid context 時
+        // 使用轉場備援文案（3 秒），而非初始載入文案（8 秒）
+        if (isValidVideoTransition) {
+          this._pendingRecoveryIsTransition = true;
+        }
+
         this.log('🎉 影片切換UI重新初始化完成！');
         
       } catch (error) {
@@ -888,6 +913,228 @@ class UIManager {
     return `SubPal 未能建立自訂主字幕：${reasonText}。目前會保留 Netflix 原生字幕。`;
   }
 
+  // ==================== 備援通知控制器 ====================
+
+  /**
+   * 判斷目前 renderReadiness 是否處於備援狀態
+   * 備援狀態定義：context ready + interceptor active + primary 未就緒 + 無法隱藏原生字幕
+   */
+  isFallbackActive(renderReadiness) {
+    if (!renderReadiness) return false;
+    return renderReadiness.interceptModeActive === true &&
+           renderReadiness.playbackContextReady === true &&
+           renderReadiness.primarySubtitleSlotReady === false &&
+           renderReadiness.canHideNativeSubtitles === false;
+  }
+
+  /**
+   * 判斷主要字幕是否已就緒（可直接使用或已可隱藏原生字幕）
+   */
+  isPrimaryReady(renderReadiness) {
+    if (!renderReadiness) return false;
+    return renderReadiness.primarySubtitleSlotReady === true ||
+           renderReadiness.canHideNativeSubtitles === true;
+  }
+
+  /**
+   * 確保 recoveryNotificationState 存在且符合目前的 context。
+   * 若 context 已變化，清除舊 timer 並建立新狀態。
+   */
+  ensureRecoveryNotificationState(contextId, videoId, epoch) {
+    if (this.recoveryNotificationState &&
+        this.recoveryNotificationState.contextId === contextId) {
+      return; // 同 context，沿用現有狀態
+    }
+
+    this.clearRecoveryNotificationTimers();
+    this.recoveryNotificationState = {
+      contextId,
+      videoId,
+      epoch,
+      isTransition: this._pendingRecoveryIsTransition || false,
+      lastReadiness: null,
+      initialFallbackTimer: null,
+      transitionFallbackTimer: null,
+      longRecoveryTimer: null,
+      initialFallbackShown: false,
+      transitionFallbackShown: false,
+      longRecoveryFailureShown: false,
+      domSampleDetected: false
+    };
+    this._pendingRecoveryIsTransition = false; // 消費轉場標記
+  }
+
+  /** 排程初始載入備援通知（8 秒後顯示） */
+  scheduleInitialFallbackNotice() {
+    const state = this.recoveryNotificationState;
+    if (!state) return;
+    if (state.initialFallbackTimer) return; // 已排程
+    if (state.initialFallbackShown) return; // 已顯示
+
+    state.initialFallbackTimer = setTimeout(() => {
+      // 重新檢查最新狀態
+      if (!this.isRecoveryStateStillValid(state)) return;
+      if (this.isPrimaryReady(state.lastReadiness?.renderReadiness)) return;
+      if (!this.isFallbackActive(state.lastReadiness?.renderReadiness)) return;
+
+      state.initialFallbackShown = true;
+      state.initialFallbackTimer = null;
+      this.showInfoToast('SubPal 正在嘗試取得字幕，目前暫時顯示 Netflix 原生字幕。', {
+        duration: 4000
+      });
+    }, 8000);
+  }
+
+  /** 排程轉場備援通知（3 秒後顯示） */
+  scheduleTransitionFallbackNotice() {
+    const state = this.recoveryNotificationState;
+    if (!state) return;
+    if (state.transitionFallbackTimer) return;
+    if (state.transitionFallbackShown) return;
+
+    state.transitionFallbackTimer = setTimeout(() => {
+      if (!this.isRecoveryStateStillValid(state)) return;
+      if (this.isPrimaryReady(state.lastReadiness?.renderReadiness)) return;
+      if (!this.isFallbackActive(state.lastReadiness?.renderReadiness)) return;
+
+      state.transitionFallbackShown = true;
+      state.transitionFallbackTimer = null;
+      this.showInfoToast('SubPal 正在重新同步本集字幕，目前暫時顯示 Netflix 原生字幕。', {
+        duration: 4000
+      });
+    }, 3000);
+  }
+
+  /** 排程長時間復原逾時通知（DOM sample 後 15 秒） */
+  scheduleLongRecoveryTimeout() {
+    const state = this.recoveryNotificationState;
+    if (!state) return;
+    if (state.longRecoveryTimer) return;
+    if (state.longRecoveryFailureShown) return;
+    if (!state.domSampleDetected) return; // 無 DOM sample 不啟動逾時
+
+    state.longRecoveryTimer = setTimeout(() => {
+      if (!this.isRecoveryStateStillValid(state)) return;
+      if (this.isPrimaryReady(state.lastReadiness?.renderReadiness)) return;
+      if (!this.isFallbackActive(state.lastReadiness?.renderReadiness)) return;
+
+      state.longRecoveryFailureShown = true;
+      state.longRecoveryTimer = null;
+      this.showInfoToast('SubPal 暫時無法同步本集字幕。你可以繼續使用 Netflix 原生字幕，或重新整理頁面讓 SubPal 重新攔截。', {
+        duration: 8000
+      });
+    }, 15000);
+  }
+
+  /**
+   * 確認 recovery state 的 context 仍與最新 context 一致，
+   * 且仍有 lastReadiness 供判斷（避免 timer callback 時 state 已 stale）
+   */
+  isRecoveryStateStillValid(state) {
+    if (!this.recoveryNotificationState) return false;
+    if (this.recoveryNotificationState !== state) return false;
+    if (!state.lastReadiness) return false;
+    return true;
+  }
+
+  /** 清除所有備援通知計時器 */
+  clearRecoveryNotificationTimers() {
+    const state = this.recoveryNotificationState;
+    if (!state) return;
+
+    if (state.initialFallbackTimer) {
+      clearTimeout(state.initialFallbackTimer);
+      state.initialFallbackTimer = null;
+    }
+    if (state.transitionFallbackTimer) {
+      clearTimeout(state.transitionFallbackTimer);
+      state.transitionFallbackTimer = null;
+    }
+    if (state.longRecoveryTimer) {
+      clearTimeout(state.longRecoveryTimer);
+      state.longRecoveryTimer = null;
+    }
+  }
+
+  /** 重置備援通知狀態 */
+  resetRecoveryNotificationState() {
+    this.clearRecoveryNotificationTimers();
+    this.recoveryNotificationState = null;
+    this._pendingRecoveryIsTransition = false;
+  }
+
+  /**
+   * 處理 SUBTITLE_READINESS_CHANGED 事件，驅動備援通知狀態機
+   */
+  handleFallbackNotification(event) {
+    const readiness = event.readiness;
+    if (!readiness) return;
+
+    const context = readiness.context;
+    const renderReadiness = readiness.renderReadiness;
+    if (!context || !renderReadiness) return;
+
+    const videoId = context.videoId;
+    const epoch = context.epoch;
+    if (!videoId || videoId === 'unknown' || context.state !== 'ready') {
+      // context 無效或尚未 ready：清除計時器但保留 state 供後續恢復
+      this.clearRecoveryNotificationTimers();
+      return;
+    }
+
+    const contextId = `${videoId}|${epoch}`;
+
+    // 確保狀態存在於正確的 context
+    this.ensureRecoveryNotificationState(contextId, videoId, epoch);
+
+    // 更新最新 readiness
+    const state = this.recoveryNotificationState;
+    state.lastReadiness = readiness;
+
+    // 復原成功檢查：primary ready 或 native 已可隱藏
+    if (this.isPrimaryReady(renderReadiness)) {
+      this.clearRecoveryNotificationTimers();
+      return;
+    }
+
+    // 非備援狀態：清除計時器
+    if (!this.isFallbackActive(renderReadiness)) {
+      this.clearRecoveryNotificationTimers();
+      return;
+    }
+
+    // 備援中：依據是否為轉場 context 排程對應 toast
+    if (state.isTransition) {
+      this.scheduleTransitionFallbackNotice();
+    } else {
+      this.scheduleInitialFallbackNotice();
+    }
+  }
+
+  /**
+   * 處理 PRIMARY_DISCOVERY_DOM_SAMPLE_DETECTED 事件
+   * 當第一個 DOM sample 被檢測到且備援仍活躍時，啟動 long recovery 逾時（15 秒）
+   */
+  handleDomSampleDetected(event) {
+    if (!this.recoveryNotificationState) return;
+
+    // 確認 event 的 context 與目前 notification state 一致
+    const videoId = event.videoId;
+    const epoch = event.epoch;
+    if (this.recoveryNotificationState.videoId !== videoId ||
+        this.recoveryNotificationState.epoch !== epoch) return;
+
+    // 確認備援仍活躍
+    const renderReadiness = this.recoveryNotificationState.lastReadiness?.renderReadiness;
+    if (!renderReadiness) return;
+    if (!this.isFallbackActive(renderReadiness)) return;
+    if (this.isPrimaryReady(renderReadiness)) return;
+
+    // 標記 DOM sample 已檢測並啟動 15 秒逾時
+    this.recoveryNotificationState.domSampleDetected = true;
+    this.scheduleLongRecoveryTimeout();
+  }
+
   // 獲取當前狀態
   getStatus() {
     return {
@@ -946,6 +1193,9 @@ class UIManager {
   cleanup() {
     this.log('清理 UI 管理器資源...');
     
+    // 清理備援通知計時器與轉場標記
+    this.resetRecoveryNotificationState();
+
     // 清理懸停事件
     this.clearSubtitleHoverEvents();
     
