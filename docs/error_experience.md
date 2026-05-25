@@ -26,3 +26,23 @@
 ### 經驗
 - `syncing` 不能只是「正在處理中」的表示，還必須有超時回收機制
 - MV3 Service Worker 中的同步流程要假設自己可能在任何一步被中止，queue 狀態設計必須可恢復
+
+## 2026-05 - Netflix 換片後自訂字幕樣式失效
+
+### 症狀
+- 第一部影片可正確套用 SubPal 自訂字幕樣式
+- 在 Netflix SPA 內切到第二部影片後，主要字幕樣式回到預設值或看起來像被 Netflix 原生字幕樣式覆蓋
+
+### 原因
+- `UIManager` 收到 `VIDEO_ID_CHANGED` 後會清理並重建 `SubtitleDisplay`
+- `SubtitleStyleManager` 只在初始化與設定變更時把 config 注入 `SubtitleDisplay`
+- 換片後新建立的 `SubtitleDisplay` 沒有重新接收目前使用者樣式
+
+### 解法
+- `UIManager` 在影片切換重建 UI 元件後分發 `UI_COMPONENTS_REINITIALIZED`
+- `SubtitleStyleManager` 監聽該事件並呼叫 `applyCurrentStyle()`，將目前 config 重新注入新的字幕顯示元件
+- 在 `window.subpalApp.getStatus()` 暴露 `subtitleStyleManager` 狀態，方便確認換片後樣式是否已重新下發
+
+### 經驗
+- Netflix SPA 切頁會讓 UI DOM 和管理器生命週期不同步
+- 依賴 UI 元件引用的管理器，必須在 UI 重建後有明確的重新同步事件
