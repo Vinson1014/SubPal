@@ -13,6 +13,7 @@ import { sendMessageToPageScript, sendMessage, registerInternalEventHandler, dis
 import { getCurrentTimestamp, getVideoId } from '../core/video-info.js';
 import { playbackContextManager } from '../core/playback-context-manager.js';
 import { getPlayerAdapter, setRegionConfigs } from '../ui/netflix-player-adapter.js';
+import { DOMOverlapMatcher } from './dom-overlap-matcher.js';
 
 class SubtitleInterceptor {
   constructor() {
@@ -62,6 +63,28 @@ class SubtitleInterceptor {
     };
     this.acquisitionWaiters = new Map();
     this.nextAcquisitionWaiterId = 1;
+
+    // Primary Discovery State Machine
+    this.primaryDiscovery = {
+      state: 'idle',
+      startedAt: null,
+      sampleCount: 0,
+      matchAttemptCount: 0,
+      lastSample: null,
+      selectedCacheKey: null,
+      selectedScore: null,
+      lastFailureReason: null,
+      toastShown: false
+    };
+
+    // DOM Overlap Matcher，在 startPrimaryDiscovery 時 lazy 初始化
+    this.domOverlapMatcher = null;
+
+    // Primary discovery 輪詢計時器
+    this.primaryDiscoveryTimer = null;
+
+    // Secondary acquisition in-flight tracking（idempotent 用）
+    this._secondaryAcquisitionInFlight = null;
   }
 
   recordDebugEvent(type, data = {}) {
@@ -154,6 +177,9 @@ class SubtitleInterceptor {
     this.isActive = true;
     this.dispatchSubtitleReadinessChanged('interceptor-started-primary-not-ready');
     
+    // ★ A: interceptor 啟動後立即嘗試啟動 primary discovery（不等 loadInterceptedSubtitles 完成）
+    this.tryStartPrimaryDiscovery('interceptor-start');
+
     // 載入攔截的字幕數據
     this.loadInterceptedSubtitles();
     this.scheduleReloadAfterContextReady('interceptor-start', this.getCurrentPlaybackContext());
@@ -176,6 +202,7 @@ class SubtitleInterceptor {
     // 停止渲染循環
     this.stopRenderLoop();
     this.clearAcquisitionWaiters('interceptor-stopped');
+    this.abortPrimaryDiscovery('interceptor-stopped');
 
     if (this.contextReloadTimer) {
       clearTimeout(this.contextReloadTimer);
@@ -185,6 +212,7 @@ class SubtitleInterceptor {
     // 清理狀態
     this.currentTimestamp = 0;
     this.lastRenderedSubtitle = null;
+    this._secondaryAcquisitionInFlight = null;
     this.dispatchSubtitleReadinessChanged('interceptor-stopped');
     
     this.log('字幕攔截模式已停止');
@@ -229,6 +257,10 @@ class SubtitleInterceptor {
 
   // 載入攔截的字幕數據（優化流程：緩存檢查優先 -> 智能語言切換 -> 恢復設定）
   async loadInterceptedSubtitles() {
+    // ★ A: 在 acquisition 前嘗試啟動 primary discovery，避免太晚接管
+    // 此時 context 可能已 ready，primary slot 尚未 ready → 適合提早啟動 DOM match
+    this.tryStartPrimaryDiscovery('early-load-intercepted');
+
     if (this.isLoadingInterceptedSubtitles) {
       this.log('字幕數據載入中，跳過重複請求');
       this.pendingLoadInterceptedSubtitles = true;
@@ -253,10 +285,21 @@ class SubtitleInterceptor {
       // ensureLanguageAvailable 會先用 parsed/raw cache，再必要時切換或 refresh Netflix 字幕軌。
       await this.ensureLanguageAvailable(this.primaryLanguage, 'primary', { defaultLanguage });
       if (this.dualSubtitleEnabled) {
-        await this.ensureLanguageAvailable(this.secondaryLanguage, 'secondary', { defaultLanguage });
+        await this.ensureSecondaryLanguageAvailableOnce('load-intercepted-subtitles', { defaultLanguage });
       }
 
       // 階段4: 切回預設語言
+      // ★ D: 若 secondary acquisition 仍在進行中，延後 restore 避免干擾 track switching
+      if (this._secondaryAcquisitionInFlight) {
+        this.recordDebugEvent('DEFAULT_LANGUAGE_RESTORE_DEFERRED_SECONDARY_IN_FLIGHT', {
+          inFlightKey: this._secondaryAcquisitionInFlight.key
+        });
+        try {
+          await this._secondaryAcquisitionInFlight.promise;
+        } catch (e) {
+          // 即使失敗仍繼續 restore
+        }
+      }
       await this.restoreDefaultLanguage(defaultLanguage);
       
       this.log('字幕數據載入完成，已恢復用戶原始設定');
@@ -266,6 +309,8 @@ class SubtitleInterceptor {
       throw error;
     } finally {
       this.isLoadingInterceptedSubtitles = false;
+      // 載入完成後檢查是否需啟動 primary discovery
+      this.tryStartPrimaryDiscovery();
       if (this.pendingLoadInterceptedSubtitles && this.isActive) {
         const pendingReason = this.pendingLoadReason;
         this.pendingLoadInterceptedSubtitles = false;
@@ -471,7 +516,11 @@ class SubtitleInterceptor {
           pageUrlVideoIdAtRequest: requestInfo.pageUrlVideoIdAtRequest || null,
           currentTrackAtRequest: requestInfo.currentTrackAtRequest || null,
           sessionIdAtRequest: requestInfo.sessionIdAtRequest || null,
-          derivedSubtitleVideo: requestInfo.derivedSubtitleVideo || null
+          derivedSubtitleVideo: requestInfo.derivedSubtitleVideo || null,
+          // attribution 診斷欄位
+          attributionReason: requestInfo.attributionReason || null,
+          attributedVideoId: requestInfo.attributedVideoId || null,
+          overlapScore: requestInfo.overlapScore || null
         }
       };
     });
@@ -638,12 +687,22 @@ class SubtitleInterceptor {
         }
       }
 
+      const requestInfo = data?.requestInfo || {};
+      const attributionReason = requestInfo.attributionReason || null;
+      const overlapScore = requestInfo.overlapScore || 0;
+
       candidates.push({
         cacheKey,
         data,
         hasCurrentSubtitle: !!subtitleAtCurrentTime,
         subtitleCount: subtitles.length,
-        requestTime: data?.requestInfo?.requestTime || data?.timestamp || 0
+        requestTime: data?.requestInfo?.requestTime || data?.timestamp || 0,
+        // DOM match 排序資訊
+        attributionReason,
+        overlapScore,
+        gateReason: data?.gate?.reason || null,
+        parsedVideoId: data?.gate?.parsedVideoId || null,
+        attributedVideoId: requestInfo.attributedVideoId || null
       });
     }
 
@@ -652,6 +711,16 @@ class SubtitleInterceptor {
     }
 
     candidates.sort((a, b) => {
+      // DOM match 優先，次依 overlapScore
+      const aDomMatch = a.attributionReason === 'native-dom-match' ? 1 : 0;
+      const bDomMatch = b.attributionReason === 'native-dom-match' ? 1 : 0;
+      if (aDomMatch !== bDomMatch) {
+        return bDomMatch - aDomMatch;
+      }
+      if (aDomMatch && bDomMatch && a.overlapScore !== b.overlapScore) {
+        return b.overlapScore - a.overlapScore;
+      }
+      // 既有排序條件
       if (a.hasCurrentSubtitle !== b.hasCurrentSubtitle) {
         return a.hasCurrentSubtitle ? -1 : 1;
       }
@@ -666,11 +735,21 @@ class SubtitleInterceptor {
       languageCode,
       selectedCacheKey: selected.cacheKey,
       currentTime,
+      selectedAttributionReason: selected.attributionReason,
+      selectedOverlapScore: selected.overlapScore,
+      selectedGateReason: selected.gateReason,
+      selectedParsedVideoId: selected.parsedVideoId,
+      selectedAttributedVideoId: selected.attributedVideoId,
       candidates: candidates.map(candidate => ({
         cacheKey: candidate.cacheKey,
         hasCurrentSubtitle: candidate.hasCurrentSubtitle,
         subtitleCount: candidate.subtitleCount,
-        requestTime: candidate.requestTime
+        requestTime: candidate.requestTime,
+        attributionReason: candidate.attributionReason,
+        overlapScore: candidate.overlapScore,
+        gateReason: candidate.gateReason,
+        parsedVideoId: candidate.parsedVideoId,
+        attributedVideoId: candidate.attributedVideoId
       })).slice(0, 10)
     });
 
@@ -793,6 +872,105 @@ class SubtitleInterceptor {
     return ready;
   }
 
+  /**
+   * Idempotent secondary acquisition helper。
+   * 確保同 videoId/epoch/language 下只進行一次 secondary track switching，
+   * 避免重複切換造成 flicker/卡頓。
+   *
+   * @param {string} reason - 觸發原因（用於 debug event）
+   * @param {Object} [options] - 傳給 ensureLanguageAvailable 的選項
+   * @returns {Promise<Object>} { success, reason, ... }
+   */
+  async ensureSecondaryLanguageAvailableOnce(reason, options = {}) {
+    // 1. Dual subtitle disabled → skip
+    if (!this.dualSubtitleEnabled) {
+      this.recordDebugEvent('SECONDARY_ACQUISITION_SKIPPED_DISABLED', { reason });
+      return { success: false, reason: 'dual-subtitle-disabled' };
+    }
+
+    // 2. Secondary language 未設定 → skip
+    if (!this.secondaryLanguage) {
+      this.recordDebugEvent('SECONDARY_ACQUISITION_SKIPPED_INVALID_CONTEXT', {
+        reason,
+        missingField: 'secondaryLanguage'
+      });
+      return { success: false, reason: 'missing-secondary-language' };
+    }
+
+    const context = this.getCurrentPlaybackContext();
+
+    // 3. Secondary slot already ready for current context → 不回傳 success 以外的資訊，不切 track
+    if (this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+      this.recordDebugEvent('SECONDARY_ACQUISITION_SKIPPED_READY', { reason, context });
+      return { success: true, source: 'already-ready', reason };
+    }
+
+    // 4. Context 無效 → skip
+    if (!context.videoId || context.videoId === 'unknown' || context.state === 'transitioning') {
+      this.recordDebugEvent('SECONDARY_ACQUISITION_SKIPPED_INVALID_CONTEXT', {
+        reason,
+        contextState: context.state,
+        videoId: context.videoId
+      });
+      return { success: false, reason: 'invalid-context' };
+    }
+
+    // 5. In-flight key 檢查（videoId + epoch + language）
+    const epoch = context.epoch ?? 'null';
+    const inFlightKey = `${context.videoId}|${epoch}|${this.secondaryLanguage}`;
+
+    this.recordDebugEvent('SECONDARY_ACQUISITION_REQUESTED', { reason, inFlightKey, context });
+
+    if (this._secondaryAcquisitionInFlight &&
+        this._secondaryAcquisitionInFlight.key === inFlightKey) {
+      // 同一 key 已有 in-flight → reuse
+      this.recordDebugEvent('SECONDARY_ACQUISITION_REUSED_IN_FLIGHT', {
+        reason,
+        inFlightKey,
+        context
+      });
+      return await this._secondaryAcquisitionInFlight.promise;
+    }
+
+    // 6. 建立新的 in-flight record
+    const inFlightRecord = {
+      key: inFlightKey,
+      language: this.secondaryLanguage,
+      promise: null
+    };
+    this._secondaryAcquisitionInFlight = inFlightRecord;
+
+    this.recordDebugEvent('SECONDARY_ACQUISITION_STARTED', { reason, inFlightKey, context });
+
+    const acquisitionPromise = (async () => {
+      try {
+        const result = await this.ensureLanguageAvailable(this.secondaryLanguage, 'secondary', options);
+        this.recordDebugEvent('SECONDARY_ACQUISITION_COMPLETED', {
+          ...result,
+          reason,
+          inFlightKey
+        });
+        return result;
+      } catch (error) {
+        this.recordDebugEvent('SECONDARY_ACQUISITION_COMPLETED', {
+          success: false,
+          error: error.message,
+          reason,
+          inFlightKey
+        });
+        return { success: false, error: error.message, reason: 'exception' };
+      } finally {
+        // 只清掉同一筆 record，避免新一筆被舊 promise finally 清掉
+        if (this._secondaryAcquisitionInFlight === inFlightRecord) {
+          this._secondaryAcquisitionInFlight = null;
+        }
+      }
+    })();
+
+    inFlightRecord.promise = acquisitionPromise;
+    return await acquisitionPromise;
+  }
+
   async ensureLanguageAvailable(languageCode, role, options = {}) {
     const startedAt = Date.now();
     const context = this.getCurrentPlaybackContext();
@@ -830,6 +1008,69 @@ class SubtitleInterceptor {
         success: true,
         languageCode,
         source: 'cache',
+        durationMs: Date.now() - startedAt
+      });
+    }
+
+    // ★ B: 若 secondary acquisition 時 primary discovery 正在早期窗口，暫緩 track switching
+    // 避免在前幾秒切到 ja 再切回造成 Netflix 原生字幕閃爍。
+    // 僅暫緩實際的 track switching / refresh，已緩存的資料仍正常載入。
+    if (role === 'secondary' && this.isPrimaryDiscoveryEarlyWindowActive()) {
+      const remainingMs = Math.max(0, 3000 - (Date.now() - this.primaryDiscovery.startedAt));
+      this.recordDebugEvent('SECONDARY_ACQUISITION_DEFERRED_PRIMARY_DISCOVERY', {
+        primaryDiscoveryState: this.primaryDiscovery.state,
+        primaryDiscoveryStartedAt: this.primaryDiscovery.startedAt,
+        deferDurationMs: remainingMs + 500,
+        languageCode,
+        role
+      });
+
+      // 捕捉 defer 時的 context videoId/epoch，用於 retry callback 前驗證一致性
+      const deferContextVideoId = context.videoId;
+      const deferContextEpoch = context.epoch;
+      // 排程在 early window 過後重試 secondary acquisition
+      setTimeout(async () => {
+        // 先確認 context 一致（避免跨影片執行 retry，導致為錯誤影片切換字幕軌）
+        const currentContext = this.getCurrentPlaybackContext();
+        if (!deferContextVideoId || currentContext.videoId !== deferContextVideoId || currentContext.epoch !== deferContextEpoch) {
+          this.recordDebugEvent('SECONDARY_ACQUISITION_DEFERRED_SKIPPED_CONTEXT_CHANGED', {
+            deferredVideoId: deferContextVideoId,
+            deferredEpoch: deferContextEpoch,
+            currentVideoId: currentContext.videoId,
+            currentEpoch: currentContext.epoch
+          });
+          return;
+        }
+        if (!this.isActive || this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+          return;
+        }
+
+        // 執行 deferred secondary acquisition 並 await 結果
+        const result = await this.ensureSecondaryLanguageAvailableOnce('deferred-retry', options).catch(error => {
+          console.error('Deferred secondary acquisition retry failed:', error);
+          return { success: false, error: error.message, reason: 'exception' };
+        });
+
+        // ★ 完成後 restore default language，避免 Netflix active track 永久停在 secondary language
+        const defaultLanguage = options.defaultLanguage || (await this.recordDefaultLanguage().catch(() => null));
+        if (defaultLanguage && defaultLanguage !== 'unknown') {
+          await this.restoreDefaultLanguage(defaultLanguage);
+          this.recordDebugEvent('DEFAULT_LANGUAGE_RESTORED_AFTER_DEFERRED_SECONDARY', {
+            defaultLanguage,
+            acquisitionResult: { success: result.success, reason: result.reason }
+          });
+        } else {
+          this.recordDebugEvent('DEFAULT_LANGUAGE_RESTORE_SKIPPED_AFTER_DEFERRED_SECONDARY', {
+            reason: !defaultLanguage ? 'no-default-language' : 'default-language-unknown',
+            acquisitionResult: { success: result.success, reason: result.reason }
+          });
+        }
+      }, remainingMs + 500);
+
+      return this.setLanguageAcquisitionResult(role, {
+        success: false,
+        languageCode,
+        reason: 'deferred-primary-discovery-early-window',
         durationMs: Date.now() - startedAt
       });
     }
@@ -1439,14 +1680,35 @@ class SubtitleInterceptor {
       lastAcquisitionResults: this.lastAcquisitionResults,
       pendingAcquisitionWaiters: this.acquisitionWaiters.size,
       nativeSubtitleVisibility: subtitleReadiness.nativeSubtitle,
-      rawTTMLMetadata: Array.from(this.interceptedSubtitles.entries()).map(([cacheKey, data]) => ({
-        cacheKey,
-        language: data?.language || null,
-        rawMetadata: data?.rawMetadata || data?.metadata || data?.requestInfo?.rawTtmlMetadata || null,
-        gate: data?.gate || null,
-        subtitleCount: Array.isArray(data?.subtitles) ? data.subtitles.length : 0,
-        playbackContext: data?.playbackContext || null
-      })),
+      // DOM overlap matcher 除錯資訊（僅在有 active matcher 時提供）
+      domOverlapMatcher: this.domOverlapMatcher?.getDebugInfo() || null,
+      // primary discovery 狀態
+      primaryDiscovery: {
+        state: this.primaryDiscovery.state,
+        startedAt: this.primaryDiscovery.startedAt,
+        sampleCount: this.primaryDiscovery.sampleCount,
+        matchAttemptCount: this.primaryDiscovery.matchAttemptCount,
+        lastSample: this.primaryDiscovery.lastSample,
+        selectedCacheKey: this.primaryDiscovery.selectedCacheKey,
+        selectedScore: this.primaryDiscovery.selectedScore,
+        lastFailureReason: this.primaryDiscovery.lastFailureReason,
+        toastShown: this.primaryDiscovery.toastShown
+      },
+      rawTTMLMetadata: Array.from(this.interceptedSubtitles.entries()).map(([cacheKey, data]) => {
+        const requestInfo = data?.requestInfo || {};
+        return {
+          cacheKey,
+          language: data?.language || null,
+          rawMetadata: data?.rawMetadata || data?.metadata || requestInfo?.rawTtmlMetadata || null,
+          gate: data?.gate || null,
+          subtitleCount: Array.isArray(data?.subtitles) ? data.subtitles.length : 0,
+          playbackContext: data?.playbackContext || null,
+          // attribution 診斷欄位
+          attributionReason: requestInfo.attributionReason || null,
+          attributedVideoId: requestInfo.attributedVideoId || null,
+          overlapScore: requestInfo.overlapScore || null
+        };
+      }),
       recentEvents: this.debugEvents.slice(-20),
       hasTimeIndex: {
         primary: !!this.primaryTimeIndex,
@@ -1606,6 +1868,8 @@ class SubtitleInterceptor {
   cleanup() {
     this.log('清理字幕攔截器資源...');
     
+    this.abortPrimaryDiscovery('interceptor-cleanup');
+    this.domOverlapMatcher?.stopWatching();
     this.stop();
     this.callback = null;
     this.isInitialized = false;
@@ -1629,6 +1893,7 @@ class SubtitleInterceptor {
     };
     this.pendingLoadInterceptedSubtitles = false;
     this.pendingLoadReason = null;
+    this._secondaryAcquisitionInFlight = null;
     if (this.contextReloadTimer) {
       clearTimeout(this.contextReloadTimer);
       this.contextReloadTimer = null;
@@ -1658,7 +1923,7 @@ class SubtitleInterceptor {
   }
 
   /**
-   * Phase 3 acquisition 使用嚴格語言匹配，避免 zh-Hant / zh-Hans / generic zh 互相污染。
+   * acquisition 使用嚴格語言匹配，避免 zh-Hant / zh-Hans / generic zh 互相污染。
    * 若未來需要 generic fallback，必須在呼叫端明確傳入 allowGenericFallback。
    */
   matchesLanguageForAcquisition(actualLanguage, targetLanguage, options = {}) {
@@ -1732,6 +1997,33 @@ class SubtitleInterceptor {
   }
 
   /**
+   * 判斷 requestInfo 是否為有效的 native-dom-match 歸屬。
+   * 只有通過此檢查的 entry 才能在 evaluateSubtitleGate 中豁免特定 mismatch 拒絕。
+   */
+  isNativeDomMatchedRequest(requestInfo, context = this.getCurrentPlaybackContext()) {
+    if (!requestInfo) return false;
+
+    // 1. attributionReason 必須為 'native-dom-match'
+    if (requestInfo.attributionReason !== 'native-dom-match') return false;
+
+    // 2. attributedVideoId 必須等於目前 context videoId
+    if (requestInfo.attributedVideoId !== context.videoId) return false;
+
+    // 3. overlapScore 須達安全最低門檻（與 DOM overlap matcher 短文字 >= 6 chars 的 0.75 門檻一致）
+    if (!requestInfo.overlapScore || requestInfo.overlapScore < 0.75) return false;
+
+    // 4. context state 必須為 ready
+    if (context.state !== 'ready') return false;
+
+    // 5. request session 若存在，不可為 non-watch（request-session-not-watch 永不免責）
+    const sessionId = requestInfo.sessionIdAtRequest ||
+      requestInfo.playbackSnapshot?.sessionId || null;
+    if (sessionId && !this.isWatchSession(sessionId)) return false;
+
+    return true;
+  }
+
+  /**
    * 依 PlaybackContext 與 request-time evidence 判斷字幕是否可進入 content 端處理流程。
    */
   evaluateSubtitleGate(cacheKey, requestInfo = null) {
@@ -1799,7 +2091,12 @@ class SubtitleInterceptor {
       return { ...baseResult, reason: 'request-session-not-watch' };
     }
 
-    if (contextSessionId &&
+    // 檢查是否為 native-dom-match 歸屬，可豁免特定 video/session mismatch
+    const isDomMatch = this.isNativeDomMatchedRequest(requestInfo, context);
+
+    // Exemptible: watch-to-watch request-session-mismatch
+    if (!isDomMatch &&
+        contextSessionId &&
         requestSessionId &&
         this.isWatchSession(contextSessionId) &&
         this.isWatchSession(requestSessionId) &&
@@ -1807,17 +2104,31 @@ class SubtitleInterceptor {
       return { ...baseResult, reason: 'request-session-mismatch' };
     }
 
-    if (derived?.confidence === 'none') {
+    // 非豁免：evidence-none（DOM match 可豁免 confidence=none 的證據不足）
+    if (!isDomMatch && derived?.confidence === 'none') {
       return { ...baseResult, reason: `evidence-${derived.confidence}` };
     }
 
-    if (derivedVideoId && derivedVideoId !== currentVideoId) {
+    // Exemptible: evidence-video-mismatch
+    if (!isDomMatch && derivedVideoId && derivedVideoId !== currentVideoId) {
       return { ...baseResult, reason: 'evidence-video-mismatch' };
     }
 
-    // cache key 仍是目前字幕資料的 videoId 來源；即使 evidence 存在，也不能讓錯 key 進入顯示流程。
-    if (parsedVideoId !== currentVideoId) {
+    // Exemptible: cache-key-video-mismatch
+    if (!isDomMatch && parsedVideoId !== currentVideoId) {
       return { ...baseResult, reason: 'cache-key-video-mismatch' };
+    }
+
+    // 若為 DOM match 歸屬，回傳 accepted-native-dom-match
+    if (isDomMatch) {
+      return {
+        ...baseResult,
+        accepted: true,
+        reason: 'accepted-native-dom-match',
+        attributionReason: 'native-dom-match',
+        attributedVideoId: requestInfo.attributedVideoId,
+        overlapScore: requestInfo.overlapScore
+      };
     }
 
     return {
@@ -1854,17 +2165,46 @@ class SubtitleInterceptor {
   createSubtitleSlotMeta(cacheKey, data) {
     const gate = this.evaluateSubtitleGate(cacheKey, data?.requestInfo);
     const context = this.getCurrentPlaybackContext();
+    const requestInfo = data?.requestInfo || {};
+    const isDomMatch = requestInfo.attributionReason === 'native-dom-match' &&
+      requestInfo.attributedVideoId === context.videoId;
 
-    return {
+    const meta = {
       cacheKey,
       videoId: gate.currentVideoId,
       parsedVideoId: gate.parsedVideoId,
       contextEpoch: context.epoch,
       contextState: context.state,
       gate,
-      rawMetadata: data?.rawMetadata || data?.metadata || data?.requestInfo?.rawTtmlMetadata || null,
+      rawMetadata: data?.rawMetadata || data?.metadata || requestInfo?.rawTtmlMetadata || null,
       assignedAt: Date.now()
     };
+
+    // DOM matched entry 加入 attribution 欄位
+    if (isDomMatch) {
+      meta.attributionReason = 'native-dom-match';
+      meta.attributedVideoId = context.videoId;
+      meta.overlapScore = requestInfo.overlapScore;
+    }
+
+    // 加入 slot lock-in metadata，防止短暫 PlaybackContext 轉換時閃爍
+    if (isDomMatch) {
+      // DOM match：高信賴鎖定到 attributedVideoId
+      meta.lockedVideoId = context.videoId;
+      meta.lockConfidence = 'high';
+      meta.lockReason = 'native-dom-match';
+      meta.isProvisional = false;
+    } else {
+      // 一般 accepted entry（gate 已確保 parsedVideoId === currentVideoId）
+      const evidenceConfidence = gate.evidenceConfidence;
+      const isProvisional = !evidenceConfidence || evidenceConfidence === 'low' || evidenceConfidence === 'none';
+      meta.lockedVideoId = gate.currentVideoId;
+      meta.lockConfidence = isProvisional ? 'medium' : 'high';
+      meta.lockReason = 'gate-accepted';
+      meta.isProvisional = isProvisional;
+    }
+
+    return meta;
   }
 
   isSubtitleSlotMetaCurrent(meta) {
@@ -1877,10 +2217,49 @@ class SubtitleInterceptor {
       return false;
     }
 
-    if (context.state === 'transitioning') {
+    // 若 lock 指向不同影片，立即拒絕
+    if (meta.lockedVideoId && meta.lockedVideoId !== context.videoId) {
       return false;
     }
 
+    // transitioning 時若 lockedVideoId 與目前相同，允許通過（防止同影片短暫轉換閃爍）
+    if (context.state === 'transitioning') {
+      if (meta.lockedVideoId === context.videoId) {
+        // 仍須 epoch 檢查
+        if (meta.contextEpoch !== null &&
+            meta.contextEpoch !== undefined &&
+            context.epoch !== null &&
+            meta.contextEpoch !== context.epoch) {
+          return false;
+        }
+        return true;
+      }
+      return false;
+    }
+
+    // DOM matched slot — 允許 parsedVideoId 與 context.videoId 不符
+    if (meta.attributionReason === 'native-dom-match' && meta.attributedVideoId === context.videoId) {
+      if (meta.contextEpoch !== null &&
+          meta.contextEpoch !== undefined &&
+          context.epoch !== null &&
+          meta.contextEpoch !== context.epoch) {
+        return false;
+      }
+      return true;
+    }
+
+    // 非 provisional 的 lock 足以證明影片歸屬，跳過 parsedVideoId 嚴格檢查
+    if (!meta.isProvisional && meta.lockedVideoId === context.videoId) {
+      if (meta.contextEpoch !== null &&
+          meta.contextEpoch !== undefined &&
+          context.epoch !== null &&
+          meta.contextEpoch !== context.epoch) {
+        return false;
+      }
+      return true;
+    }
+
+    // 一般 slot 或 provisional entry：嚴格檢查 parsedVideoId（現有行為）
     if (meta.videoId !== context.videoId || meta.parsedVideoId !== context.videoId) {
       return false;
     }
@@ -1970,6 +2349,705 @@ class SubtitleInterceptor {
     }, context?.state === 'ready' ? 300 : 1000);
   }
 
+  // ==================== Primary Discovery State Machine ====================
+
+  /**
+   * 嘗試啟動 primary discovery。檢查所有 start condition，符合則開始 DOM overlap match 流程。
+   * @param {string} [initiator] - 可指定觸發來源，如 'video-id-changed' 可繞過 missing reason 檢查
+   */
+  tryStartPrimaryDiscovery(initiator) {
+    // 若 discovery 處於終止狀態（aborted/timed-out/matched）且 context 已改變，
+    // 重置為 idle 以允許新的影片開始 discovery。相同 context 的進行中狀態不受影響。
+    if (this.primaryDiscovery.state !== 'idle') {
+      const currentContext = this.getCurrentPlaybackContext();
+      const startedContext = this.primaryDiscovery._startedContext;
+      if (startedContext && currentContext.videoId &&
+          (startedContext.videoId !== currentContext.videoId || startedContext.epoch !== currentContext.epoch)) {
+        // 完整清理 stale discovery 資源（timer、observer、isMatching），
+        // 避免舊資源使 startWatching() 回傳 false 或 timer 在 state idle 後仍觸發
+        this.cleanupPrimaryDiscoveryRuntimeResources('context-changed-reset');
+        this.primaryDiscovery.state = 'idle';
+        this.primaryDiscovery.startedAt = null;
+        this.recordDebugEvent('PRIMARY_DISCOVERY_CONTEXT_RESET_CLEANUP', {
+          startedVideoId: startedContext.videoId,
+          startedEpoch: startedContext.epoch,
+          currentVideoId: currentContext.videoId,
+          currentEpoch: currentContext.epoch
+        });
+        // _startedContext 留供除錯，但 state 已 idle，不影響後續流程
+      }
+    }
+
+    // 已在 discovery 中或 idle 狀態不適用
+    if (this.primaryDiscovery.state !== 'idle') return;
+    if (!this.isActive) return;
+
+    const context = this.getCurrentPlaybackContext();
+    if (context.state === 'transitioning' || !context.videoId || context.videoId === 'unknown') return;
+
+    // 若 primary 已就緒，無需啟動 discovery
+    if (this.isLanguageSlotReady(this.primaryLanguage, 'primary')) return;
+
+    // Condition 1: 由 VIDEO_ID_CHANGED 或早期窗口 initiator 明確觸發
+    // 'interceptor-start' / 'early-context-ready' / 'early-load-intercepted' 在安全條件下
+    // 繞過 missing reason 檢查，使 discovery 在 B 集 context ready 時更早啟動
+    if (initiator === 'video-id-changed' ||
+        initiator === 'interceptor-start' ||
+        initiator === 'early-context-ready' ||
+        initiator === 'early-load-intercepted') {
+      this.startPrimaryDiscovery();
+      return;
+    }
+
+    // Condition 3: 檢查 missing reason 是否符合特定模式
+    const missingReason = this.computeSubtitleMissingReason('primary', this.primaryLanguage, context);
+    const lastMissing = this.lastSubtitleMissingReasons.primary;
+    const discoveryReasons = [
+      'parsed-language-cache-gate-cache-key-video-mismatch',
+      'raw-ttml-gate-cache-key-video-mismatch',
+      'switch-track-timeout',
+      'no-parsed-language-cache'
+    ];
+
+    if (discoveryReasons.includes(missingReason) || discoveryReasons.includes(lastMissing)) {
+      this.startPrimaryDiscovery();
+      return;
+    }
+
+    // Condition 2: ensureLanguageAvailable 失敗且診斷顯示 video mismatch
+    const lastResult = this.lastAcquisitionResults.primary;
+    if (lastResult && !lastResult.success && lastResult.diagnosis?.gateReasonCounts) {
+      const counts = lastResult.diagnosis.gateReasonCounts;
+      if ((counts['cache-key-video-mismatch'] || 0) > 0 ||
+          (counts['evidence-video-mismatch'] || 0) > 0) {
+        this.startPrimaryDiscovery();
+      }
+    }
+  }
+
+  /**
+   * 正式啟動 primary discovery 狀態機
+   */
+  startPrimaryDiscovery() {
+    // 防禦性清理：確保替換 primaryDiscovery 前沒有殘留的 timer/observer，
+    // 避免舊資源在 replacement 後持續運作造成干擾
+    this.cleanupPrimaryDiscoveryRuntimeResources('start-primary-discovery');
+
+    const context = this.getCurrentPlaybackContext();
+    this.primaryDiscovery = {
+      state: 'started',
+      startedAt: Date.now(),
+      sampleCount: 0,
+      matchAttemptCount: 0,
+      lastSample: null,
+      selectedCacheKey: null,
+      selectedScore: null,
+      lastFailureReason: null,
+      toastShown: false,
+      _startedContext: { videoId: context.videoId, epoch: context.epoch }
+    };
+
+    this.recordDebugEvent('PRIMARY_DISCOVERY_STARTED', {
+      videoId: context.videoId,
+      epoch: context.epoch,
+      missingReason: this.lastSubtitleMissingReasons.primary ||
+        this.computeSubtitleMissingReason('primary', this.primaryLanguage, context)
+    });
+
+    // lazy 初始化 matcher
+    if (!this.domOverlapMatcher) {
+      this.domOverlapMatcher = new DOMOverlapMatcher({ debug: this.debug });
+    }
+
+    // 啟動 MutationObserver 反應式比對（若尚未啟動）
+    const watchingStarted = this.domOverlapMatcher.startWatching(
+      this.primaryLanguage,
+      (result) => this.handleDomMatchResult(result)
+    );
+    if (!watchingStarted) {
+      this.log('DOM overlap matcher already watching, skip startWatching');
+    }
+
+    // 立即嘗試第一次 match
+    this.tryPrimaryDiscoveryMatch().catch(error => {
+      this.log('Primary discovery initial match error:', error.message);
+    });
+  }
+
+  /**
+   * 中止 discovery，清理計時器
+   */
+  abortPrimaryDiscovery(reason) {
+    if (this.primaryDiscovery.state === 'idle' || this.primaryDiscovery.state === 'aborted' || this.primaryDiscovery.state === 'timed-out') {
+      return;
+    }
+
+    const previousState = this.primaryDiscovery.state;
+
+    if (this.primaryDiscoveryTimer) {
+      clearTimeout(this.primaryDiscoveryTimer);
+      this.primaryDiscoveryTimer = null;
+    }
+
+    // 停止 DOM 反應式比對 observer
+    this.domOverlapMatcher?.stopWatching();
+
+    // 記錄中止或超時事件
+    if (reason === 'timeout') {
+      this.primaryDiscovery.state = 'timed-out';
+      this.recordDebugEvent('PRIMARY_DISCOVERY_TIMEOUT', {
+        durationMs: Date.now() - (this.primaryDiscovery.startedAt || Date.now()),
+        sampleCount: this.primaryDiscovery.sampleCount,
+        matchAttemptCount: this.primaryDiscovery.matchAttemptCount,
+        lastFailureReason: this.primaryDiscovery.lastFailureReason
+      });
+    } else if (reason === 'primary-ready') {
+      this.primaryDiscovery.state = 'aborted';
+      this.recordDebugEvent('PRIMARY_READY', {
+        source: 'discovery-abort',
+        previousState,
+        sampleCount: this.primaryDiscovery.sampleCount
+      });
+    } else {
+      this.primaryDiscovery.state = 'aborted';
+      this.recordDebugEvent('PRIMARY_DISCOVERY_ABORTED', {
+        reason,
+        previousState,
+        sampleCount: this.primaryDiscovery.sampleCount,
+        matchAttemptCount: this.primaryDiscovery.matchAttemptCount
+      });
+    }
+  }
+
+  /**
+   * 清理 primary discovery 的執行時期資源（計時器、DOM observer），
+   * 不修改 primaryDiscovery state（由呼叫端負責）。
+   * 用於 context-change reset 或 startPrimaryDiscovery 前的防禦性清理。
+   */
+  cleanupPrimaryDiscoveryRuntimeResources(reason) {
+    if (this.primaryDiscoveryTimer) {
+      clearTimeout(this.primaryDiscoveryTimer);
+      this.primaryDiscoveryTimer = null;
+    }
+    this.domOverlapMatcher?.stopWatching();
+    this.recordDebugEvent('PRIMARY_DISCOVERY_RUNTIME_CLEANUP', { reason });
+  }
+
+  /**
+   * 安排下一次 DOM sample 收集
+   */
+  scheduleNextDiscoverySample() {
+    // 清除舊計時器
+    if (this.primaryDiscoveryTimer) {
+      clearTimeout(this.primaryDiscoveryTimer);
+      this.primaryDiscoveryTimer = null;
+    }
+
+    // 檢查 stop condition
+    if (this.checkDiscoveryStopConditions()) {
+      return;
+    }
+
+    // 間隔 1 秒後再取樣（作為 observer 的 fallback）
+    this.primaryDiscoveryTimer = setTimeout(() => {
+      this.primaryDiscoveryTimer = null;
+      this.tryPrimaryDiscoveryMatch().catch(error => {
+        this.log('Primary discovery match error:', error.message);
+      });
+    }, 1000);
+  }
+
+  /**
+   * ★ B: 判斷 primary discovery 是否處於早期窗口（前幾秒）。
+   * 若 primary slot 未就緒且 discovery 剛啟動，應暫緩 secondary track switching 避免閃爍。
+   * @returns {boolean}
+   */
+  isPrimaryDiscoveryEarlyWindowActive() {
+    if (this.isLanguageSlotReady(this.primaryLanguage, 'primary')) return false;
+
+    const ds = this.primaryDiscovery;
+    if (ds.state !== 'started' && ds.state !== 'collecting') return false;
+    if (!ds.startedAt) return false;
+
+    const earlyWindowMs = 3000; // 3 秒 early window
+    return (Date.now() - ds.startedAt) < earlyWindowMs;
+  }
+
+  /**
+   * 檢查 primary slot 是否已可靠 lock-in 到目前 videoId。
+   * 當 lock-in 達成時，可以安全停止 DOM observer，不需要再 reactive match。
+   */
+  isPrimarySlotLockedToCurrentVideo() {
+    const meta = this.primarySubtitleMeta;
+    const context = this.getCurrentPlaybackContext();
+    if (!meta || !context?.videoId) return false;
+    return meta.lockedVideoId === context.videoId
+      && meta.lockConfidence === 'high'
+      && !meta.isProvisional;
+  }
+
+  /**
+   * 檢查 discovery 是否應停止（ready / context change / timeout）
+   * @returns {boolean} true 表示已停止
+   */
+  checkDiscoveryStopConditions() {
+    if (this.primaryDiscovery.state === 'idle' || this.primaryDiscovery.state === 'aborted' || this.primaryDiscovery.state === 'timed-out') {
+      return true;
+    }
+
+    // Stop condition: primary slot locked-in to current video → can stop observer
+    if (this.isPrimarySlotLockedToCurrentVideo()) {
+      this.domOverlapMatcher?.stopWatching();
+      this.abortPrimaryDiscovery('primary-ready');
+      return true;
+    }
+
+    // Stop condition 1: primary slot ready
+    if (this.isLanguageSlotReady(this.primaryLanguage, 'primary')) {
+      this.abortPrimaryDiscovery('primary-ready');
+      return true;
+    }
+
+    // Stop condition 2: PlaybackContext videoId 或 epoch 改變（但 transitioning 不終止 discovery）
+    const context = this.getCurrentPlaybackContext();
+    if (context.state === 'transitioning') {
+      this.primaryDiscovery.lastFailureReason = 'playback-context-transitioning';
+      this.recordDebugEvent('PRIMARY_DISCOVERY_TRANSITIONING', {
+        state: this.primaryDiscovery.state,
+        sampleCount: this.primaryDiscovery.sampleCount,
+        matchAttemptCount: this.primaryDiscovery.matchAttemptCount,
+        videoId: context.videoId,
+        epoch: context.epoch
+      });
+      // Keep discovery alive; retry on next cycle when context becomes ready
+      return false;
+    }
+    if (!context.videoId || context.videoId === 'unknown') {
+      this.abortPrimaryDiscovery('missing-video-id');
+      return true;
+    }
+
+    const startedContext = this.primaryDiscovery._startedContext;
+    if (startedContext && (startedContext.videoId !== context.videoId || startedContext.epoch !== context.epoch)) {
+      this.abortPrimaryDiscovery('context-changed');
+      return true;
+    }
+
+    // Stop condition 3: 超過 240 秒
+    if (this.primaryDiscovery.startedAt && (Date.now() - this.primaryDiscovery.startedAt) > 240000) {
+      this.abortPrimaryDiscovery('timeout');
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * 執行一次 DOM sample 收集與 match 嘗試
+   */
+  async tryPrimaryDiscoveryMatch() {
+    if (this.primaryDiscovery.state !== 'started' && this.primaryDiscovery.state !== 'collecting') {
+      return;
+    }
+
+    // 先檢查 stop condition（避免已 ready 還繼續收集）
+    if (this.checkDiscoveryStopConditions()) {
+      return;
+    }
+
+    // runMatchOnce() 內部已有 isMatching lock，此處不再重複檢查；
+    // 由 runMatchOnce 作為 lock 單一權威，避免同時多路徑重複比對。
+
+    // 若 context 仍在 transitioning，gate 會拒絕 DOM match，跳過此輪並等待 ready
+    const discoveryContext = this.getCurrentPlaybackContext();
+    if (discoveryContext.state === 'transitioning') {
+      this.primaryDiscovery.lastFailureReason = 'playback-context-transitioning';
+      this.recordDebugEvent('PRIMARY_DISCOVERY_TRANSITIONING', {
+        state: this.primaryDiscovery.state,
+        sampleCount: this.primaryDiscovery.sampleCount,
+        matchAttemptCount: this.primaryDiscovery.matchAttemptCount,
+        videoId: discoveryContext.videoId,
+        epoch: discoveryContext.epoch
+      });
+      this.scheduleNextDiscoverySample();
+      return;
+    }
+
+    this.primaryDiscovery.state = 'collecting';
+
+    // 確保 matcher 已初始化
+    if (!this.domOverlapMatcher) {
+      this.domOverlapMatcher = new DOMOverlapMatcher({ debug: this.debug });
+    }
+
+    // 收集 DOM sample（只收集一次，傳給 findBestMatch 避免重複 collect）
+    const sample = this.domOverlapMatcher.collectDOMSample();
+    if (sample) {
+      this.primaryDiscovery.lastSample = sample;
+      this.primaryDiscovery.sampleCount++;
+      this.recordDebugEvent('PRIMARY_DISCOVERY_DOM_SAMPLE', {
+        sampleCount: this.primaryDiscovery.sampleCount,
+        textLength: sample.text.length,
+        normalizedLength: sample.normalizedText.length,
+        timestamp: sample.timestamp
+      });
+    }
+
+    // 執行 match
+    this.primaryDiscovery.matchAttemptCount++;
+    this.recordDebugEvent('PRIMARY_DISCOVERY_MATCH_ATTEMPT', {
+      attempt: this.primaryDiscovery.matchAttemptCount,
+      sampleCount: this.primaryDiscovery.sampleCount
+    });
+
+    // 使用 runMatchOnce 並傳入已收集的 sample，避免 findBestMatch 內部重複 collect
+    const result = await this.domOverlapMatcher.runMatchOnce(this.primaryLanguage, {
+      domSample: sample,
+      source: 'polling'
+    });
+
+    if (result.matched) {
+      const matchResult = result.result;
+      const context = this.getCurrentPlaybackContext();
+      const parsedKey = this.parseCacheKey(matchResult.cacheKey);
+
+      // 1. 記錄 MATCHED event（含 attribution 欄位供除錯）
+      this.recordDebugEvent('PRIMARY_DISCOVERY_MATCHED', {
+        cacheKey: matchResult.cacheKey,
+        score: Math.round(matchResult.score * 1000) / 1000,
+        matchedUnits: matchResult.matchedUnits,
+        totalDomUnits: matchResult.totalDomUnits,
+        attributedVideoId: context.videoId,
+        originalParsedVideoId: parsedKey?.videoId || null,
+        domTextPreview: (matchResult.domText || '').substring(0, 80),
+        cueTextPreview: (matchResult.cueText || '').substring(0, 80)
+      });
+
+      // 2. 建立 enriched requestInfo（native-dom-match attribution）
+      const enrichedRequestInfo = {
+        ...matchResult.requestInfo,
+        attributionReason: 'native-dom-match',
+        attributedVideoId: context.videoId,
+        originalCacheKey: matchResult.cacheKey,
+        originalParsedVideoId: parsedKey?.videoId || null,
+        overlapScore: matchResult.score,
+        overlapSample: {
+          domText: matchResult.domText || '',
+          ttmlText: matchResult.cueText || '',
+          timestamp: this.primaryDiscovery.lastSample?.timestamp ?? getCurrentTimestamp()
+        },
+        matchedAt: Date.now()
+      };
+
+      // 3. 透過 handleRawTTMLIntercepted 執行 recovery
+      try {
+        this.handleRawTTMLIntercepted({
+          cacheKey: matchResult.cacheKey,
+          rawContent: matchResult.rawContent,
+          requestInfo: enrichedRequestInfo,
+          language: matchResult.language,
+          rawMetadata: matchResult.rawMetadata
+        });
+
+        // 4. 檢查 recovery 是否成功（直接檢查 slot，避免 isLanguageSlotReady 觸發 clear）
+        const primaryMeta = this.primarySubtitleMeta;
+        const primaryMetaLanguage = this.parseCacheKey(primaryMeta?.cacheKey || '')?.language;
+        const recoveryLanguageMatches = this.matchesLanguageForAcquisition(
+          primaryMetaLanguage || matchResult.language,
+          this.primaryLanguage,
+          { allowGenericFallback: enrichedRequestInfo.attributionReason === 'native-dom-match' }
+        );
+        const recoveryApplied = Array.isArray(this.primarySubtitles) &&
+          this.primarySubtitles.length > 0 &&
+          !!primaryMeta &&
+          primaryMeta.cacheKey === matchResult.cacheKey &&
+          this.isSubtitleSlotMetaCurrent(primaryMeta) &&
+          recoveryLanguageMatches;
+
+        if (recoveryApplied) {
+          this.primaryDiscovery.state = 'matched';
+          this.primaryDiscovery.selectedCacheKey = matchResult.cacheKey;
+          this.primaryDiscovery.selectedScore = matchResult.score;
+          this.primaryDiscovery.lastFailureReason = null;
+
+          this.recordDebugEvent('PRIMARY_READY', {
+            source: 'recovery',
+            cacheKey: matchResult.cacheKey,
+            score: Math.round(matchResult.score * 1000) / 1000,
+            attributedVideoId: context.videoId,
+            originalParsedVideoId: parsedKey?.videoId || null
+          });
+
+          // ★ C: primary recovery 成功後立即觸發 secondary acquisition（idempotent，不 await）
+          if (this.dualSubtitleEnabled && !this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+            this.ensureSecondaryLanguageAvailableOnce('primary-dom-recovery-ready').catch(error => {
+              this.log('Secondary acquisition triggered by primary recovery failed:', error.message);
+            });
+          }
+        } else {
+          // Recovery 執行但 slot 未就緒（gate/promotion 拒絕，或語言不符）
+          this.primaryDiscovery.selectedCacheKey = matchResult.cacheKey;
+          this.primaryDiscovery.selectedScore = matchResult.score;
+          this.primaryDiscovery.lastFailureReason = 'recovery-not-ready';
+
+          this.recordDebugEvent('PRIMARY_DISCOVERY_RECOVERY_FAILED', {
+            cacheKey: matchResult.cacheKey,
+            score: Math.round(matchResult.score * 1000) / 1000,
+            reason: 'primary-not-ready-after-handle',
+            primarySubtitleCount: this.primarySubtitles.length,
+            hasMeta: !!this.primarySubtitleMeta,
+            activeCacheKey: this.primarySubtitleMeta?.cacheKey || null,
+            cacheKeyMatches: this.primarySubtitleMeta?.cacheKey === matchResult.cacheKey,
+            metaCurrent: this.primarySubtitleMeta ? this.isSubtitleSlotMetaCurrent(this.primarySubtitleMeta) : false,
+            languageMatches: recoveryLanguageMatches,
+            gateResult: this.evaluateSubtitleGate(matchResult.cacheKey, enrichedRequestInfo)
+          });
+
+          // Recovery 未成功時保持 discovery 可重試狀態，交由既有 stop condition / sampling cadence 控制下一輪
+          if (this.primaryDiscovery.state === 'started' || this.primaryDiscovery.state === 'collecting') {
+            this.scheduleNextDiscoverySample();
+          }
+        }
+      } catch (error) {
+        this.primaryDiscovery.lastFailureReason = 'recovery-error';
+        this.recordDebugEvent('PRIMARY_DISCOVERY_RECOVERY_FAILED', {
+          cacheKey: matchResult.cacheKey,
+          error: error.message,
+          reason: 'recovery-exception'
+        });
+        if (this.primaryDiscovery.state === 'started' || this.primaryDiscovery.state === 'collecting') {
+          this.scheduleNextDiscoverySample();
+        }
+      }
+      return;
+    }
+
+    // Match 失敗，記錄原因並安排下一次
+    const failureReason = result.failureReason || 'match-failed';
+    this.primaryDiscovery.lastFailureReason = failureReason;
+
+    this.recordDebugEvent('PRIMARY_DISCOVERY_MATCH_FAILED', {
+      attempt: this.primaryDiscovery.matchAttemptCount,
+      failureReason,
+      sampleCount: this.primaryDiscovery.sampleCount,
+      candidateCount: result.allResults?.length || 0
+    });
+
+    // 若狀態仍是 collecting/started，繼續輪詢
+    if (this.primaryDiscovery.state === 'started' || this.primaryDiscovery.state === 'collecting') {
+      this.scheduleNextDiscoverySample();
+    }
+  }
+
+  /**
+   * 處理 DOM overlap matcher 的 match 結果（來自 MutationObserver 路徑）。
+   * 邏輯與 tryPrimaryDiscoveryMatch 中的 recovery 區段相似，
+   * 但省略輪詢排程（observer 會持續觸發），並加入 lock-in 停止條件檢查。
+   */
+  handleDomMatchResult(result) {
+    // 先檢查 lock-in 條件，若已鎖定則停止 observer
+    if (this.isPrimarySlotLockedToCurrentVideo()) {
+      this.domOverlapMatcher?.stopWatching();
+      return;
+    }
+
+    // ★ E: 累計 observer 路徑的 match 嘗試與 sample 資訊（source 為 mutation-observer）
+    this.primaryDiscovery.matchAttemptCount++;
+    if (result.result?.domText) {
+      this.primaryDiscovery.lastSample = {
+        text: result.result.domText,
+        timestamp: getCurrentTimestamp(),
+        source: 'mutation-observer'
+      };
+      this.primaryDiscovery.sampleCount++;
+    }
+
+    if (result.matched) {
+      const matchResult = result.result;
+      const context = this.getCurrentPlaybackContext();
+      const parsedKey = this.parseCacheKey(matchResult.cacheKey);
+
+      this.recordDebugEvent('PRIMARY_DISCOVERY_MATCHED', {
+        cacheKey: matchResult.cacheKey,
+        score: Math.round(matchResult.score * 1000) / 1000,
+        matchedUnits: matchResult.matchedUnits,
+        totalDomUnits: matchResult.totalDomUnits,
+        attributedVideoId: context.videoId,
+        originalParsedVideoId: parsedKey?.videoId || null,
+        domTextPreview: (matchResult.domText || '').substring(0, 80),
+        cueTextPreview: (matchResult.cueText || '').substring(0, 80),
+        source: 'mutation-observer'
+      });
+
+      // 建立 enriched requestInfo（native-dom-match attribution）
+      const enrichedRequestInfo = {
+        ...matchResult.requestInfo,
+        attributionReason: 'native-dom-match',
+        attributedVideoId: context.videoId,
+        originalCacheKey: matchResult.cacheKey,
+        originalParsedVideoId: parsedKey?.videoId || null,
+        overlapScore: matchResult.score,
+        overlapSample: {
+          domText: matchResult.domText || '',
+          ttmlText: matchResult.cueText || '',
+          timestamp: getCurrentTimestamp()
+        },
+        matchedAt: Date.now()
+      };
+
+      try {
+        this.handleRawTTMLIntercepted({
+          cacheKey: matchResult.cacheKey,
+          rawContent: matchResult.rawContent,
+          requestInfo: enrichedRequestInfo,
+          language: matchResult.language,
+          rawMetadata: matchResult.rawMetadata
+        });
+
+        // 檢查 recovery 是否成功
+        const primaryMeta = this.primarySubtitleMeta;
+        const primaryMetaLanguage = this.parseCacheKey(primaryMeta?.cacheKey || '')?.language;
+        const recoveryLanguageMatches = this.matchesLanguageForAcquisition(
+          primaryMetaLanguage || matchResult.language,
+          this.primaryLanguage,
+          { allowGenericFallback: true }
+        );
+        const recoveryApplied = Array.isArray(this.primarySubtitles) &&
+          this.primarySubtitles.length > 0 &&
+          !!primaryMeta &&
+          primaryMeta.cacheKey === matchResult.cacheKey &&
+          this.isSubtitleSlotMetaCurrent(primaryMeta) &&
+          recoveryLanguageMatches;
+
+        if (recoveryApplied) {
+          this.primaryDiscovery.state = 'matched';
+          this.primaryDiscovery.selectedCacheKey = matchResult.cacheKey;
+          this.primaryDiscovery.selectedScore = matchResult.score;
+          this.primaryDiscovery.lastFailureReason = null;
+
+          this.recordDebugEvent('PRIMARY_READY', {
+            source: 'mutation-observer-recovery',
+            cacheKey: matchResult.cacheKey,
+            score: Math.round(matchResult.score * 1000) / 1000,
+            attributedVideoId: context.videoId,
+            originalParsedVideoId: parsedKey?.videoId || null
+          });
+
+          // Recovery 成功後檢查 lock-in → 停止 observer
+          if (this.isPrimarySlotLockedToCurrentVideo()) {
+            this.domOverlapMatcher?.stopWatching();
+          }
+
+          // ★ C: primary recovery 成功後立即觸發 secondary acquisition（idempotent，不 await）
+          if (this.dualSubtitleEnabled && !this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+            this.ensureSecondaryLanguageAvailableOnce('primary-dom-recovery-ready').catch(error => {
+              this.log('Secondary acquisition triggered by primary recovery failed:', error.message);
+            });
+          }
+        } else {
+          this.primaryDiscovery.selectedCacheKey = matchResult.cacheKey;
+          this.primaryDiscovery.selectedScore = matchResult.score;
+          this.primaryDiscovery.lastFailureReason = 'recovery-not-ready';
+
+          this.recordDebugEvent('PRIMARY_DISCOVERY_RECOVERY_FAILED', {
+            cacheKey: matchResult.cacheKey,
+            score: Math.round(matchResult.score * 1000) / 1000,
+            reason: 'primary-not-ready-after-handle',
+            source: 'mutation-observer',
+            primarySubtitleCount: this.primarySubtitles.length,
+            hasMeta: !!this.primarySubtitleMeta,
+            activeCacheKey: this.primarySubtitleMeta?.cacheKey || null,
+            cacheKeyMatches: this.primarySubtitleMeta?.cacheKey === matchResult.cacheKey,
+            metaCurrent: this.primarySubtitleMeta ? this.isSubtitleSlotMetaCurrent(this.primarySubtitleMeta) : false,
+            languageMatches: recoveryLanguageMatches,
+            gateResult: this.evaluateSubtitleGate(matchResult.cacheKey, enrichedRequestInfo)
+          });
+
+          // Recovery 未成功但 observer 仍在作用中，下次 DOM 變更會自動重試
+        }
+      } catch (error) {
+        this.primaryDiscovery.lastFailureReason = 'recovery-error';
+        this.recordDebugEvent('PRIMARY_DISCOVERY_RECOVERY_FAILED', {
+          cacheKey: matchResult.cacheKey,
+          error: error.message,
+          reason: 'recovery-exception',
+          source: 'mutation-observer'
+        });
+      }
+    } else {
+      const failureReason = result.failureReason || 'match-failed';
+      this.primaryDiscovery.lastFailureReason = failureReason;
+
+      this.recordDebugEvent('PRIMARY_DISCOVERY_MATCH_FAILED', {
+        failureReason,
+        source: 'mutation-observer',
+        candidateCount: result.allResults?.length || 0
+      });
+    }
+  }
+
+  /**
+   * 取得 primary discovery 相關 missing reason 摘要（供 debug event payload 使用）
+   */
+  getPrimaryMissingReasonsSummary() {
+    return {
+      computedMissingReason: this.computeSubtitleMissingReason('primary', this.primaryLanguage, this.getCurrentPlaybackContext()),
+      lastAssignedMissingReason: this.lastSubtitleMissingReasons.primary,
+      lastAcquisitionReason: this.lastAcquisitionResults.primary?.reason || null
+    };
+  }
+
+  /**
+   * Promotion Guard：判斷已解析的 TTML 是否應 promotion 到 active slot。
+   * 避免 A 集末段 prefetch B 集字幕時覆蓋 A 集的 active slot。
+   * 被拒絕的 TTML 仍保留在 interceptedSubtitles 中以供日後復原。
+   *
+   * @param {string} language - 語言代碼
+   * @param {Array} subtitles - 解析後的字幕陣列
+   * @param {Object} metadata - 包含 cacheKey、requestInfo、gate、playbackContext
+   * @param {string} [role] - 'primary' 或 'secondary'，未指定時從 language 推導
+   * @returns {{ promote: boolean, reason: string, existingSlotCacheKey: string|null }}
+   */
+  shouldPromoteParsedTTMLToActiveSlot(language, subtitles, metadata, role) {
+    const currentContext = this.getCurrentPlaybackContext();
+
+    // 若未指定 role，從 language 推導
+    if (!role) {
+      role = this.resolveLanguageRole(language);
+    }
+
+    const existingSubtitles = role === 'primary' ? this.primarySubtitles : this.secondarySubtitles;
+    const existingMeta = role === 'primary' ? this.primarySubtitleMeta : this.secondarySubtitleMeta;
+
+    const targetSlotReady = Array.isArray(existingSubtitles) && existingSubtitles.length > 0 && !!existingMeta;
+
+    // 規則 1：若目標 slot 目前無 ready subtitle，允許 promotion
+    if (!targetSlotReady) {
+      return { promote: true, reason: 'slot-empty', existingSlotCacheKey: null };
+    }
+
+    const incomingCacheKey = metadata?.cacheKey;
+    const existingCacheKey = existingMeta?.cacheKey || null;
+
+    // 規則 2：若 target slot 已 ready，且 incoming cacheKey 等於現有 slot cacheKey，允許更新
+    if (incomingCacheKey && existingCacheKey && incomingCacheKey === existingCacheKey) {
+      return { promote: true, reason: 'same-cache-key-update', existingSlotCacheKey: existingCacheKey };
+    }
+
+    // 規則 4：允許 native-dom-match 歸屬的 entry 覆蓋已 ready slot
+    if (metadata?.requestInfo?.attributionReason === 'native-dom-match' &&
+        metadata?.requestInfo?.attributedVideoId === currentContext.videoId) {
+      return { promote: true, reason: 'native-dom-match-attribution', existingSlotCacheKey: existingCacheKey };
+    }
+
+    // 規則 3：預設拒絕 promotion，保留 parsed cache
+    return {
+      promote: false,
+      reason: 'active-slot-already-current',
+      existingSlotCacheKey: existingCacheKey
+    };
+  }
+
   /**
    * 處理接收到的 raw TTML 數據 - 增加 videoID 驗證
    */
@@ -2023,7 +3101,9 @@ class SubtitleInterceptor {
     }
     
     // 步驟3: 驗證是否為當前影片的字幕
-    const isCurrentVideo = (parsedKey.videoId === currentVideoId);
+    // DOM match 歸屬的 entry 即使 cacheKey videoId 不符，仍視為當前影片
+    const isCurrentVideo = (parsedKey.videoId === currentVideoId) ||
+      (gate.reason === 'accepted-native-dom-match');
 
     if (!isCurrentVideo) {
       this.log(`字幕屬於其他影片（可能是預載），僅緩存不立即處理:`, {
@@ -2079,9 +3159,43 @@ class SubtitleInterceptor {
 
         // 只有當前影片才觸發即時處理
         if (isCurrentVideo) {
-          if (this.matchesLanguageForAcquisition(language, this.primaryLanguage) && Object.keys(regionConfigs).length > 0) {
+          // native-dom-match entries 允許 base-code language fallback（如 zh 匹配 zh-Hant）
+          const domMatchLangOpts = (requestInfo?.attributionReason === 'native-dom-match' &&
+            requestInfo?.attributedVideoId === currentVideoId) ?
+            { allowGenericFallback: true } : {};
+
+          if (this.matchesLanguageForAcquisition(language, this.primaryLanguage, domMatchLangOpts) && Object.keys(regionConfigs).length > 0) {
             this.log(`更新 netflix-player-adapter 的 region 配置 (主要語言: ${language})`);
             setRegionConfigs(regionConfigs);
+          }
+
+          // Promotion Guard：避免非當前影片的 TTML 覆蓋已 ready 的 active slot
+          // 僅針對目標語言（primary/secondary）執行 guard；非目標語言不應產生誤判事件
+          if (this.matchesLanguageForAcquisition(language, this.primaryLanguage, domMatchLangOpts) ||
+              (this.matchesLanguageForAcquisition(language, this.secondaryLanguage, domMatchLangOpts) && this.dualSubtitleEnabled)) {
+            const promotionRole = this.resolveLanguageRole(language);
+            const promotion = this.shouldPromoteParsedTTMLToActiveSlot(language, subtitles, {
+              cacheKey,
+              requestInfo,
+              gate,
+              playbackContext: this.getCurrentPlaybackContext(),
+              rawMetadata
+            }, promotionRole);
+
+            if (!promotion.promote) {
+              this.recordDebugEvent('RAW_TTML_STORED_NOT_PROMOTED', {
+                cacheKey,
+                language,
+                role: promotionRole,
+                existingSlotCacheKey: promotion.existingSlotCacheKey,
+                reason: promotion.reason,
+                gate,
+                currentTime: getCurrentTimestamp(),
+                playbackContext: this.getCurrentPlaybackContext()
+              });
+              // 保留 parsed cache 在 interceptedSubtitles 中供日後復原用
+              return;
+            }
           }
 
           this.checkAndProcessLanguage(language, subtitles, {
@@ -2135,45 +3249,69 @@ class SubtitleInterceptor {
    * 檢查並處理語言數據
    */
   checkAndProcessLanguage(language, subtitles, metadata = {}) {
+    // native-dom-match entries 允許 base-code language fallback（如 zh 匹配 zh-Hant）
+    const isDomMatchEntry = metadata?.requestInfo?.attributionReason === 'native-dom-match' &&
+      metadata?.requestInfo?.attributedVideoId === this.getCurrentPlaybackContext()?.videoId;
+    const langMatchOpts = isDomMatchEntry ? { allowGenericFallback: true } : {};
+
+    // Promotion Guard (入口防禦)：避免其他路徑繞過 handleRawTTMLIntercepted() 的 guard
+    if (this.matchesLanguageForAcquisition(language, this.primaryLanguage, langMatchOpts) ||
+        (this.matchesLanguageForAcquisition(language, this.secondaryLanguage, langMatchOpts) && this.dualSubtitleEnabled)) {
+      const promotionRole = this.resolveLanguageRole(language);
+      const promotion = this.shouldPromoteParsedTTMLToActiveSlot(language, subtitles, metadata, promotionRole);
+      if (!promotion.promote) {
+        this.recordDebugEvent('RAW_TTML_STORED_NOT_PROMOTED', {
+          cacheKey: metadata.cacheKey,
+          language,
+          role: promotionRole,
+          existingSlotCacheKey: promotion.existingSlotCacheKey,
+          reason: promotion.reason,
+          gate: metadata.gate,
+          currentTime: getCurrentTimestamp(),
+          playbackContext: metadata.playbackContext || this.getCurrentPlaybackContext()
+        });
+        return;
+      }
+    }
+
     // 檢查是否是我們需要的語言（支援 base-code fallback）
-    if (this.matchesLanguageForAcquisition(language, this.primaryLanguage)) {
+    if (this.matchesLanguageForAcquisition(language, this.primaryLanguage, langMatchOpts)) {
       this.primarySubtitles = subtitles;
       this.primaryTimeIndex = metadata.timeIndex || this.primaryTimeIndex;
-      this.primarySubtitleMeta = {
-        cacheKey: metadata.cacheKey || null,
-        videoId: metadata.gate?.currentVideoId || metadata.playbackContext?.videoId || null,
-        parsedVideoId: metadata.gate?.parsedVideoId || null,
-        contextEpoch: metadata.playbackContext?.epoch ?? null,
-        contextState: metadata.playbackContext?.state || null,
-        gate: metadata.gate || null,
-        rawMetadata: metadata.rawMetadata || metadata.requestInfo?.rawTtmlMetadata || null,
-        assignedAt: Date.now()
-      };
+      // 改用 createSubtitleSlotMeta 確保 attribution 欄位被記錄
+      this.primarySubtitleMeta = this.createSubtitleSlotMeta(metadata.cacheKey, {
+        requestInfo: metadata.requestInfo,
+        rawMetadata: metadata.rawMetadata
+      });
       this.lastSubtitleMissingReasons.primary = null;
       this.dispatchSubtitleReadinessChanged('primary-slot-updated', {
         cacheKey: metadata.cacheKey || null,
         language
       });
       this.log(`主要語言字幕已更新: ${language} (目標: ${this.primaryLanguage})`);
-    } else if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage) && this.dualSubtitleEnabled) {
+    } else if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage, langMatchOpts) && this.dualSubtitleEnabled) {
       this.secondarySubtitles = subtitles;
       this.secondaryTimeIndex = metadata.timeIndex || this.secondaryTimeIndex;
-      this.secondarySubtitleMeta = {
-        cacheKey: metadata.cacheKey || null,
-        videoId: metadata.gate?.currentVideoId || metadata.playbackContext?.videoId || null,
-        parsedVideoId: metadata.gate?.parsedVideoId || null,
-        contextEpoch: metadata.playbackContext?.epoch ?? null,
-        contextState: metadata.playbackContext?.state || null,
-        gate: metadata.gate || null,
-        rawMetadata: metadata.rawMetadata || metadata.requestInfo?.rawTtmlMetadata || null,
-        assignedAt: Date.now()
-      };
+      // 改用 createSubtitleSlotMeta 確保 attribution 欄位被記錄
+      this.secondarySubtitleMeta = this.createSubtitleSlotMeta(metadata.cacheKey, {
+        requestInfo: metadata.requestInfo,
+        rawMetadata: metadata.rawMetadata
+      });
       this.lastSubtitleMissingReasons.secondary = null;
       this.dispatchSubtitleReadinessChanged('secondary-slot-updated', {
         cacheKey: metadata.cacheKey || null,
         language
       });
       this.log(`次要語言字幕已更新: ${language} (目標: ${this.secondaryLanguage})`);
+    } else if (isDomMatchEntry) {
+      // DOM match entry 但語言仍無法匹配 — 記錄診斷事件以利除錯
+      this.primaryDiscovery.lastFailureReason = 'language-mismatch';
+      this.recordDebugEvent('PRIMARY_DISCOVERY_LANGUAGE_MISMATCH', {
+        language,
+        primaryLanguage: this.primaryLanguage,
+        secondaryLanguage: this.secondaryLanguage,
+        cacheKey: metadata.cacheKey
+      });
     }
   }
 
@@ -2187,12 +3325,27 @@ class SubtitleInterceptor {
     }
     
     let cleanedCount = 0;
+    let preservedDomMatchCount = 0;
     const keysToDelete = [];
     
     // 遍歷所有緩存，找出不屬於當前影片的數據
-    for (const [cacheKey] of this.interceptedSubtitles) {
+    for (const [cacheKey, data] of this.interceptedSubtitles) {
       const parsedKey = this.parseCacheKey(cacheKey);
       if (parsedKey && parsedKey.videoId !== currentVideoId) {
+        // DOM match 歸屬且 attributedVideoId 為目前影片者應保留
+        const requestInfo = data?.requestInfo || {};
+        if (requestInfo.attributionReason === 'native-dom-match' &&
+            requestInfo.attributedVideoId === currentVideoId) {
+          preservedDomMatchCount++;
+          this.recordDebugEvent('CACHE_DOM_MATCH_PRESERVED', {
+            cacheKey,
+            attributedVideoId: requestInfo.attributedVideoId,
+            cacheKeyVideoId: parsedKey.videoId,
+            currentVideoId,
+            language: data?.language || null
+          });
+          continue; // 保留此 entry
+        }
         keysToDelete.push(cacheKey);
         cleanedCount++;
       }
@@ -2204,8 +3357,8 @@ class SubtitleInterceptor {
       this.log(`清理舊影片緩存: ${key}`);
     });
     
-    if (cleanedCount > 0) {
-      this.log(`✅ 已清理 ${cleanedCount} 個舊影片的緩存數據`);
+    if (cleanedCount > 0 || preservedDomMatchCount > 0) {
+      this.log(`✅ 已清理 ${cleanedCount} 個舊影片的緩存數據，保留了 ${preservedDomMatchCount} 個 DOM match 歸屬的緩存`);
       
       // 清理後重置當前字幕數據（如果它們不屬於當前影片）
       this.validateCurrentSubtitles(currentVideoId);
@@ -2247,9 +3400,16 @@ class SubtitleInterceptor {
   isSubtitlesValidForVideo(language, currentVideoId) {
     for (const [cacheKey, data] of this.interceptedSubtitles) {
       const parsedKey = this.parseCacheKey(cacheKey);
-      if (parsedKey &&
+      if (!parsedKey) continue;
+
+      // DOM match 歸屬的 entry 即使 cacheKey videoId 不同仍視為有效
+      const requestInfo = data?.requestInfo || {};
+      const isDomMatch = requestInfo.attributionReason === 'native-dom-match' &&
+        requestInfo.attributedVideoId === currentVideoId;
+      const videoIdMatch = parsedKey.videoId === currentVideoId || isDomMatch;
+
+      if (videoIdMatch &&
           this.matchesLanguageForAcquisition(parsedKey.language, language) &&
-          parsedKey.videoId === currentVideoId &&
           this.isSubtitleEntryCurrent(cacheKey, data)) {
         return true;
       }
@@ -2275,6 +3435,7 @@ class SubtitleInterceptor {
       // 步驟1: 清理舊影片的緩存數據
       this.cleanupOldVideoCache(newVideoId);
       this.clearAcquisitionWaiters('video-id-changed');
+      this._secondaryAcquisitionInFlight = null;
       this.lastSubtitleMissingReasons.primary = 'video-id-changed-primary-not-ready';
       this.lastSubtitleMissingReasons.secondary = 'video-id-changed-secondary-not-ready';
       this.dispatchSubtitleReadinessChanged('video-id-changed', { oldVideoId, newVideoId });
@@ -2284,6 +3445,11 @@ class SubtitleInterceptor {
       if (this.isActive) {
         this.log('重新載入字幕數據以確保使用正確的字幕檔...');
         await this.loadInterceptedSubtitles();
+
+        // VIDEO_ID_CHANGED 後 primary 仍未就緒，嘗試啟動 discovery
+        if (!this.isLanguageSlotReady(this.primaryLanguage, 'primary')) {
+          this.tryStartPrimaryDiscovery('video-id-changed');
+        }
       }
     });
 
@@ -2294,6 +3460,9 @@ class SubtitleInterceptor {
       if (!this.isActive || context?.state !== 'ready' || !context.videoId) {
         return;
       }
+
+      // ★ A: context ready 時立即嘗試啟動 primary discovery，不等 scheduleReload 的漫長流程
+      this.tryStartPrimaryDiscovery('early-context-ready');
 
       this.scheduleReloadAfterContextReady(event.reason, context);
     });
