@@ -85,6 +85,13 @@ class SubtitleInterceptor {
 
     // Secondary acquisition in-flight tracking（idempotent 用）
     this._secondaryAcquisitionInFlight = null;
+
+    // Secondary DOM recovery cooldown（per videoId|epoch|secondaryLanguage）
+    this._secondaryRecoveryCooldown = new Map();
+    this._secondaryRecoveryLastResult = null;
+
+    // Secondary DOM recovery in-flight flag（idempotent 用）
+    this._secondaryRecoveryInFlight = false;
   }
 
   recordDebugEvent(type, data = {}) {
@@ -943,6 +950,8 @@ class SubtitleInterceptor {
     this.recordDebugEvent('SECONDARY_ACQUISITION_STARTED', { reason, inFlightKey, context });
 
     const acquisitionPromise = (async () => {
+      // ★ 擷取 starting track 供 restore 使用
+      const startTrack = await this.captureCurrentNetflixTrack();
       try {
         const result = await this.ensureLanguageAvailable(this.secondaryLanguage, 'secondary', options);
         this.recordDebugEvent('SECONDARY_ACQUISITION_COMPLETED', {
@@ -950,6 +959,29 @@ class SubtitleInterceptor {
           reason,
           inFlightKey
         });
+
+        // ★ 若 acquisition 失敗，嘗試 secondary DOM recovery（fallback-only）
+        if (!result.success) {
+          const failureReason = result.reason || '';
+          const diagnosis = result.diagnosis;
+          const gateCounts = diagnosis?.gateReasonCounts || {};
+          const isEligibleForRecovery =
+            failureReason === 'switch-track-timeout' ||
+            (gateCounts['evidence-video-mismatch'] || 0) > 0 ||
+            (gateCounts['cache-key-video-mismatch'] || 0) > 0;
+
+          if (isEligibleForRecovery) {
+            try {
+              await this.trySecondaryDomRecovery('post-acquisition-failure', {
+                ...options,
+                startTrack
+              });
+            } catch (recoveryError) {
+              this.log('Secondary DOM recovery error:', recoveryError.message);
+            }
+          }
+        }
+
         return result;
       } catch (error) {
         this.recordDebugEvent('SECONDARY_ACQUISITION_COMPLETED', {
@@ -960,6 +992,8 @@ class SubtitleInterceptor {
         });
         return { success: false, error: error.message, reason: 'exception' };
       } finally {
+        // ★ 還原 starting track（優先使用 trackId 精確恢復）
+        await this.restoreNetflixTrack(startTrack, options.defaultLanguage || this.primaryLanguage, 'secondary-acquisition-finally');
         // 只清掉同一筆 record，避免新一筆被舊 promise finally 清掉
         if (this._secondaryAcquisitionInFlight === inFlightRecord) {
           this._secondaryAcquisitionInFlight = null;
@@ -1134,6 +1168,142 @@ class SubtitleInterceptor {
         error: error.message
       });
       return [];
+    }
+  }
+
+  /**
+   * 擷取目前 Netflix active track（含完整欄位：code, trackId, trackType, rawTrackType, name）
+   * @returns {Promise<Object|null>}
+   */
+  async captureCurrentNetflixTrack() {
+    try {
+      const result = await sendMessageToPageScript({
+        type: 'GET_CURRENT_LANGUAGE'
+      });
+      const track = result?.language;
+      if (track && track.code) {
+        this.recordDebugEvent('SECONDARY_TRACK_CAPTURED', {
+          code: track.code,
+          trackId: track.trackId,
+          trackType: track.trackType,
+          rawTrackType: track.rawTrackType
+        });
+        return track;
+      }
+      return null;
+    } catch (error) {
+      this.recordDebugEvent('SECONDARY_TRACK_CAPTURE_FAILED', {
+        error: error.message
+      });
+      return null;
+    }
+  }
+
+  /**
+   * 恢復 Netflix active track。
+   * 優先使用 trackId 精確恢復；若失敗或 unsupported，降級為 language code 切換。
+   * @param {Object|null} startTrack - 欲恢復的軌道（含 code, trackId 等）
+   * @param {string|null} fallbackLanguage - 降級語言代碼
+   * @param {string} reason - 診斷用原因
+   */
+  async restoreNetflixTrack(startTrack, fallbackLanguage, reason) {
+    // 若無 startTrack，跳過 restore（null 可能代表字幕關閉或 track 不可用）
+    if (!startTrack) {
+      this.recordDebugEvent('SECONDARY_TRACK_RESTORE_SKIPPED_NO_START_TRACK', {
+        reason,
+        fallbackLanguage
+      });
+      return;
+    }
+
+    if (startTrack.trackId) {
+      this.recordDebugEvent('SECONDARY_TRACK_RESTORE_STARTED', {
+        reason,
+        method: 'trackId',
+        trackId: startTrack.trackId,
+        code: startTrack.code
+      });
+      try {
+        await sendMessageToPageScript({
+          type: 'SWITCH_TRACK',
+          trackId: startTrack.trackId
+        });
+        this.recordDebugEvent('SECONDARY_TRACK_RESTORE_COMPLETED', {
+          reason,
+          method: 'trackId',
+          trackId: startTrack.trackId
+        });
+        return;
+      } catch (error) {
+        this.recordDebugEvent('SECONDARY_TRACK_RESTORE_FAILED', {
+          reason: 'trackId-switch-failed',
+          error: error.message,
+          startTrackCode: startTrack.code,
+          fallbackLanguage
+        });
+        // 降級到 language code
+      }
+    }
+
+    // 降級：使用 language code 或 fallbackLanguage
+    const targetCode = startTrack?.code || fallbackLanguage;
+    if (!targetCode) return;
+
+    this.recordDebugEvent('SECONDARY_TRACK_RESTORE_STARTED', {
+      reason,
+      method: 'languageCode',
+      code: targetCode
+    });
+
+    try {
+      await sendMessageToPageScript({
+        type: 'SWITCH_LANGUAGE',
+        languageCode: targetCode
+      });
+      this.recordDebugEvent('SECONDARY_TRACK_RESTORE_COMPLETED', {
+        reason,
+        method: 'languageCode',
+        code: targetCode
+      });
+    } catch (error) {
+      this.recordDebugEvent('SECONDARY_TRACK_RESTORE_FAILED', {
+        reason: 'language-switch-fallback-failed',
+        error: error.message,
+        targetCode
+      });
+    }
+  }
+
+  /**
+   * 檢查 Netflix track list 是否包含指定語言
+   * @param {string} languageCode
+   * @returns {Promise<boolean>}
+   */
+  async hasAvailableNetflixLanguage(languageCode) {
+    const languages = await this.getAvailableNetflixLanguages();
+    return languages.some(lang => this.matchesLanguageForAcquisition(lang.code, languageCode));
+  }
+
+  /**
+   * 檢查 raw TTML pool 是否有至少一筆候選符合指定語言
+   * @param {string} languageCode
+   * @returns {Promise<boolean>}
+   */
+  async hasRawTTMLCandidateForLanguage(languageCode) {
+    try {
+      const result = await sendMessageToPageScript({
+        type: 'GET_ALL_INTERCEPTED_TTML'
+      });
+      if (!result?.success || !result.allTTMLs) return false;
+      return Object.values(result.allTTMLs).some(data =>
+        this.matchesLanguageForAcquisition(data?.language, languageCode)
+      );
+    } catch (error) {
+      this.recordDebugEvent('RAW_TTML_CANDIDATE_CHECK_FAILED', {
+        error: error.message,
+        languageCode
+      });
+      return false;
     }
   }
 
@@ -1694,6 +1864,12 @@ class SubtitleInterceptor {
         lastFailureReason: this.primaryDiscovery.lastFailureReason,
         toastShown: this.primaryDiscovery.toastShown
       },
+      // secondary DOM recovery 狀態
+      secondaryRecovery: {
+        lastResult: this._secondaryRecoveryLastResult,
+        inFlight: this._secondaryRecoveryInFlight,
+        cooldownEntries: this._secondaryRecoveryCooldown?.size || 0
+      },
       rawTTMLMetadata: Array.from(this.interceptedSubtitles.entries()).map(([cacheKey, data]) => {
         const requestInfo = data?.requestInfo || {};
         return {
@@ -1894,6 +2070,9 @@ class SubtitleInterceptor {
     this.pendingLoadInterceptedSubtitles = false;
     this.pendingLoadReason = null;
     this._secondaryAcquisitionInFlight = null;
+    this._secondaryRecoveryCooldown?.clear();
+    this._secondaryRecoveryInFlight = false;
+    this._secondaryRecoveryLastResult = null;
     if (this.contextReloadTimer) {
       clearTimeout(this.contextReloadTimer);
       this.contextReloadTimer = null;
@@ -3027,6 +3206,298 @@ class SubtitleInterceptor {
       lastAssignedMissingReason: this.lastSubtitleMissingReasons.primary,
       lastAcquisitionReason: this.lastAcquisitionResults.primary?.reason || null
     };
+  }
+
+  /**
+   * 清理過期的 secondary recovery cooldown entries（超過 5 分鐘）
+   */
+  _cleanupSecondaryRecoveryCooldown() {
+    if (!this._secondaryRecoveryCooldown || this._secondaryRecoveryCooldown.size === 0) return;
+    const now = Date.now();
+    const maxAge = 5 * 60 * 1000;
+    for (const [key, ts] of this._secondaryRecoveryCooldown) {
+      if (now - ts > maxAge) {
+        this._secondaryRecoveryCooldown.delete(key);
+      }
+    }
+  }
+
+  /**
+   * 次要語言 DOM recovery（fallback-only）。
+   * 當 secondary acquisition 因 polluted request evidence 失敗時，
+   * 嘗試暫時切換 Netflix active track 到 secondaryLanguage，
+   * 收集 DOM sample 並使用 DOMOverlapMatcher 比對 raw TTML pool 中的候選，
+   * 匹配成功則透過 handleRawTTMLIntercepted 注入字幕。
+   *
+   * 設計原則：
+   * - 僅在 primary slot ready/locked、context ready、secondary slot 缺失時觸發
+   * - 不強制顯示 Netflix 原生字幕（DOM sample 在 hide CSS 下可能不可取得）
+   * - 含 per context (videoId|epoch|language) cooldown，避免重複切換
+   * - 還原 starting track（若此 recovery 有切換 track）
+   *
+   * @param {string} reason - 觸發原因（用於 debug event）
+   * @param {Object} [options] - 選項
+   * @returns {Promise<boolean>} true 表示 recovery 成功
+   */
+  async trySecondaryDomRecovery(reason, options = {}) {
+    // Idempotent guard
+    if (this._secondaryRecoveryInFlight) {
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED', {
+        reason,
+        detail: 'already-in-flight'
+      });
+      return false;
+    }
+
+    this.recordDebugEvent('SECONDARY_DOM_RECOVERY_REQUESTED', { reason });
+
+    // 清理過期 cooldown entries
+    this._cleanupSecondaryRecoveryCooldown();
+
+    // === Guard checks ===
+    if (!this.dualSubtitleEnabled || !this.secondaryLanguage) {
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED', {
+        reason,
+        detail: !this.dualSubtitleEnabled ? 'dual-disabled' : 'no-secondary-language'
+      });
+      return false;
+    }
+
+    // Primary must be ready and locked to current video
+    if (!this.isLanguageSlotReady(this.primaryLanguage, 'primary') || !this.isPrimarySlotLockedToCurrentVideo()) {
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED', {
+        reason,
+        detail: 'primary-not-ready-or-locked'
+      });
+      return false;
+    }
+
+    // Secondary slot must still be missing
+    if (this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED', {
+        reason,
+        detail: 'secondary-already-ready'
+      });
+      return false;
+    }
+
+    const context = this.getCurrentPlaybackContext();
+    if (context.state !== 'ready' || !context.videoId || context.videoId === 'unknown') {
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED', {
+        reason,
+        detail: 'context-not-ready'
+      });
+      return false;
+    }
+
+    // Per-context cooldown guard
+    const cooldownKey = `${context.videoId}|${context.epoch || 'null'}|${this.secondaryLanguage}`;
+    const cooldownTs = this._secondaryRecoveryCooldown?.get(cooldownKey);
+    if (cooldownTs && (Date.now() - cooldownTs) < 60000) {
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED', {
+        reason,
+        detail: 'cooldown-active',
+        cooldownKey,
+        remainingMs: 60000 - (Date.now() - cooldownTs)
+      });
+      return false;
+    }
+
+    // Netflix track list must contain secondaryLanguage
+    const hasTrack = await this.hasAvailableNetflixLanguage(this.secondaryLanguage);
+    if (!hasTrack) {
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED_NO_TRACK', {
+        reason,
+        secondaryLanguage: this.secondaryLanguage
+      });
+      return false;
+    }
+
+    // Raw TTML pool must have at least one candidate matching secondaryLanguage
+    const hasRaw = await this.hasRawTTMLCandidateForLanguage(this.secondaryLanguage);
+    if (!hasRaw) {
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED_NO_RAW_CANDIDATE', {
+        reason,
+        secondaryLanguage: this.secondaryLanguage
+      });
+      return false;
+    }
+
+    // DOM overlap matcher 不可在 primary watching 中（保守跳過）
+    if (this.domOverlapMatcher?.isWatching()) {
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED', {
+        reason,
+        detail: 'dom-overlap-matcher-busy'
+      });
+      return false;
+    }
+
+    // === Start recovery ===
+    // 建構子已初始化 _secondaryRecoveryCooldown，此處直接使用
+    // Set cooldown BEFORE attempting, to prevent repeated retry
+    this._secondaryRecoveryCooldown.set(cooldownKey, Date.now());
+
+    this._secondaryRecoveryInFlight = true;
+    this.recordDebugEvent('SECONDARY_DOM_RECOVERY_STARTED', {
+      reason,
+      cooldownKey,
+      secondaryLanguage: this.secondaryLanguage,
+      context: { videoId: context.videoId, epoch: context.epoch }
+    });
+
+    // Capture start track for restore
+    const startTrack = await this.captureCurrentNetflixTrack();
+    let switchedAway = false;
+
+    try {
+      // If not already on secondaryLanguage, switch to it to let Netflix DOM update
+      if (!startTrack || !this.matchesLanguageForAcquisition(startTrack.code, this.secondaryLanguage)) {
+        try {
+          await this.switchNetflixLanguage(this.secondaryLanguage, 'secondary-dom-recovery');
+          switchedAway = true;
+          // Wait briefly for Netflix DOM to update
+          await this.sleep(1200);
+        } catch (error) {
+          this.recordDebugEvent('SECONDARY_DOM_RECOVERY_FAILED', {
+            reason: 'switch-failed',
+            error: error.message
+          });
+          this._secondaryRecoveryLastResult = { success: false, reason: 'switch-failed', error: error.message };
+          return false;
+        }
+      }
+
+      // Initialize matcher if needed (no startWatching — we do one-shot sampling)
+      if (!this.domOverlapMatcher) {
+        this.domOverlapMatcher = new DOMOverlapMatcher({ debug: this.debug });
+      }
+
+      // Collect DOM sample
+      const sample = this.domOverlapMatcher.collectDOMSample();
+      if (!sample) {
+        this.recordDebugEvent('SECONDARY_DOM_RECOVERY_FAILED', {
+          reason: 'no-dom-sample',
+          detail: 'DOM sample unavailable under existing hide CSS'
+        });
+        this._secondaryRecoveryLastResult = { success: false, reason: 'no-dom-sample' };
+        return false;
+      }
+
+      // Run one-shot match for secondaryLanguage
+      const matchResult = await this.domOverlapMatcher.runMatchOnce(this.secondaryLanguage, {
+        domSample: sample,
+        source: 'secondary-dom-recovery'
+      });
+
+      if (!matchResult.matched) {
+        this.recordDebugEvent('SECONDARY_DOM_RECOVERY_FAILED', {
+          reason: 'match-failed',
+          failureReason: matchResult.failureReason,
+          candidateCount: matchResult.allResults?.length || 0
+        });
+        this._secondaryRecoveryLastResult = {
+          success: false,
+          reason: 'match-failed',
+          failureReason: matchResult.failureReason
+        };
+        return false;
+      }
+
+      const match = matchResult.result;
+      const parsedKey = this.parseCacheKey(match.cacheKey);
+
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_MATCHED', {
+        cacheKey: match.cacheKey,
+        score: Math.round(match.score * 1000) / 1000,
+        matchedUnits: match.matchedUnits,
+        totalDomUnits: match.totalDomUnits,
+        secondaryLanguage: this.secondaryLanguage,
+        videoId: context.videoId
+      });
+
+      // Build enriched requestInfo mirroring primary recovery
+      const enrichedRequestInfo = {
+        ...match.requestInfo,
+        attributionReason: 'native-dom-match',
+        attributedVideoId: context.videoId,
+        originalCacheKey: match.cacheKey,
+        originalParsedVideoId: parsedKey?.videoId || null,
+        overlapScore: match.score,
+        overlapSample: {
+          domText: match.domText || '',
+          ttmlText: match.cueText || '',
+          timestamp: sample.timestamp
+        },
+        matchedAt: Date.now()
+      };
+
+      try {
+        this.handleRawTTMLIntercepted({
+          cacheKey: match.cacheKey,
+          rawContent: match.rawContent,
+          requestInfo: enrichedRequestInfo,
+          language: match.language,
+          rawMetadata: match.rawMetadata
+        });
+
+        // Verify secondary slot became ready/current
+        const secondaryReady = this.isLanguageSlotReady(this.secondaryLanguage, 'secondary');
+        if (secondaryReady) {
+          this._secondaryRecoveryLastResult = {
+            success: true,
+            cacheKey: match.cacheKey,
+            score: Math.round(match.score * 1000) / 1000,
+            timestamp: Date.now()
+          };
+          this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SUCCEEDED', {
+            cacheKey: match.cacheKey,
+            score: Math.round(match.score * 1000) / 1000
+          });
+          return true;
+        } else {
+          this.recordDebugEvent('SECONDARY_DOM_RECOVERY_FAILED', {
+            reason: 'secondary-not-ready-after-handle',
+            cacheKey: match.cacheKey,
+            secondarySubtitleCount: this.secondarySubtitles.length,
+            hasMeta: !!this.secondarySubtitleMeta
+          });
+          this._secondaryRecoveryLastResult = {
+            success: false,
+            reason: 'secondary-not-ready-after-handle',
+            cacheKey: match.cacheKey
+          };
+          return false;
+        }
+      } catch (error) {
+        this.recordDebugEvent('SECONDARY_DOM_RECOVERY_FAILED', {
+          reason: 'handle-raw-ttml-error',
+          error: error.message
+        });
+        this._secondaryRecoveryLastResult = {
+          success: false,
+          reason: 'handle-raw-ttml-error',
+          error: error.message
+        };
+        return false;
+      }
+    } catch (error) {
+      this.recordDebugEvent('SECONDARY_DOM_RECOVERY_FAILED', {
+        reason: 'unexpected-error',
+        error: error.message
+      });
+      this._secondaryRecoveryLastResult = {
+        success: false,
+        reason: 'unexpected-error',
+        error: error.message
+      };
+      return false;
+    } finally {
+      this._secondaryRecoveryInFlight = false;
+      // Always restore start track if we switched
+      if (switchedAway) {
+        await this.restoreNetflixTrack(startTrack, options.defaultLanguage || this.primaryLanguage, 'secondary-dom-recovery-finally');
+      }
+    }
   }
 
   /**

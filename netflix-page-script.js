@@ -432,6 +432,55 @@
     }
 
     /**
+     * 切換到指定 trackId 的字幕軌道（精確恢復用）
+     * @param {number|string} trackId - Netflix timed text track ID
+     */
+    async switchToTrack(trackId) {
+      debugLog('準備切換字幕到 trackId:', trackId);
+
+      if (!this.isInitialized) {
+        debugLog('播放器助手未初始化，嘗試初始化...');
+        const initResult = await this.initialize();
+        if (!initResult) {
+          throw new Error('播放器助手初始化失敗');
+        }
+      }
+
+      // 重新初始化確保 session 有效
+      if (!this.hasActiveSession()) {
+        debugLog('播放器會話無效，重新初始化...');
+        const reinitResult = await this.reinitialize();
+        if (!reinitResult) {
+          throw new Error('播放器助手重新初始化失敗');
+        }
+      }
+
+      try {
+        const trackList = this.videoPlayer.getTimedTextTrackList();
+        const targetTrack = trackList.find(track => track.trackId === trackId);
+        if (!targetTrack) {
+          debugLog('可用軌道:', trackList.map(t => ({
+            trackId: t.trackId,
+            code: t.bcp47,
+            name: t.displayName
+          })));
+          throw new Error(`找不到 trackId: ${trackId}`);
+        }
+
+        await this.videoPlayer.setTimedTextTrack(targetTrack);
+        debugLog(`✅ 成功切換到 trackId ${trackId}`, {
+          displayName: targetTrack.displayName,
+          code: targetTrack.bcp47,
+          trackType: targetTrack.trackType
+        });
+        return true;
+      } catch (error) {
+        console.error(`切換到 trackId ${trackId} 失敗:`, error);
+        throw error;
+      }
+    }
+
+    /**
      * 檢查是否有可用的播放會話
      */
     hasActiveSession() {
@@ -1618,6 +1667,19 @@
             response.success = success;
             if (!success) {
               response.error = '語言切換失敗';
+            }
+            window.postMessage(response, '*');
+          }).catch(error => {
+            response.error = error.message;
+            window.postMessage(response, '*');
+          });
+          return; // 異步處理，直接返回
+
+        case 'SWITCH_TRACK':
+          playerHelper.switchToTrack(event.data.trackId).then(success => {
+            response.success = success;
+            if (!success) {
+              response.error = 'trackId 切換失敗';
             }
             window.postMessage(response, '*');
           }).catch(error => {
