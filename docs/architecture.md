@@ -44,18 +44,20 @@ SubPal/
 ├── manifest.json              # Manifest V3 配置
 ├── content.js                 # Content Script 橋接層
 ├── background.js              # Service Worker
-├── netflix-page-script.js     # Netflix 頁面注入腳本
+├── netflix-page-script.js     # Netflix 頁面注入腳本 (攔截 CDN、播放器管理)
 ├── popup.html/js              # 彈出窗口
 ├── options.html/js/css        # 設定頁面
 ├── tutorial.html/js/css       # 教學頁面
-├── content/                   # 核心模組目錄
+├── content/                   # 核心模組目錄（Page Context）
 │   ├── index.js              # Page Context 入口
-│   ├── system/               # 系統層模組
-│   ├── core/                 # 核心業務邏輯
-│   ├── ui/                   # UI 組件
-│   ├── subtitle-modes/       # 字幕模式
-│   └── utils/                # 工具函數
-├── background/               # 背景服務模組
+│   ├── system/               # 系統層模組（初始化、消息傳遞）
+│   ├── core/                 # 核心業務邏輯（播放上下文、字幕替換、隊列）
+│   ├── ui/                   # UI 組件（字幕顯示、樣式、互動面板）
+│   ├── subtitle-modes/       # 字幕模式（攔截器、DOM 監聽、DOM overlap 匹配）
+│   └── utils/                # 工具函數（解析器、語言代碼、slot key）
+├── background/               # 背景服務模組（API、同步）
+├── shared/                   # 跨 extension 頁面共享模組
+│   └── subtitle-preview-renderer.js  # 字幕預覽渲染器（設定/教學頁面用）
 ├── icons/                    # 圖標資源
 └── docs/                     # 技術文檔
 ```
@@ -143,9 +145,16 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 - **通信**: 通過 CustomEvent 與 Content Script 通信
 
 #### Layer 4: Netflix Page Script (netflix-page-script.js)
-- **職責**: 攔截 Netflix API、訪問內部播放器
-- **權限**: 完整訪問 `window.netflix` 對象
+- **職責**: 攔截 Netflix CDN 字幕請求、管理播放器實例、提供播放診斷快照
+- **權限**: 完整訪問 `window.netflix` 對象與內部 API
 - **通信**: 通過 `window.postMessage` 與 Page Context 通信
+- **播放會話選擇**: `selectActivePlaybackSession()` 使用多層次信心評分
+  - `confidence: 'high'` — playerApiVideoId 或 movieId 與 URL videoId 匹配
+  - `confidence: 'medium'` — watch session 具有合理的 playback state（duration > 0, currentTime 合理）
+  - `confidence: 'low'` — player-helper-session-fallback 或 first-open-session-fallback
+  - `confidence: 'none'` — 無開放播放會話
+- **診斷快照**: `getDebugSnapshot()` 回傳完整播放狀態（session、track、currentTime、recent events）
+- **trusted watch session**: 僅 sessionId 以 `watch-` 開頭且 confidence ≥ `medium` 且非 fallback 來源才算 trusted
 
 ---
 
@@ -157,21 +166,35 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 
 **職責**: 統一管理所有組件的初始化流程
 
-**初始化順序**:
+**初始化順序（8 階段並行優化流程）**:
+
 ```javascript
-1. initializeMessaging()      // 建立消息通信
-2. initializeConfig()         // 加載配置
-3. initializeVideoInfo()      // 獲取影片信息
-4. initializeSubtitleModes()  // 初始化字幕模式
-5. initializeUIManager()      // 初始化 UI
-6. setupPageVisibilityHandler() // 頁面可見性處理
+1. initializeMessaging()         // 建立消息通信（必須先完成）
+2. initializeConfigBridge()      // 初始化配置橋接器（必須先完成）
+3. initializePageScript() +      // 注入 Netflix Page Script（與配置並行）
+   loadConfiguration()           // 載入配置（與 Page Script 並行）
+4. waitForPlaybackPage()         // 等待用戶進入播放頁面，
+                                 // 同時在內部啟動 setupVideoMonitoring()（視頻切換背景監控）
+5. checkNetflixAPI()             // 檢查 Netflix API、初始化播放器助手、
+                                 // 立即啟動字幕攔截器、初始化 PlaybackContextManager
+6. initializeComponents()        // 初始化 UI 管理器、字幕樣式管理器、字幕協調器
+7. integrateAndStart()           // 整合和啟動系統（事件流綁定、通知背景）
 ```
+
+**設計要點**:
+- **階段 3 並行**: Page Script 注入與 Config 載入同時進行，減少等待時間
+- **攔截器提前啟動**: 階段 5 中 `checkNetflixAPI()` 立即啟動字幕攔截器，確保 Netflix 預設字幕請求在發生的當下即被攔截
+- **PlaybackContextManager**: 階段 5 中初始化，追蹤播放 session/videoId/track 狀態並作為字幕處理 gate
+- **安全初始化**: SubtitleCoordinator 不依賴語言列表決定生死；Netflix SPA 換片時 player/languages 可能短暫不可讀，由 coordinator 的 soft/hard 分類與背景回升處理
+- **降級模式**: 初始化失敗時嘗試只初始化基本的 DOM 監聽功能
 
 **生命週期管理**:
 - 頁面加載時自動初始化
 - 頁面隱藏時暫停字幕處理
 - 頁面顯示時恢復運行
-- 提供 `destroy()` 方法進行清理
+- 提供 `cleanup()` 方法進行清理
+- 影片切換時清理並重新初始化 UI 組件
+- 狀態包含 `messagingReady`、`pageScriptInjected`、`netflixAPIAvailable`、`playbackContextReady`、`configLoaded`、`componentsReady`
 
 #### 1.2 Messaging System (`content/system/messaging.js`)
 
@@ -292,7 +315,7 @@ clear(type)
 voteBridge.enqueue({
   videoId: '12345',
   timestamp: 123.456,
-  voteType: 'up',  // 'up' | 'down'
+  voteType: 'upvote',  // 'upvote' | 'downvote'
   translationID: 'abc123',
   originalSubtitle: 'Hello'
 });
@@ -350,30 +373,85 @@ replacementEventBridge.enqueue({
 - Netflix API 響應
 - DOM 元素提取
 
+#### 2.5 PlaybackContextManager (`content/core/playback-context-manager.js`)
+
+**職責**: 統一管理目前 Netflix 播放 session/videoId/track 狀態，作為字幕處理的 gate 與診斷來源。
+
+**核心概念**:
+- **Epoch**: 每次 videoId 或 sessionId 改變時遞增，用於判斷字幕資料是否屬於當前播放上下文
+- **State**: `ready`（播放上下文就緒）或 `transitioning`（SPA 切換中，字幕處理暫緩）
+- **Polling**: 每 3 秒向 Page Script 請求診斷快照（`GET_SUBPAL_DEBUG_SNAPSHOT`），從中提取播放會話資訊
+
+**工作流程**:
+```javascript
+1. 初始化時向 Page Script 請求診斷快照
+2. 從快照中提取播放 session、videoId、currentTrack
+3. 使用信心評分（sessionSelectionConfidence）篩選有效的 watch session
+4. 當 videoId 或 sessionId 改變時遞增 epoch 並轉為 transitioning 狀態
+5. 狀態變更時觸發 PLAYBACK_CONTEXT_CHANGED 內部事件
+6. SPA 切換後 1 秒延遲刷新一次，等待 player session ready
+```
+
+**PlaybackContext 結構**:
+```javascript
+{
+  epoch: 3,                     // 上下文版本號
+  videoId: '80234304',          // 當前影片 ID
+  sessionId: 'watch-xxx',       // Netflix 播放會話 ID
+  currentTrack: {               // 當前字幕軌道
+    code: 'zh-Hant',
+    name: '繁體中文',
+    trackId: 12345,
+    trackType: 'subtitle'
+  },
+  state: 'ready',               // 'ready' | 'transitioning'
+  selectedSessionReason: 'watch-player-api-video-id-match',
+  sessionSelectionConfidence: 'high'
+}
+```
+
+**作為 Gate 的輸入來源**:
+- PlaybackContextManager 提供 epoch、state、sessionId 等狀態，供 SubtitleInterceptor 的 `evaluateSubtitleGate()` 判斷字幕是否可進入處理流程
+- transitioning 狀態下的字幕請求被暫緩（非拒絕），由 SubtitleInterceptor 的 `scheduleReloadAfterContextReady()` 在 ready 後重試
+- 已解析字幕 cache 需通過 epoch 比對確保屬當前上下文
+- 非 watch session（首頁 billboard/preview 字幕）被明確拒絕，避免污染同語言 cache
+
 ---
 
 ### 3. UI Layer（UI 層）
 
 #### 3.1 UIManager (`content/ui/ui-manager-new.js`)
 
-**職責**: 統一管理所有 UI 組件
+**職責**: 協調者角色，統一管理所有 UI 組件的生命週期與字幕顯示流程。
 
 **管理的組件**:
 - SubtitleDisplay（字幕顯示）
 - InteractionPanel（交互面板）
 - SubmissionDialog（提交對話框）
 - FullscreenHandler（全螢幕處理）
+- UIAvoidanceHandler（控制欄閃避）
 - ToastManager（通知）
 
-**註冊機制**:
-```javascript
-// 組件向 UIManager 註冊
-UIManager.registerComponent('subtitleDisplay', subtitleDisplay);
+**原生字幕可見性狀態機**:
 
-// UIManager 統一管理組件生命周期
-UIManager.initializeAll();
-UIManager.destroyAll();
-```
+UIManager 維護原生 Netflix 字幕的可見性狀態，透過注入/移除 CSS 規則（`subpal-hide-native-subtitles` style element）控制：
+- `showNativeSubtitles(reason)`: 移除隱藏樣式，恢復 Netflix 原生字幕
+- `hideNativeSubtitles(reason)`: 注入 CSS clip-path 規則隱藏原生字幕
+
+**備援通知狀態機（fallback/recovery toast）**:
+- `recoveryNotificationState`: 管理備援 toast 的顯示時機與類型
+- `isFallbackActive()`: 判斷是否處於備援狀態（context ready + interceptor active + primary 未就緒）
+- 轉場備援（3 秒）vs 初始載入備援（8 秒）: 根據 `_pendingRecoveryIsTransition` 標記選擇不同的倒數時間
+- `scheduleLongRecoveryTimeout()`: 收到 `PRIMARY_DISCOVERY_DOM_SAMPLE_DETECTED` 後 15 秒顯示長時間復原通知
+
+**影片切換處理**:
+- 監聽 `VIDEO_ID_CHANGED` 內部事件
+- 清理所有 UI 組件 → 重新初始化 → 發出 `UI_COMPONENTS_REINITIALIZED` 事件
+- 通知 `SubtitleStyleManager` 重新套用樣式
+
+**字幕可見性同步**:
+- `syncNativeSubtitleVisibilityForSubtitle()`: 根據字幕數據與 render readiness 決定是否隱藏原生字幕
+- `SUBTITLE_READINESS_CHANGED` 事件驅動主要邏輯
 
 #### 3.2 SubtitleDisplay (`content/ui/subtitle-display.js`)
 
@@ -395,6 +473,9 @@ UIManager.destroyAll();
 - 使用 Flexbox 進行垂直佈局
 
 **字幕樣式**:
+- 支援 `fontWeight`（400/700）、`fontPreset`（system/clearSans/serif/code）
+- 支援 `styleMode`：`custom`（自訂樣式）、`netflixPreset`（Netflix 原生風格）；另有內部運行時模式 `nativeInherit`（繼承 Netflix 計算樣式，非匯出 schema 值）
+- 支援 `setStyleMode()`、`setDualModeStyles()` 接口
 ```javascript
 // 動態應用樣式
 {
@@ -402,7 +483,8 @@ UIManager.destroyAll();
   color: '#ffffff',
   textShadow: '2px 2px 4px rgba(0,0,0,0.8)',
   backgroundColor: 'transparent',
-  fontFamily: 'Netflix Sans, Arial, sans-serif'
+  fontFamily: 'Netflix Sans, Arial, sans-serif',
+  fontWeight: '700'
 }
 ```
 
@@ -490,7 +572,26 @@ ToastManager.info('正在同步數據...');
 - 支持不同類型（success/error/info/warning）
 - 隊列管理避免重疊
 
-#### 3.8 NetflixPlayerAdapter (`content/ui/netflix-player-adapter.js`)
+#### 3.8 SubtitleStyleManager (`content/ui/subtitle-style-manager.js`)
+
+**職責**: 統一管理單語和雙語字幕樣式，依賴注入模式接收現有 UIManager 實例。
+
+**設計要點**:
+- **ConfigBridge 驅動**: 不直接管理配置，只訂閱 ConfigBridge 的樣式配置變更
+- **依賴注入**: `initialize(uiManager)` 接收外部 UIManager 實例
+- **樣式模式**: 支援 `styleMode`（`custom`/`netflixPreset`；`nativeInherit` 為內部運行時模式）、`fontPreset`、`fontWeight`
+- **雙語樣式**: 獨立管理 primary/secondary 兩組樣式配置
+- **UI 重建恢復**: 監聽 `UI_COMPONENTS_REINITIALIZED` 事件，在影片切換後重新套用樣式
+
+**樣式應用路徑**:
+```
+ConfigBridge 配置變更 → SubtitleStyleManager.handleStyleChange()
+  → applyCurrentStyle()
+    → applySingleModeStyle() / applyDualModeStyle()
+      → SubtitleDisplay.setSubtitleStyle() / setDualModeStyles()
+```
+
+#### 3.9 NetflixPlayerAdapter (`content/ui/netflix-player-adapter.js`)
 
 **職責**: 適配 Netflix 播放器的各種狀態
 
@@ -521,50 +622,64 @@ onTimeUpdate(callback)
 
 #### 4.1 SubtitleCoordinator (`content/subtitle-modes/subtitle-coordinator.js`)
 
-**職責**: 協調不同字幕模式之間的切換
+**職責**: 協調不同字幕模式之間的切換、管理模式健康度與背景重試。
 
 **設計理念**:
 - Netflix 的字幕系統複雜且多變
 - 單一模式無法覆蓋所有場景
 - 需要根據情況動態切換模式
+- 攔截模式的不可用分為「短暫未就緒」（soft_not_ready）與「真正不可用」（hard_fail）
 
 **支持的模式**:
-1. **DOM Monitor Mode** - 監聽原生字幕 DOM 變化
-2. **Interceptor Mode** - 攔截字幕請求（支持雙語）
+1. **DOM Monitor Mode** - 監聽原生字幕 DOM 變化（降級模式）
+2. **Interceptor Mode** - 攔截字幕請求（主模式，支持雙語）
 
-**協調策略**:
+**模式健康度 (`modeHealth`)**:
+- `intercept_warming_up` — 攔截器剛啟動或短暫未就緒
+- `intercept_ready` — 攔截器正常運作
+- `intercept_degraded_retrying` — 攔截器連續失敗，背景重試中
+- `dom_emergency` — 攔截器無法使用，降級到 DOM 模式
+
+**協調策略** (三狀態決策):
 ```javascript
-// 優先使用攔截模式（如果可用）
-if (canIntercept()) {
-  enableInterceptorMode();
-} else {
-  // 降級到 DOM 監聽模式
-  enableDOMMonitorMode();
-}
-
-// 如果當前模式失敗，自動切換
-onModeFailure(() => switchToAlternativeMode());
+ModeDetector.detectInterceptModeStatus()
+  status === 'ready'      → 啟用攔截模式，停止背景重試
+  status === 'soft_not_ready' → 保持攔截模式，啟動背景升級重試
+  status === 'hard_fail'  → 進入 DOM emergency 模式
 ```
+
+**背景重試 (Background Upgrade)**:
+- `startBackgroundUpgrade()`: 每 2 秒嘗試恢復攔截模式，最多 120 秒
+- `silentUpgradeToInterceptor()`: 靜默升級回到攔截模式，用戶無感知
+- 重試過程中保留 DOM 模式顯示字幕，不影響觀看
+
+**DOM Emergency 降級**:
+- 攔截連續失敗 `maxInterceptFailuresBeforeDom`（3 次）後觸發
+- 切換到 DOM 模式同時在背景持續嘗試恢復攔截
+- 顯示 toast 通知用戶
+
+**未初始化時的狀態管理**:
+- SubtitleCoordinator 的 `initialize()` 現在主要由 InitializationManager 的 `initializeSubtitleCoordinatorSafely()` 控制
+- 攔截器初始化可能失敗（Netflix SPA 換片時），只記錄 `modeHealth = intercept_warming_up` 而不終止流程
 
 #### 4.2 ModeDetector (`content/subtitle-modes/mode-detector.js`)
 
-**職責**: 檢測當前應該使用的字幕模式
+**職責**: 檢測攔截模式狀態，區分短暫未就緒與真正不可用。
 
-**檢測邏輯**:
+**三狀態決策 (非二元)**:
+
+`detectInterceptModeStatus()` 回傳三種 status：
+- `ready` — 攔截模式可啟動（Page Script 已注入、Netflix API 可用、播放器就緒、字幕攔截功能正常）
+- `soft_not_ready` — Netflix SPA/播放器/字幕資料仍在 warming up，應保持攔截重試（如 `player-not-ready`、`languages-unavailable`、`interceptor-not-active`）
+- `hard_fail` — Page Script 或基本通訊不可用，才允許進入 DOM emergency（如 `not-netflix-page`、`page-script-unavailable`）
+
+**檢測流程**:
 ```javascript
-function detectMode() {
-  // 檢查是否支持攔截
-  if (window.netflix && window.netflix.player) {
-    return 'interceptor';
-  }
-  
-  // 檢查是否存在字幕元素
-  if (document.querySelector('.player-timedtext')) {
-    return 'dom-monitor';
-  }
-  
-  return 'none';
-}
+1. isNetflixPage()                     // 檢查是否在 Netflix 域名
+2. ensurePageScriptInjected()          // 確保 Page Script 已注入
+3. checkNetflixAPIAvailability()       // 檢查 Netflix API 可用性
+4. checkPlayerReadiness()              // 檢查播放器準備狀態
+5. checkSubtitleInterceptCapability()  // 檢查字幕攔截功能（語言列表、攔截器活躍度）
 ```
 
 #### 4.3 DOMMonitor (`content/subtitle-modes/dom-monitor.js`)
@@ -593,13 +708,57 @@ const observer = new MutationObserver((mutations) => {
 
 #### 4.4 SubtitleInterceptor (`content/subtitle-modes/subtitle-interceptor.js`)
 
-**職責**: 攔截 Netflix 的字幕請求
+**職責**: 攔截 Netflix 的字幕請求，管理 raw TTML 快取、語言獲取與 primary discovery 復原。
 
 **實現原理**:
 1. 注入 Page Script 到 Netflix 頁面
 2. 攔截 `XMLHttpRequest` 和 `fetch`
 3. 識別字幕請求（TTML 格式）
 4. 解析字幕數據並通過 postMessage 發送
+5. 與 PlaybackContextManager 整合，依據影片歸屬與 epoch 進行嚴格門檻檢查
+
+**主要流程**:
+
+**A. Primary discovery / acquisition flow**:
+```
+loadInterceptedSubtitles()
+  → checkExistingCache() (快取驗證與 gate 檢查)
+  → recordDefaultLanguage()
+  → ensureLanguageAvailable(primaryLanguage, 'primary')
+    → tryLoadLanguageFromCaches() (快取優先)
+    → refreshLanguageTrack() / switchLanguageAndWait() (切換或刷新字幕軌道)
+    → waitForInterception() (等候 raw TTML 攔截事件)
+    → parse & promote (解析並 promotion 到 active slot)
+  → ensureSecondaryLanguageAvailableOnce() (次要語言，含 idempotent 去重)
+  → restoreDefaultLanguage()
+```
+
+**B. Acquisition waiter 去重**:
+- `ensureSecondaryLanguageAvailableOnce()` 利用 `_secondaryAcquisitionInFlight` 確保同 videoId/epoch/language 只進行一次 secondary 軌道切換
+- `acquisitionWaiters` Map 管理 pending waiter，支援超時清理
+
+**C. Epoch-based parsed cache invalidation**:
+- `isSubtitleEntryCurrent()`: 比對 cache 中的 `playbackContext.epoch` 與目前 PlaybackContext epoch
+- `ensureActiveSubtitleSlotsCurrent()`: 在每次渲染循環前檢查 active slot 是否仍屬當前 context
+
+**D. Raw TTML pool management**:
+- 透過 `interceptedSubtitles` Map 保留所有已解析的 raw TTML
+- `cleanupOldVideoCache()`: 影片切換時清理不屬於當前影片的緩存（DOM match 歸屬的 entry 保留）
+- `handleRawTTMLIntercepted()`: 處理 Page Script 送來的 raw TTML，經過 gate/promotion guard 後決定是否 promotion 到 active slot
+
+**E. 語言/情境過濾**:
+- `evaluateSubtitleGate()`: 嚴格的多層次門檻檢查，包含：
+  - 播放上下文狀態（transitioning 時暫緩）
+  - transitioning 狀態下由 `scheduleReloadAfterContextReady()` 排程在 ready 後重試
+  - request session 必須為 watch- 前綴（拒絕 billboard/preview）
+  - cache-key/mismatch、evidence-confidence、session-mismatch 等多層次檢查
+- `isSubtitleSlotMetaCurrent()`: slot lock-in 機制防止同影片短暫轉換閃爍
+
+**F. DOM Overlap Recovery 整合**:
+- `tryStartPrimaryDiscovery()`: 啟動 DOM overlap match recovery，繞過傳統 track switching
+- 透過 `DOMOverlapMatcher` 收集原生字幕 DOM 文字並比對 raw TTML pool
+- 匹配成功時以 `native-dom-match` attribution 通過 gate 豁免
+- 匹配成功後自動觸發 secondary acquisition
 
 **攔截的請求**:
 ```javascript
@@ -614,12 +773,76 @@ const subtitlePatterns = [
 - 支持雙語字幕（獲取所有語言軌道）
 - 精度更高（包含完整時間戳）
 - 需要成功注入 Page Script
+- 渲染循環每 100ms 更新一次，使用時間索引加速查找
+- render-readiness gating 控制原生字幕隱藏時機（僅在 primary ready 後才隱藏）
+
+#### 4.5 DOMOverlapMatcher (`content/subtitle-modes/dom-overlap-matcher.js`)
+
+**職責**: 收集 Netflix 原生字幕 DOM 文字，與 page script raw TTML pool 中的候選做 overlap match，回傳最佳匹配的候選。
+
+**角色**: 專用於 episode-change/SPA 字幕復原情境。當 track switching 無法取得正確影片的 TTML 時（例如 cache-key-video-mismatch），透過比對螢幕上實際顯示的文字與已攔截的 raw TTML，找出正確的字幕資料。
+
+**核心流程**:
+```
+1. collectDOMSample() — 收集 Netflix 原生字幕 DOM 文字
+   - 偏好 leaf spans（葉節點 span，最接近實際顯示文字）
+   - 降級到 all-spans → container textContent
+   - 去重（避免 karaoke 模式重複 span）與正規化
+   - 使用 video element 即時時間戳（降級到 PlaybackContext snapshot）
+
+2. fetchCandidates(languageCode) — 從 page script 取得 raw TTML pool
+   - 語言過濾（支援 base-code fallback）
+   - 排除非 watch session 的 TTML
+
+3. findMatchingCues() — 從候選字幕中找出時間窗口 (±750ms) 內的 cue
+
+4. scoreCandidate() — 計算 overlap score
+   - score = matchedUnits / max(domUnits.length, minComparableUnits)
+   - 門檻：≥6 chars 時 score ≥ 0.75；3-5 chars 時 score ≥ 0.90
+
+5. rankResults() — 排名（score → subtitlesCount → requestTime）
+
+6. findBestMatch() — 回傳最佳匹配結果
+```
+
+**Reactive DOM watching**:
+- `startWatching(languageCode, onMatch)`: 啟動 MutationObserver，監聽 `.player-timedtext-text-container`
+- 300ms debounce + 1000ms max-wait 計時器，避免高頻變動時重複執行
+- body 觀察器處理容器未出現的情境（30 秒超時）
+- root 觀察器偵測容器被替換（Netflix SPA 切換時常見）
+
+**與 SubtitleInterceptor 整合**:
+- 由 `SubtitleInterceptor.startPrimaryDiscovery()` 啟動
+- match 結果經由 `handleDomMatchResult()` 或 `tryPrimaryDiscoveryMatch()` 處理
+- 成功匹配的 entry 以 `native-dom-match` attribution 通過 `evaluateSubtitleGate()` 的豁免檢查
 
 ---
 
 ### 5. Utils（工具層）
 
-#### 5.1 SubtitleParser (`content/utils/subtitle-parser.js`)
+#### 5.1 LanguageCode (`content/utils/language-code.js`)
+
+**職責**: 統一前端設定值與 API 使用的語言代碼格式。
+
+**核心映射**:
+```javascript
+// 前端設定 → API 格式
+'zh-Hant' → 'zh-TW'
+'zh-Hans' → 'zh-CN'
+// 其餘語言代碼保持不變
+```
+
+**使用場景**: `SubtitleCoordinator.normalizeSubtitleData()` 中將 `primaryLanguageCode` 轉為 API 語言代碼，用於 `buildSlotKey()`。
+
+#### 5.2 SlotKey (`content/utils/slot-key.js`)
+
+**職責**: 統一前端字幕 slot 的識別規則，避免各模組各自重算造成 key 不一致。
+
+**slotKey 格式**: `{videoID}::{originalSubtitle}::{languageCode}::{timestamp.toFixed(4)}`
+
+**使用場景**: 用於投票 (`submitVote`) 與翻譯 (`submitTranslation`) 的 payload 中，作為後端比對同一字幕位置的唯一識別值。
+
+#### 5.3 SubtitleParser (`content/utils/subtitle-parser.js`)
 
 **職責**: 解析 TTML 格式的字幕
 
@@ -646,8 +869,8 @@ const subtitles = SubtitleParser.parse(ttmlString);
 [
   {
     id: 'subtitle_0',
-    begin: 1.000,      // 開始時間（秒）
-    end: 4.000,        // 結束時間（秒）
+    startTime: 1.000,  // 開始時間（秒）
+    endTime: 4.000,    // 結束時間（秒）
     text: 'Hello World',
     region: 'bottom'   // 位置
   }
@@ -669,6 +892,7 @@ const subtitles = SubtitleParser.parse(ttmlString);
 3. 設置 JWT 刷新定時器（每 24 小時）
 4. 設置同步定時器（每 5 分鐘）
 5. 監聽消息和連接
+6. 解析 clientVersion（`frontend-{manifest.version}`）供後端 rollout 使用
 ```
 
 **生命週期事件**:
@@ -688,14 +912,22 @@ refreshToken(token) → { token }
 // 字幕數據
 fetchSubtitles(videoId, language, startTime, endTime) → [subtitles]
 
-// 提交數據
+// 提交數據（可選欄位：slotKey, clientVersion）
 submitVote(voteData) → { success }
+  // voteData: { videoID, timestamp, voteType, translationID?,
+  //             originalSubtitle?, slotKey?, clientVersion? }
 submitTranslation(translationData) → { success }
+  // translationData: { videoId, timestamp, original, translation,
+  //                    languageCode, submissionReason, slotKey?, clientVersion? }
 submitReplacementEvents(events) → { success }
 
 // 統計
 fetchUserStats(userId) → { stats }
 ```
+
+**新版 payload 欄位**:
+- `slotKey`: 字幕 slot 識別值，格式 `{videoID}::{originalSubtitle}::{languageCode}::{timestamp}`
+- `clientVersion`: 前端版本，格式 `frontend-{manifest.version}`，供後端 rollout 與行為觀測使用
 
 **錯誤處理**:
 ```javascript
@@ -740,6 +972,27 @@ const timeout = setTimeout(() => abort(), 10000);
 
 ## 數據流與通信
 
+### 數據流與 Gate 控制
+
+```
+                     PlaybackContextManager
+                           │
+                           │ (epoch / state / session)
+                           ▼
+              ┌──────────────────────────┐
+              │   SubtitleInterceptor    │
+              │     Gate Decision        │
+              │ (evaluateSubtitleGate()) │
+              └─────────────┬────────────┘
+                              │
+               accepted ──────┴────── rejected
+                  │                         │
+                  ▼                         ▼
+           進入處理流程             暫緩/丟棄 (transitioning
+                                      或非 watch session)
+
+```
+
 ### 通信協議圖
 
 ```
@@ -749,23 +1002,56 @@ const timeout = setTimeout(() => abort(), 10000);
 
 1. 配置數據流：
    Options Page ──write──► chrome.storage.local ──watch──► ConfigManager
-                                                          └──► 通知所有訂閱者
+                                                           └──► 通知所有訂閱者
 
-2. 字幕數據流：
-   Netflix CDN ──intercept──► Page Script ──parse──► SubtitleCoordinator
-                                                       └──► UIManager ──► SubtitleDisplay
+2. 字幕數據流（正常路徑 — 含 PlaybackContext gating）：
+   Netflix CDN ──intercept──► Page Script (攔截 + session 檢查)
+                                   │
+                                   ▼ postMessage
+                          PlaybackContextManager ──gate──► SubtitleInterceptor
+                                                             │ (parse + promotion)
+                                                             ▼
+                                                         SubtitleCoordinator
+                                                             │
+                                                             ▼
+                                                         UIManager
+                                                          (native visibility)
+                                                             │
+                                                             ▼
+                                                         SubtitleDisplay
+                                                          (style applied)
+
+2b. 字幕數據流（DOM Overlap Recovery / SPA 換片復原）：
+   Netflix 原生字幕 DOM ──collect──► DOMOverlapMatcher
+                                        │
+                                        ▼ (findBestMatch)
+                                   raw TTML pool (interceptedSubtitles)
+                                        │ (native-dom-match attribution)
+                                        ▼
+                                   SubtitleInterceptor.handleRawTTMLIntercepted
+                                        │ (bypass gate via attribution)
+                                        ▼
+                                   SubtitleCoordinator → UIManager → SubtitleDisplay
+
+2c. PlaybackContext polling（診斷快照）：
+   PlaybackContextManager ──GET_SUBPAL_DEBUG_SNAPSHOT──► Page Script
+       ◄── playback session snapshot ─────────────────── 
+       │ 
+       ├── epoch 管理（videoId/sessionId 改變時遞增）
+       ├── transitioning ←→ ready 狀態切換
+       └── gate 決策：transitioning 時暫緩字幕處理
 
 3. 用戶操作數據流：
-   用戶點擊 ──► UIManager ──► VoteBridge/TranslationBridge
-                                └──► sendMessage ──► Content Script
-                                      └──► SubmissionQueueManager
-                                            └──► chrome.storage.local
-                                                  └──► Background Sync
-                                                        └──► API Server
+    用戶點擊 ──► UIManager ──► VoteBridge/TranslationBridge
+                                 └──► sendMessage ──► Content Script
+                                       └──► SubmissionQueueManager
+                                             └──► chrome.storage.local
+                                                   └──► Background Sync
+                                                         └──► API Server
 
 4. API 響應數據流：
    API Server ──► Background ──► Port ──► Content Script
-                                              └──► CustomEvent ──► Page Context
+                                               └──► CustomEvent ──► Page Context
 ```
 
 ### 消息傳遞詳情
@@ -833,8 +1119,8 @@ window.postMessage({
 ```typescript
 interface Subtitle {
   id: string;              // 唯一標識符
-  begin: number;           // 開始時間（秒）
-  end: number;             // 結束時間（秒）
+  startTime: number;       // 開始時間（秒）
+  endTime: number;         // 結束時間（秒）
   text: string;            // 字幕文本
   region: 'top' | 'bottom' | 'center';  // 位置
 }
@@ -846,7 +1132,7 @@ interface TranslatedSubtitle extends Subtitle {
     up: number;           // 讚數
     down: number;         // 倒讚數
   };
-  userVote: 'up' | 'down' | null;  // 當前用戶投票
+  userVote: 'upvote' | 'downvote' | null;  // 當前用戶投票
 }
 ```
 
@@ -856,7 +1142,7 @@ interface TranslatedSubtitle extends Subtitle {
 interface VoteData {
   videoId: string;         // 影片 ID
   timestamp: number;       // 時間戳（秒）
-  voteType: 'up' | 'down'; // 投票類型
+  voteType: 'upvote' | 'downvote'; // 投票類型
   translationID: string;   // 翻譯 ID
   originalSubtitle: string; // 原始字幕文本
 }
@@ -884,18 +1170,20 @@ interface TranslationData {
 #### 1.1 整體流程
 
 ```
-1. Netflix 請求字幕文件
+1. Netflix 請求字幕文件 (CDN)
         ↓
-2. Page Script 攔截請求
+2. Page Script 攔截請求 (判斷 session/playback context)
         ↓
-3. 解析 TTML 獲取原始字幕
+3. 解析 TTML 獲取原始字幕 (含 gate 檢查)
         ↓
-4. SubtitleReplacer 查詢翻譯
+3a. [備援路徑] DOM 原生字幕出現 → DOMOverlapMatcher
+    比對 raw TTML pool 找出正確字幕 (DOM overlap recovery)
         ↓
-5. 如果有翻譯 → 替換並記錄事件
-   如果無翻譯 → 使用原始字幕
+4. SubtitleCoordinator 統一字幕格式 (含 slotKey 產生)
         ↓
-6. SubtitleDisplay 渲染到頁面
+5. UIManager 處理可見性 (原生字幕隱藏時機控制)
+        ↓
+6. SubtitleDisplay 渲染到頁面 (樣式管理套用)
 ```
 
 #### 1.2 緩存策略詳解
@@ -1177,69 +1465,59 @@ async function refreshTokenIfNeeded() {
 #### 1.1 結構定義
 
 ```javascript
-// content/system/config/config-schema.js
-export const configSchema = {
-  // 系統配置
-  'system.debugMode': {
-    type: 'boolean',
-    default: false,
-    description: '是否啟用調試模式'
-  },
-  'system.isEnabled': {
-    type: 'boolean',
-    default: true,
-    description: '擴充功能是否啟用'
-  },
-  
-  // 字幕配置
-  'subtitle.dualModeEnabled': {
-    type: 'boolean',
-    default: false,
-    description: '是否啟用雙語字幕'
-  },
-  'subtitle.primaryLanguage': {
-    type: 'string',
-    default: 'zh-Hant',
-    description: '主要字幕語言'
-  },
-  'subtitle.secondaryLanguage': {
-    type: 'string',
-    default: 'en',
-    description: '次要字幕語言'
-  },
-  
-  // 樣式配置
-  'style.primary.fontSize': {
-    type: 'number',
-    default: 24,
-    description: '主要字幕字體大小'
-  },
-  'style.primary.color': {
-    type: 'string',
-    default: '#ffffff',
-    description: '主要字幕顏色'
-  },
-  'style.secondary.fontSize': {
-    type: 'number',
-    default: 20,
-    description: '次要字幕字體大小'
-  },
-  
-  // API 配置
-  'api.baseUrl': {
-    type: 'string',
-    default: 'https://subnfbackend.zeabur.app',
-    description: 'API 基礎 URL'
-  },
-  
-  // 用戶配置
-  'user.userId': {
-    type: 'string',
-    default: null,
-    description: '用戶唯一標識'
+// content/system/config/config-schema.js — 更新版層次結構
+export const CONFIG_SCHEMA = {
+  // 系統層級（扁平化鍵名）
+  debugMode:          { type: 'boolean', default: false },
+  isEnabled:          { type: 'boolean', default: true },
+
+  // 字幕設定
+  subtitle: {
+    dualModeEnabled:   { type: 'boolean', default: true },
+    primaryLanguage:   { type: 'string', default: 'zh-Hant' },
+    secondaryLanguage: { type: 'string', default: 'en' },
+
+    // 字幕樣式配置（層次結構）
+    style: {
+      mode:            { type: 'string', default: 'custom' },     // 'custom' | 'netflixPreset'（'nativeInherit' 為內部運行時模式，非匯出 schema 值）
+      fontPreset:      { type: 'string', default: 'clearSans' },  // 'system' | 'clearSans' | 'serif' | 'code'
+      fontFamily:      { type: 'string', default: 'Arial, ...' },
+      primary: {
+        fontSize:      { type: 'number', default: 55 },
+        fontWeight:    { type: 'string', default: '700' },        // '400' | '700'
+        textColor:     { type: 'string', default: '#ffffff' },
+        backgroundColor: { type: 'string', default: 'rgba(0,0,0,0.6)' }
+      },
+      secondary: {
+        fontSize:      { type: 'number', default: 24 },
+        fontWeight:    { type: 'string', default: '400' },
+        textColor:     { type: 'string', default: '#ffff00' },
+        backgroundColor: { type: 'string', default: 'rgba(0,0,0,0.6)' }
+      },
+      netflixPreset: {    // Netflix 原生風格參照（唯讀）
+        fontFamily:   { type: 'string', default: 'Arial, Helvetica, sans-serif' },
+        fontWeight:   { type: 'string', default: '700' },
+        textColor:    { type: 'string', default: '#ffffff' },
+        backgroundColor: { type: 'string', default: 'rgba(0,0,0,0.6)' },
+        textShadow:   { type: 'string', default: '0 0 2px rgba(0,0,0,0.9)' }
+      }
+    }
   }
 };
 ```
+
+**外觀模式說明**:
+- `custom`: 使用 SubPal 自訂樣式（預設）
+- `netflixPreset`: 使用穩定的 Netflix 原生風格預設
+- `nativeInherit`: 內部運行時模式，繼承 Netflix 計算樣式（SubtitleDisplay 渲染當下覆蓋可繼承欄位），非匯出 schema 值
+
+**字體預設**:
+- `system`: 系統預設字體（使用 system-ui 堆疊）
+- `clearSans`: 清晰黑體（微軟正黑體、蘋方等堆疊）
+- `serif`: 襯線字體
+- `code`: 等寬字體
+
+**字重選項**: `400`（一般）、`700`（粗體）
 
 ### 2. 配置管理器
 
@@ -1404,19 +1682,13 @@ UIManager.registerComponent('myNewComponent', myNewComponent);
 #### 2.2 添加新的配置項
 
 ```javascript
-// content/system/config/config-schema.js
-export const configSchema = {
-  // ... 現有配置
-  
-  'myFeature.enabled': {
-    type: 'boolean',
-    default: false,
-    description: '啟用我的新功能'
-  },
-  'myFeature.setting': {
-    type: 'string',
-    default: 'default-value',
-    description: '新功能的設定'
+// content/system/config/config-schema.js （層次結構模式）
+export const CONFIG_SCHEMA = {
+  // ... 現有配置（參考上方 CONFIG_SCHEMA 範例）
+
+  myFeature: {
+    enabled: { type: 'boolean', default: false },
+    setting: { type: 'string',  default: 'default-value' }
   }
 };
 ```
@@ -1515,6 +1787,7 @@ console.log('[SubPal][ConfigManager]', 'Config changed', { key, newValue });
 - `content/system/config/storage-adapter.js`
 
 #### 核心層
+- `content/core/playback-context-manager.js` — 播放上下文管理（gate/videoId/session/epoch）
 - `content/core/subtitle-replacer.js`
 - `content/core/submission-queue-manager.js`
 - `content/core/vote-bridge.js`
@@ -1525,7 +1798,7 @@ console.log('[SubPal][ConfigManager]', 'Config changed', { key, newValue });
 #### UI 層
 - `content/ui/ui-manager-new.js`
 - `content/ui/subtitle-display.js`
-- `content/ui/subtitle-style-manager.js`
+- `content/ui/subtitle-style-manager.js` — 樣式管理器（ConfigBridge 驅動、UI 重建恢復）
 - `content/ui/interaction-panel.js`
 - `content/ui/submission-dialog.js`
 - `content/ui/fullscreen-handler.js`
@@ -1537,10 +1810,16 @@ console.log('[SubPal][ConfigManager]', 'Config changed', { key, newValue });
 - `content/subtitle-modes/subtitle-coordinator.js`
 - `content/subtitle-modes/mode-detector.js`
 - `content/subtitle-modes/dom-monitor.js`
-- `content/subtitle-modes/subtitle-interceptor.js`
+- `content/subtitle-modes/subtitle-interceptor.js` — 攔截器（gate/acquisition/promotion/discovery）
+- `content/subtitle-modes/dom-overlap-matcher.js` — DOM overlap 比對復原
 
 #### 工具
 - `content/utils/subtitle-parser.js`
+- `content/utils/language-code.js` — 語言代碼格式轉換
+- `content/utils/slot-key.js` — 字幕 slot 識別值產生
+
+#### 共享模組
+- `shared/subtitle-preview-renderer.js` — 字幕預覽渲染（options/tutorial 共用）
 
 #### 背景層
 - `background/api.js`
