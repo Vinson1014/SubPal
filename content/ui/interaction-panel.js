@@ -132,11 +132,7 @@ class InteractionPanel {
       position: fixed;
       z-index: 10001;
       display: none;
-      background-color: rgba(0, 0, 0, 0.8);
-      border-radius: 8px;
-      padding: 8px;
-      backdrop-filter: blur(5px);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      padding: 0;
       transition: opacity 0.3s ease, transform 0.3s ease;
       pointer-events: auto;
     `;
@@ -157,8 +153,14 @@ class InteractionPanel {
     const buttonContainer = document.createElement('div');
     buttonContainer.style.cssText = `
       display: flex;
-      gap: 8px;
+      gap: 4px;
       align-items: center;
+      padding: 6px;
+      border-radius: 12px;
+      background: rgba(13, 13, 15, 0.84);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(6px);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.34);
     `;
     
     // 提交翻譯按鈕
@@ -166,9 +168,8 @@ class InteractionPanel {
       this.buttons.submit = this.createButton({
         id: 'submit',
         text: '提交翻譯',
-        icon: '✏️',
-        color: '#4CAF50',
-        hoverColor: '#45a049',
+        title: '提交更好的翻譯',
+        icon: this.getIconMarkup('submit'),
         callback: () => this.triggerCallback('onSubmitClick')
       });
       buttonContainer.appendChild(this.buttons.submit);
@@ -178,17 +179,17 @@ class InteractionPanel {
     if (this.config.showVoteButtons) {
       this.buttons.like = this.createButton({
         id: 'like',
-        text: '👍',
-        color: '#2196F3',
-        hoverColor: '#0b7dda',
+        title: '這個翻譯很好',
+        icon: this.getIconMarkup('like'),
+        count: null,
         callback: () => this.triggerCallback('onLikeClick')
       });
       
       this.buttons.dislike = this.createButton({
         id: 'dislike',
-        text: '👎',
-        color: '#f44336',
-        hoverColor: '#da190b',
+        title: '這個翻譯不好',
+        icon: this.getIconMarkup('dislike'),
+        count: null,
         callback: () => this.triggerCallback('onDislikeClick')
       });
       
@@ -204,33 +205,80 @@ class InteractionPanel {
   createButton(options) {
     const button = document.createElement('button');
     button.id = `subpal-${options.id}-btn`;
-    button.innerHTML = options.icon ? `${options.icon} ${options.text}` : options.text;
+    button.type = 'button';
+    button.title = options.title || options.text || '';
+    button.setAttribute('aria-label', options.title || options.text || '');
+    button.innerHTML = '';
+
+    if (options.icon) {
+      const iconWrapper = document.createElement('span');
+      iconWrapper.style.cssText = `
+        width: 18px;
+        height: 18px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      `;
+      iconWrapper.innerHTML = options.icon;
+      button.appendChild(iconWrapper);
+    }
+
+    if (options.text && options.id === 'submit') {
+      const textNode = document.createElement('span');
+      textNode.textContent = options.text;
+      textNode.style.cssText = `
+        line-height: 1;
+      `;
+      button.appendChild(textNode);
+    }
+
+    if (options.id === 'like' || options.id === 'dislike') {
+      const count = document.createElement('span');
+      count.id = `subpal-${options.id}-count`;
+      count.textContent = this.formatVoteCount(options.count);
+      count.style.cssText = `
+        display: ${options.count === null || options.count === undefined ? 'none' : 'inline-block'};
+        min-width: 10px;
+        line-height: 1;
+        color: rgba(255, 255, 255, 0.72);
+        font-size: 11px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      `;
+      button.appendChild(count);
+    }
     
     button.style.cssText = `
-      background-color: ${options.color};
-      color: white;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-height: 34px;
+      padding: ${options.id === 'submit' ? '0 12px 0 10px' : '0 10px'};
+      background: transparent;
+      color: rgba(255, 255, 255, 0.92);
       border: none;
-      border-radius: 4px;
-      padding: 6px 12px;
+      border-radius: 8px;
       cursor: pointer;
-      font-size: 12px;
-      font-weight: bold;
-      transition: all 0.2s ease;
+      font-size: ${options.id === 'submit' ? '12px' : '11px'};
+      font-weight: 700;
+      transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
       white-space: nowrap;
-      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+      box-shadow: none;
     `;
     
     // 懸停效果
     button.addEventListener('mouseenter', () => {
-      button.style.backgroundColor = options.hoverColor;
+      button.style.background = 'rgba(16, 185, 129, 0.14)';
+      button.style.color = '#34d399';
       button.style.transform = 'translateY(-1px)';
-      button.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.3)';
     });
     
     button.addEventListener('mouseleave', () => {
-      button.style.backgroundColor = options.color;
+      button.style.background = 'transparent';
+      button.style.color = 'rgba(255, 255, 255, 0.92)';
       button.style.transform = 'translateY(0)';
-      button.style.boxShadow = '0 2px 4px rgba(0, 0, 0, 0.2)';
     });
     
     // 點擊事件
@@ -251,6 +299,51 @@ class InteractionPanel {
     });
     
     return button;
+  }
+
+  getIconMarkup(iconType) {
+    const icons = {
+      submit: `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width: 18px; height: 18px; display: block;">
+          <path d="M12 20h9"></path>
+          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path>
+        </svg>
+      `,
+      like: `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width: 18px; height: 18px; display: block;">
+          <path d="M7 10v12"></path>
+          <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"></path>
+        </svg>
+      `,
+      dislike: `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width: 18px; height: 18px; display: block;">
+          <path d="M17 14V2"></path>
+          <path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z"></path>
+        </svg>
+      `
+    };
+
+    return icons[iconType] || '';
+  }
+
+  formatVoteCount(count) {
+    return Number.isFinite(count) ? String(count) : '';
+  }
+
+  setVoteCounts({ like = null, dislike = null } = {}) {
+    this.updateVoteCount('like', like);
+    this.updateVoteCount('dislike', dislike);
+  }
+
+  updateVoteCount(buttonId, count) {
+    const countElement = this.container?.querySelector(`#subpal-${buttonId}-count`);
+    if (!countElement) {
+      return;
+    }
+
+    const hasCount = Number.isFinite(count);
+    countElement.textContent = hasCount ? String(count) : '';
+    countElement.style.display = hasCount ? 'inline-block' : 'none';
   }
 
   // 查找現有按鈕（用於重用現有面板）
