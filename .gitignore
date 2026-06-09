@@ -7,6 +7,7 @@ claude-doc/
 .agents/
 .codex/
 .opencode/
+.omo
 
 # 測試與實驗代碼
 testcode/
