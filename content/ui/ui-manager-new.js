@@ -839,11 +839,7 @@ class UIManager {
       return;
     }
 
-    if (subtitleData.text || subtitleData.dualSubtitleData?.primaryText) {
-      this.hideNativeSubtitles(`${reason}-intercept-primary-text-present`);
-    } else {
-      this.showNativeSubtitles(`${reason}-intercept-primary-missing`);
-    }
+    this.showNativeSubtitles(`${reason}-intercept-missing-render-readiness`);
   }
 
   syncNativeSubtitleVisibility(renderReadiness, reason = 'render-readiness-update') {

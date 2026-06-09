@@ -912,7 +912,18 @@ class SubtitleInterceptor {
       return { success: true, source: 'already-ready', reason };
     }
 
-    // 4. Context 無效 → skip
+    // 4. Primary 未 ready → 禁止 secondary track switching
+    // 避免 primary 接管畫面前切換 track 造成 native subtitle 閃爍或空窗
+    if (!this.isLanguageSlotReady(this.primaryLanguage, 'primary')) {
+      this.recordDebugEvent('SECONDARY_ACQUISITION_DEFERRED_PRIMARY_NOT_READY', {
+        reason,
+        primaryLanguage: this.primaryLanguage,
+        secondaryLanguage: this.secondaryLanguage
+      });
+      return { success: false, reason: 'deferred-primary-not-ready' };
+    }
+
+    // 5. Context 無效 → skip
     if (!context.videoId || context.videoId === 'unknown' || context.state === 'transitioning') {
       this.recordDebugEvent('SECONDARY_ACQUISITION_SKIPPED_INVALID_CONTEXT', {
         reason,
@@ -922,7 +933,7 @@ class SubtitleInterceptor {
       return { success: false, reason: 'invalid-context' };
     }
 
-    // 5. In-flight key 檢查（videoId + epoch + language）
+    // 6. In-flight key 檢查（videoId + epoch + language）
     const epoch = context.epoch ?? 'null';
     const inFlightKey = `${context.videoId}|${epoch}|${this.secondaryLanguage}`;
 
@@ -1046,65 +1057,17 @@ class SubtitleInterceptor {
       });
     }
 
-    // ★ B: 若 secondary acquisition 時 primary discovery 正在早期窗口，暫緩 track switching
-    // 避免在前幾秒切到 ja 再切回造成 Netflix 原生字幕閃爍。
-    // 僅暫緩實際的 track switching / refresh，已緩存的資料仍正常載入。
-    if (role === 'secondary' && this.isPrimaryDiscoveryEarlyWindowActive()) {
-      const remainingMs = Math.max(0, 3000 - (Date.now() - this.primaryDiscovery.startedAt));
-      this.recordDebugEvent('SECONDARY_ACQUISITION_DEFERRED_PRIMARY_DISCOVERY', {
-        primaryDiscoveryState: this.primaryDiscovery.state,
-        primaryDiscoveryStartedAt: this.primaryDiscovery.startedAt,
-        deferDurationMs: remainingMs + 500,
+    if (role === 'secondary' && !this.isLanguageSlotReady(this.primaryLanguage, 'primary')) {
+      this.recordDebugEvent('SECONDARY_TRACK_SWITCH_BLOCKED_PRIMARY_NOT_READY', {
         languageCode,
-        role
+        context,
+        primaryLanguage: this.primaryLanguage
       });
-
-      // 捕捉 defer 時的 context videoId/epoch，用於 retry callback 前驗證一致性
-      const deferContextVideoId = context.videoId;
-      const deferContextEpoch = context.epoch;
-      // 排程在 early window 過後重試 secondary acquisition
-      setTimeout(async () => {
-        // 先確認 context 一致（避免跨影片執行 retry，導致為錯誤影片切換字幕軌）
-        const currentContext = this.getCurrentPlaybackContext();
-        if (!deferContextVideoId || currentContext.videoId !== deferContextVideoId || currentContext.epoch !== deferContextEpoch) {
-          this.recordDebugEvent('SECONDARY_ACQUISITION_DEFERRED_SKIPPED_CONTEXT_CHANGED', {
-            deferredVideoId: deferContextVideoId,
-            deferredEpoch: deferContextEpoch,
-            currentVideoId: currentContext.videoId,
-            currentEpoch: currentContext.epoch
-          });
-          return;
-        }
-        if (!this.isActive || this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
-          return;
-        }
-
-        // 執行 deferred secondary acquisition 並 await 結果
-        const result = await this.ensureSecondaryLanguageAvailableOnce('deferred-retry', options).catch(error => {
-          console.error('Deferred secondary acquisition retry failed:', error);
-          return { success: false, error: error.message, reason: 'exception' };
-        });
-
-        // ★ 完成後 restore default language，避免 Netflix active track 永久停在 secondary language
-        const defaultLanguage = options.defaultLanguage || (await this.recordDefaultLanguage().catch(() => null));
-        if (defaultLanguage && defaultLanguage !== 'unknown') {
-          await this.restoreDefaultLanguage(defaultLanguage);
-          this.recordDebugEvent('DEFAULT_LANGUAGE_RESTORED_AFTER_DEFERRED_SECONDARY', {
-            defaultLanguage,
-            acquisitionResult: { success: result.success, reason: result.reason }
-          });
-        } else {
-          this.recordDebugEvent('DEFAULT_LANGUAGE_RESTORE_SKIPPED_AFTER_DEFERRED_SECONDARY', {
-            reason: !defaultLanguage ? 'no-default-language' : 'default-language-unknown',
-            acquisitionResult: { success: result.success, reason: result.reason }
-          });
-        }
-      }, remainingMs + 500);
-
       return this.setLanguageAcquisitionResult(role, {
         success: false,
         languageCode,
-        reason: 'deferred-primary-discovery-early-window',
+        reason: 'deferred-primary-not-ready',
+        context,
         durationMs: Date.now() - startedAt
       });
     }
@@ -3792,6 +3755,18 @@ class SubtitleInterceptor {
         language
       });
       this.log(`主要語言字幕已更新: ${language} (目標: ${this.primaryLanguage})`);
+
+      if (this.dualSubtitleEnabled && !this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+        this.recordDebugEvent('SECONDARY_ACQUISITION_TRIGGERED_AFTER_PRIMARY_READY', {
+          language: this.secondaryLanguage,
+          primaryLanguage: this.primaryLanguage
+        });
+        this.ensureSecondaryLanguageAvailableOnce('primary-ready-trigger', {
+          defaultLanguage: this.primaryLanguage
+        }).catch(error => {
+          this.log('Secondary acquisition triggered after primary ready failed:', error.message);
+        });
+      }
     } else if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage, langMatchOpts) && this.dualSubtitleEnabled) {
       this.secondarySubtitles = subtitles;
       this.secondaryTimeIndex = metadata.timeIndex || this.secondaryTimeIndex;

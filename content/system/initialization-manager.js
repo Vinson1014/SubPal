@@ -601,12 +601,8 @@ class InitializationManager {
         uiManager.hideSubtitle();
         uiManager.showNativeSubtitles();
       } else {
-        // 開啟：恢復字幕處理；是否隱藏原生字幕交由 render readiness 控制。
-        if (subtitleCoordinator.currentMode === 'dom') {
-          uiManager.hideNativeSubtitles('global-enabled-dom-mode-active');
-        } else {
-          uiManager.showNativeSubtitles('global-enabled-awaiting-render-readiness');
-        }
+        // 開啟：恢復字幕處理；一律先顯示 native，是否隱藏交由 render readiness 控制
+        uiManager.showNativeSubtitles('global-enabled-awaiting-render-readiness');
         subtitleCoordinator.startCurrentMode();
       }
     });
