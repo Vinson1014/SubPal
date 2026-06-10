@@ -154,6 +154,7 @@ class SubtitleReplacer {
 
   /**
    * 處理視頻變更
+   * 注意：fetchSubtitleBatch 在背景非阻塞執行，避免阻塞字幕顯示鏈條
    */
   async handleVideoChange(videoId, timestamp) {
     this.log(`視頻變更: ${this.currentVideoId} -> ${videoId}`);
@@ -164,8 +165,12 @@ class SubtitleReplacer {
     // 設置新的視頻 ID
     this.currentVideoId = videoId;
     
-    // 立即觸發第一批字幕獲取
-    await this.fetchSubtitleBatch(videoId, timestamp);
+    // 觸發第一批字幕獲取（背景非阻塞，避免阻塞字幕顯示）
+    // 首次顯示將使用原始字幕，API 返回後後續字幕自動替換
+    // 首次載入使用 500ms 短超時，避免長時間阻塞顯示
+    this.fetchSubtitleBatch(videoId, timestamp, { timeout: 500 }).catch(error => {
+      console.error('首次字幕批次獲取失敗:', error);
+    });
   }
 
   /**
@@ -288,8 +293,10 @@ class SubtitleReplacer {
    * 獲取字幕批次數據
    * @param {string} videoId - 視頻 ID
    * @param {number} startTimestamp - 開始時間戳
+   * @param {Object} options - 選項
+   * @param {number} options.timeout - 超時時間（毫秒），預設不設限
    */
-  async fetchSubtitleBatch(videoId, startTimestamp) {
+  async fetchSubtitleBatch(videoId, startTimestamp, options = {}) {
     if (!videoId) {
       this.log('無效的視頻 ID，跳過獲取');
       return;
@@ -317,11 +324,21 @@ class SubtitleReplacer {
     this.stats.apiRequests++;
     
     try {
-      const response = await sendMessage({
+      const sendPromise = sendMessage({
         type: 'CHECK_SUBTITLE',
         videoId: videoId,
         timestamp: startTimestamp
       });
+      
+      // 如果指定了超時，使用 Promise.race
+      const response = options.timeout
+        ? await Promise.race([
+            sendPromise,
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('timeout')), options.timeout)
+            )
+          ])
+        : await sendPromise;
       
       if (response && response.success && Array.isArray(response.subtitles)) {
         await this.processSubtitleBatch(response.subtitles, start);
@@ -333,7 +350,11 @@ class SubtitleReplacer {
       }
       
     } catch (error) {
-      console.error('獲取字幕批次時出錯:', error);
+      if (error.message === 'timeout') {
+        console.warn(`獲取字幕批次超時 (${options.timeout}ms)，使用原始字幕`);
+      } else {
+        console.error('獲取字幕批次時出錯:', error);
+      }
       this.markIntervalFailed(start);
     }
   }

@@ -154,6 +154,12 @@ class UIManager {
             subtitleData.timestamp ?? Date.now() / 1000
           );
           
+          // 防禦性檢查：如果已顯示更新的字幕，跳過這次過時的更新
+          if (this.currentSubtitle && this.currentSubtitle.timestamp > subtitleData.timestamp) {
+            this.log('跳過過時字幕更新，已有更新的字幕顯示');
+            return;
+          }
+          
           if (replacedSubtitle) {
             processedSubtitle = replacedSubtitle;
             this.log('字幕已替換:', {
@@ -164,6 +170,12 @@ class UIManager {
         } catch (error) {
           console.error('字幕替換處理失敗:', error);
         }
+      }
+      
+      // 再次檢查：非阻塞流程下可能已有更新的字幕被顯示
+      if (this.currentSubtitle && this.currentSubtitle.timestamp > subtitleData.timestamp) {
+        this.log('跳過過時字幕更新（二次檢查），已有更新的字幕顯示');
+        return;
       }
       
       // 根據模式處理位置計算

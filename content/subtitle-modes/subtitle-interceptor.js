@@ -92,6 +92,9 @@ class SubtitleInterceptor {
 
     // Secondary DOM recovery in-flight flag（idempotent 用）
     this._secondaryRecoveryInFlight = false;
+
+    // Sticky flag：SubPal 是否曾成功顯示過字幕（用於控制原生字幕隱藏時機）
+    this._hasSubpalEverShownSubtitle = false;
   }
 
   recordDebugEvent(type, data = {}) {
@@ -220,6 +223,7 @@ class SubtitleInterceptor {
     this.currentTimestamp = 0;
     this.lastRenderedSubtitle = null;
     this._secondaryAcquisitionInFlight = null;
+    this._hasSubpalEverShownSubtitle = false;
     this.dispatchSubtitleReadinessChanged('interceptor-stopped');
     
     this.log('字幕攔截模式已停止');
@@ -1665,6 +1669,11 @@ class SubtitleInterceptor {
             isEmpty: subtitleData.isEmpty
           });
           this.callback(subtitleData);
+          
+          // 標記 SubPal 已成功送出字幕數據，允許隱藏原生字幕
+          if (dualSubtitleData.primaryText) {
+            this._hasSubpalEverShownSubtitle = true;
+          }
         }
       }
       
@@ -1884,13 +1893,16 @@ class SubtitleInterceptor {
     const secondaryMetaCurrent = this.secondarySubtitleMeta ? this.isSubtitleSlotMetaCurrent(this.secondarySubtitleMeta) : false;
     const primaryReady = this.primarySubtitles.length > 0 && primaryMetaCurrent;
     const secondaryReady = this.secondarySubtitles.length > 0 && secondaryMetaCurrent;
-    const canHideNativeSubtitles = this.isActive && playbackContextReady && primaryReady;
+    // 使用 sticky flag：一旦 SubPal 成功顯示過字幕就保持 true，避免 cue 間隙時原生字幕閃爍
+    const canHideNativeSubtitles = this.isActive && playbackContextReady && primaryReady && this._hasSubpalEverShownSubtitle;
     let nativeHideReason = 'intercept-primary-ready';
     if (!canHideNativeSubtitles) {
       if (!this.isActive) {
         nativeHideReason = 'intercept-mode-inactive';
       } else if (!playbackContextReady) {
         nativeHideReason = 'playback-context-not-ready';
+      } else if (!this._hasSubpalEverShownSubtitle) {
+        nativeHideReason = 'subpal-has-never-shown-subtitle';
       } else {
         nativeHideReason = this.computeSubtitleMissingReason('primary', this.primaryLanguage, context);
       }
