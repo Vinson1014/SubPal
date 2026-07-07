@@ -18,6 +18,8 @@ import { getPlayerAdapter } from './netflix-player-adapter.js';
 import { sendMessage, registerInternalEventHandler, dispatchInternalEvent } from '../system/messaging.js';
 import { SubtitleReplacer } from '../core/subtitle-replacer.js';
 
+const MS_PER_SECOND = 1000;
+
 class UIManager {
   constructor() {
     this.isInitialized = false;
@@ -120,7 +122,12 @@ class UIManager {
       
       this.isInitialized = true;
       this.log('UI 管理器初始化完成');
-      
+
+      // 定期檢查永久同步失敗並還原 UI
+      this._permanentFailureCheckInterval = setInterval(() => {
+        this.checkAndRevertPermanentFailures();
+      }, 5000);
+
       // 觸發 UI 就緒回調
       this.triggerCallback('onUIReady');
       
@@ -151,7 +158,7 @@ class UIManager {
           const replacedSubtitle = await this.subtitleReplacer.processSubtitle(
             subtitleData, 
             subtitleData.videoId || 'unknown', 
-            subtitleData.timestamp ?? Date.now() / 1000
+            subtitleData.timestamp ?? Date.now() / MS_PER_SECOND
           );
           
           // 防禦性檢查：如果已顯示更新的字幕，跳過這次過時的更新
@@ -190,9 +197,41 @@ class UIManager {
       }
       
       this.currentSubtitle = processedSubtitle;
-      
+
       // 顯示字幕
       this.subtitleDisplay.show(processedSubtitle);
+
+      // 檢查是否有權威投票數據，若有則更新當前字幕
+      // 但若有正在進行的 pending 投票，則跳過權威覆蓋，避免樂觀 UI 被舊數據覆蓋
+      if (processedSubtitle.translationID) {
+        try {
+          const { voteStateByTranslation, voteQueue } = await chrome.storage.local.get([
+            'voteStateByTranslation', 'voteQueue'
+          ]);
+          const authoritative = voteStateByTranslation?.[processedSubtitle.translationID];
+          const hasPendingVote = voteQueue?.some(item =>
+            item.translationID === processedSubtitle.translationID &&
+            (item.status === 'pending' || item.status === 'syncing')
+          );
+          if (authoritative && !authoritative.pending && !hasPendingVote) {
+            processedSubtitle = {
+              ...processedSubtitle,
+              myVote: authoritative.myVote,
+              upvotes: authoritative.upvotes,
+              downvotes: authoritative.downvotes
+            };
+            this.currentSubtitle = processedSubtitle;
+            this.log('已應用權威投票數據:', authoritative);
+          } else if (hasPendingVote) {
+            this.log('跳過權威投票數據覆蓋，因為有正在進行的投票:', processedSubtitle.translationID);
+          }
+        } catch (e) {
+          console.warn('讀取權威投票數據失敗:', e);
+        }
+      }
+
+      // 更新投票計數和狀態
+      this.updateVoteDisplay(processedSubtitle);
       
       // 在雙語模式下，為 currentSubtitle 添加 primaryContainer 引用
       if (processedSubtitle.isDualSubtitle && this.subtitleDisplay.primaryContainer) {
@@ -661,68 +700,188 @@ class UIManager {
   }
 
   // 處理讚點擊
-  async handleLikeClick() {
-    this.log('處理讚點擊');
-    
+  async handleVoteClick(voteType) {
+    const isLike = voteType === 'like';
+    const actionLabel = isLike ? '讚' : '倒讚';
+    this.log(`處理${actionLabel}點擊`);
+
     if (!this.currentSubtitle) {
       console.error('沒有當前字幕數據');
       return;
     }
-    
-    try {
-      const voteParams = {
-        videoId: this.currentSubtitle.videoId || 'unknown',
-        timestamp: this.currentSubtitle.timestamp ?? Date.now() / 1000,
-        originalSubtitle: this.currentSubtitle.original || this.currentSubtitle.text,
-        voteType: 'upvote',
-        translationID: this.currentSubtitle.translationID || null,
-        slotKey: this.currentSubtitle.slotKey || null
-      };
 
-      const result = await this.voteBridge.enqueue(voteParams);
+    const currentMyVote = this.currentSubtitle.myVote || null;
+    const translationID = this.currentSubtitle.translationID;
 
-      if (result && result.itemId) {
-        this.showToast('點讚已加入隊列', 'success');
-        this.log('投票已加入隊列:', result);
+    // like/dislike→none cancels; opposite/null→vote switches or adds
+    let nextVoteState;
+    let likeDelta = 0;
+    let dislikeDelta = 0;
+
+    if (currentMyVote === voteType) {
+      nextVoteState = 'none';
+      if (isLike) {
+        likeDelta = -1;
       } else {
-        this.showToast('點讚失敗', 'error');
+        dislikeDelta = -1;
+      }
+    } else {
+      nextVoteState = voteType;
+      if (isLike) {
+        likeDelta = 1;
+        if (currentMyVote === 'dislike') {
+          dislikeDelta = -1;
+        }
+      } else {
+        dislikeDelta = 1;
+        if (currentMyVote === 'like') {
+          likeDelta = -1;
+        }
+      }
+    }
+
+    const previousVoteState = currentMyVote;
+    const previousCounts = {
+      like: this.currentSubtitle.upvotes ?? 0,
+      dislike: this.currentSubtitle.downvotes ?? 0
+    };
+
+    const apiVoteType = isLike ? 'upvote' : 'downvote';
+
+    this.interactionPanel.setVotePending(true);
+
+    try {
+      if (translationID) {
+        // 僅對 translation-target 投票應用樂觀 UI，避免 legacy 投票（無 translationID）出現錯誤的取消/切換視覺回饋
+        this.currentSubtitle.myVote = nextVoteState === 'none' ? null : nextVoteState;
+        this.currentSubtitle.upvotes = Math.max(0, (this.currentSubtitle.upvotes ?? 0) + likeDelta);
+        this.currentSubtitle.downvotes = Math.max(0, (this.currentSubtitle.downvotes ?? 0) + dislikeDelta);
+
+        this.interactionPanel.setVoteCounts({
+          like: this.currentSubtitle.upvotes,
+          dislike: this.currentSubtitle.downvotes
+        });
+        this.interactionPanel.setVoteState(this.currentSubtitle.myVote);
+
+        const voteParams = {
+          videoId: this.currentSubtitle.videoId || 'unknown',
+          timestamp: this.currentSubtitle.timestamp ?? Date.now() / MS_PER_SECOND,
+          originalSubtitle: this.currentSubtitle.original || this.currentSubtitle.text,
+          voteType: apiVoteType,
+          translationID: translationID,
+          slotKey: this.currentSubtitle.slotKey || null,
+          voteState: nextVoteState,
+          previousVoteState: previousVoteState,
+          previousCounts: previousCounts
+        };
+
+        const result = await this.voteBridge.enqueue(voteParams);
+
+        if (result && result.itemId) {
+          this.showToast(`點${actionLabel}已加入隊列`, 'success');
+          this.log('投票已加入隊列:', result);
+        } else {
+          this.showToast(`點${actionLabel}失敗`, 'error');
+          this.revertOptimisticVote(previousVoteState, previousCounts);
+        }
+      } else {
+        const voteParams = {
+          videoId: this.currentSubtitle.videoId || 'unknown',
+          timestamp: this.currentSubtitle.timestamp ?? Date.now() / MS_PER_SECOND,
+          originalSubtitle: this.currentSubtitle.original || this.currentSubtitle.text,
+          voteType: apiVoteType,
+          translationID: null,
+          slotKey: this.currentSubtitle.slotKey || null
+        };
+
+        const result = await this.voteBridge.enqueue(voteParams);
+
+        if (result && result.itemId) {
+          this.showToast(`點${actionLabel}已加入隊列`, 'success');
+          this.log('投票已加入隊列:', result);
+        } else {
+          this.showToast(`點${actionLabel}失敗`, 'error');
+        }
       }
     } catch (error) {
-      console.error('處理點讚時出錯:', error);
-      this.showToast(`點讚失敗：${error.message}`, 'error');
+      console.error(`處理點${actionLabel}時出錯:`, error);
+      this.showToast(`點${actionLabel}失敗：${error.message}`, 'error');
+      if (translationID) {
+        this.revertOptimisticVote(previousVoteState, previousCounts);
+      }
+    } finally {
+      this.interactionPanel.setVotePending(false);
     }
   }
 
-  // 處理倒讚點擊
-  async handleDislikeClick() {
-    this.log('處理倒讚點擊');
+  async handleLikeClick() {
+    return this.handleVoteClick('like');
+  }
 
-    if (!this.currentSubtitle) {
-      console.error('沒有當前字幕數據');
-      return;
+  async handleDislikeClick() {
+    return this.handleVoteClick('dislike');
+  }
+
+  updateVoteDisplay(subtitleData) {
+    if (!this.interactionPanel || !this.interactionPanel.isInitialized) return;
+
+    const hasTranslationID = !!subtitleData.translationID;
+
+    if (hasTranslationID) {
+      this.interactionPanel.setVoteCounts({
+        like: subtitleData.upvotes ?? 0,
+        dislike: subtitleData.downvotes ?? 0
+      });
+      this.interactionPanel.setVoteState(subtitleData.myVote ?? null);
+    } else {
+      this.interactionPanel.setVoteCounts({ like: null, dislike: null });
+      this.interactionPanel.setVoteState(null);
     }
 
+    // 檢查是否有永久同步失敗需要還原
+    this.checkAndRevertPermanentFailures();
+  }
+
+  revertOptimisticVote(previousVoteState, previousCounts) {
+    if (!this.currentSubtitle) return;
+
+    this.currentSubtitle.myVote = previousVoteState;
+    this.currentSubtitle.upvotes = previousCounts.like;
+    this.currentSubtitle.downvotes = previousCounts.dislike;
+
+    this.interactionPanel.setVoteCounts({
+      like: previousCounts.like ?? 0,
+      dislike: previousCounts.dislike ?? 0
+    });
+    this.interactionPanel.setVoteState(previousVoteState);
+    this.interactionPanel.setVoteError('投票失敗，已還原');
+  }
+
+  async checkAndRevertPermanentFailures() {
+    if (!this.currentSubtitle || !this.currentSubtitle.translationID) return;
+
     try {
-      const voteParams = {
-        videoId: this.currentSubtitle.videoId || 'unknown',
-        timestamp: this.currentSubtitle.timestamp ?? Date.now() / 1000,
-        originalSubtitle: this.currentSubtitle.original || this.currentSubtitle.text,
-        voteType: 'downvote',
-        translationID: this.currentSubtitle.translationID || null,
-        slotKey: this.currentSubtitle.slotKey || null
-      };
+      const { voteQueue } = await chrome.storage.local.get('voteQueue');
+      if (!voteQueue || !Array.isArray(voteQueue)) return;
 
-      const result = await this.voteBridge.enqueue(voteParams);
+      const failedItem = voteQueue.find(item =>
+        item.translationID === this.currentSubtitle.translationID &&
+        item.status === 'failed' &&
+        item.errorMetadata?.isPermanent &&
+        item.previousVoteState !== undefined &&
+        item.previousCounts !== undefined
+      );
 
-      if (result && result.itemId) {
-        this.showToast('點倒讚已加入隊列', 'success');
-        this.log('投票已加入隊列:', result);
-      } else {
-        this.showToast('點倒讚失敗', 'error');
+      if (failedItem) {
+        this.log('檢測到永久同步失敗，還原樂觀 UI:', failedItem);
+        this.revertOptimisticVote(failedItem.previousVoteState, failedItem.previousCounts);
+        // 標記為已還原，避免重複觸發
+        failedItem.status = 'failed-reverted';
+        await chrome.storage.local.set({ voteQueue });
+        this.showToast('投票同步永久失敗，已還原狀態', 'error');
       }
     } catch (error) {
-      console.error('處理點倒讚時出錯:', error);
-      this.showToast(`點倒讚失敗：${error.message}`, 'error');
+      console.error('檢查永久同步失敗時出錯:', error);
     }
   }
 
@@ -1249,6 +1408,13 @@ class UIManager {
       this.subtitleReplacer = null;
     }
     
+    // 清除永久失敗檢查計時器，避免 interval leak
+    if (this._permanentFailureCheckInterval) {
+      clearInterval(this._permanentFailureCheckInterval);
+      this._permanentFailureCheckInterval = null;
+      this.log('永久失敗檢查計時器已清除');
+    }
+
     this.isInitialized = false;
     this.currentSubtitle = null;
     this.currentMode = null;

@@ -84,7 +84,7 @@ class SubPalApp {
   // 獲取應用狀態
   getStatus() {
     const initState = this.initializationManager.getInitializationState();
-    
+
     return {
       isInitialized: this.isInitialized,
       initializationState: initState,

@@ -145,6 +145,22 @@ async function triggerReplacementEventSync() {
 
 // ==================== Storage 變化監聽 ====================
 
+function hasQueueContentChanged(oldQueue, newQueue) {
+  if (!Array.isArray(oldQueue) || !Array.isArray(newQueue)) {
+    return true;
+  }
+  if (oldQueue.length !== newQueue.length) {
+    return true;
+  }
+  for (const newItem of newQueue) {
+    const oldItem = oldQueue.find(item => item.id === newItem.id);
+    if (!oldItem || newItem.updatedAt !== oldItem.updatedAt) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * 監聽 Chrome Storage 變化
  * 當有新項目加入隊列時觸發同步
@@ -156,11 +172,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
   // 投票隊列變化
   if (changes.voteQueue) {
-    const oldLength = changes.voteQueue.oldValue?.length || 0;
-    const newLength = changes.voteQueue.newValue?.length || 0;
+    const oldQueue = changes.voteQueue.oldValue || [];
+    const newQueue = changes.voteQueue.newValue || [];
 
-    if (newLength > oldLength) {
-      log(`voteQueue 長度變化: ${oldLength} → ${newLength}，觸發同步`);
+    if (hasQueueContentChanged(oldQueue, newQueue)) {
+      log(`voteQueue 內容變化，觸發同步`);
       debouncedTriggerSync(triggerVoteSync, 'vote');
     }
   }

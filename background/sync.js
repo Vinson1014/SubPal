@@ -13,6 +13,7 @@ const TRANSLATION_QUEUE_KEY = 'translationQueue';
 const TRANSLATION_HISTORY_KEY = 'translationHistory';
 const REPLACEMENT_EVENT_QUEUE_KEY = 'replacementEventQueue';
 const REPLACEMENT_EVENT_HISTORY_KEY = 'replacementEventHistory';
+const VOTE_STATE_BY_TRANSLATION_KEY = 'voteStateByTranslation';
 
 // 同步狀態標誌
 let isSyncingVotes = false;
@@ -263,13 +264,38 @@ async function syncPendingVotes() {
     for (const item of pendingItems) {
       try {
         await markItemAsSyncing(VOTE_QUEUE_KEY, item.id);
-        await sendVoteToAPI(item);
+        const result = await sendVoteToAPI(item);
+
+        // 如果有權威投票數據，先寫入隊列項目再移動到歷史記錄
+        if (result.data && result.data._authoritativeVoteState) {
+          await updateQueueItem(VOTE_QUEUE_KEY, item.id, {
+            authoritativeVoteState: result.data._authoritativeVoteState
+          });
+        }
+
         await moveToHistory(VOTE_QUEUE_KEY, item.id, VOTE_HISTORY_KEY);
         console.log(`[Sync] Vote ${item.id} synced successfully`);
       } catch (error) {
-        if (isDuplicateSubmissionError(error)) {
+        // 對於新 voteState API，不將 409 視為成功（idempotent PUT 不應返回 409）
+        // 僅對舊版 submitVote 路徑保留 409-as-completed 行為
+        if (isDuplicateSubmissionError(error) && !item.voteState) {
           await moveToHistory(VOTE_QUEUE_KEY, item.id, VOTE_HISTORY_KEY);
           console.warn(`[Sync] Vote ${item.id} already exists on backend (409), moved to history`);
+          continue;
+        }
+
+        // 檢查是否為永久錯誤（不應重試）
+        if (apiModule.isPermanentError(error)) {
+          const errorMetadata = {
+            code: error.code || null,
+            status: error.status || null,
+            message: error.message || 'Unknown error',
+            isPermanent: true,
+            failedAt: Date.now()
+          };
+          await updateItemStatus(VOTE_QUEUE_KEY, item.id, 'failed', error.message);
+          await updateQueueItem(VOTE_QUEUE_KEY, item.id, { errorMetadata });
+          console.error(`[Sync] Vote ${item.id} failed permanently: ${error.message}`);
           continue;
         }
 
@@ -386,21 +412,49 @@ async function retryFailedTranslations() {
  * @param {object} voteData - 投票數據
  */
 async function sendVoteToAPI(voteData) {
-  console.log('[Sync] Sending vote to API:', voteData.id);
-
   try {
-    // 直接調用 API 模組的 submitVote 函數
-    const result = await apiModule.submitVote({
-      videoID: voteData.videoId,
-      timestamp: voteData.timestamp,
-      voteType: voteData.voteType,
-      translationID: voteData.translationID || null,
-      originalSubtitle: voteData.originalSubtitle || null,
-      slotKey: voteData.slotKey || null
-    });
+    let result;
 
-    console.log('[Sync] Vote submitted successfully:', result);
-    return { success: true };
+    // 新投票狀態 API：使用 setVoteState 處理有 translationID 和 voteState 的項目
+    if (voteData.translationID && voteData.voteState) {
+      result = await apiModule.setVoteState({
+        translationID: voteData.translationID,
+        voteState: voteData.voteState,
+        clientVersion: voteData.clientVersion || null
+      });
+
+      // 儲存權威響應數據到 voteStateByTranslation
+      if (result && voteData.translationID) {
+        const voteStateRecord = {
+          myVote: result.myVote ?? null,
+          upvotes: result.upvotes ?? 0,
+          downvotes: result.downvotes ?? 0,
+          pending: false,
+          updatedAt: Date.now()
+        };
+
+        // 更新 storage map
+        const storageData = await chrome.storage.local.get(VOTE_STATE_BY_TRANSLATION_KEY);
+        const voteStateByTranslation = storageData[VOTE_STATE_BY_TRANSLATION_KEY] || {};
+        voteStateByTranslation[voteData.translationID] = voteStateRecord;
+        await chrome.storage.local.set({ [VOTE_STATE_BY_TRANSLATION_KEY]: voteStateByTranslation });
+
+        // 將權威數據附加到結果供歷史記錄使用
+        result._authoritativeVoteState = voteStateRecord;
+      }
+    } else {
+      // 舊版投票 API：使用 submitVote 處理 legacy 項目
+      result = await apiModule.submitVote({
+        videoID: voteData.videoId,
+        timestamp: voteData.timestamp,
+        voteType: voteData.voteType,
+        translationID: voteData.translationID || null,
+        originalSubtitle: voteData.originalSubtitle || null,
+        slotKey: voteData.slotKey || null
+      });
+    }
+
+    return { success: true, data: result };
   } catch (error) {
     console.error('[Sync] Error submitting vote:', error);
     throw error;

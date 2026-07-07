@@ -448,7 +448,10 @@ class SubtitleReplacer {
       suggestedSubtitle = '',
       translationID = null,
       contributorUserID = null,
-      isTestReplacement = false
+      isTestReplacement = false,
+      upvotes = 0,
+      downvotes = 0,
+      myVote = null
     } = replacementData;
     
     // 處理換行符號
@@ -458,13 +461,16 @@ class SubtitleReplacer {
     
     const result = {
       ...originalSubtitle,
-      text: suggestedSubtitle, // 更新純文本
-      htmlContent: `<span>${replacementHtml}</span>`, // 更新 HTML 內容
-      original: originalSubtitle.text, // 保留原始文本
+      text: suggestedSubtitle,
+      htmlContent: `<span>${replacementHtml}</span>`,
+      original: originalSubtitle.text,
       isReplaced: true,
       translationID: translationID,
       contributorUserID: contributorUserID,
       isTestReplacement: isTestReplacement,
+      upvotes: upvotes,
+      downvotes: downvotes,
+      myVote: myVote,
       replacementTime: Date.now()
     };
     

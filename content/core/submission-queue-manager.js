@@ -66,15 +66,17 @@ export class SubmissionQueueManager {
    * @param {string} data.videoId - 影片 ID
    * @param {number} data.timestamp - 字幕時間戳
    * @param {string} data.voteType - 投票類型 ('upvote' 或 'downvote')
-   * @param {string} [data.translationID] - 翻譯 ID（可選）
+   * @param {string} [data.translationID] - 翻譯 ID（可選，使用 voteState 時必填）
    * @param {string} [data.originalSubtitle] - 原始字幕（可選）
    * @param {string} [data.slotKey] - 字幕 slot 識別值（可選）
+   * @param {string} [data.voteState] - 投票狀態 ('like' | 'dislike' | 'none')（可選）
+   * @param {string} [data.previousVoteState] - 之前的投票狀態（可選）
+   * @param {Object} [data.previousCounts] - 之前的讚數/倒讚數（可選）
    * @returns {Promise<{itemId: string, message: string}>}
    */
   async enqueueVote(data) {
     this.log('enqueueVote 被調用:', data);
 
-    // 驗證必要參數
     if (!data.videoId || data.timestamp === undefined || data.timestamp === null || !data.voteType) {
       throw new Error('缺少必要參數: videoId, timestamp, voteType');
     }
@@ -83,7 +85,43 @@ export class SubmissionQueueManager {
       throw new Error('voteType 必須是 "upvote" 或 "downvote"');
     }
 
-    // 建立隊列項目
+    if (data.voteState !== undefined && !['like', 'dislike', 'none'].includes(data.voteState)) {
+      throw new Error('voteState 必須是 "like"、"dislike" 或 "none"');
+    }
+
+    if (data.voteState && !data.translationID) {
+      throw new Error('使用 voteState 時必須提供 translationID');
+    }
+
+    const queue = await this.storage.getQueue('vote');
+
+    if (data.translationID) {
+      const existingIndex = queue.findIndex(item =>
+        item.translationID === data.translationID &&
+        item.status === 'pending'
+      );
+
+      if (existingIndex !== -1) {
+        const existingItem = queue[existingIndex];
+        queue[existingIndex] = {
+          ...existingItem,
+          voteState: data.voteState,
+          // 保留第一次寫入的回滾基準，避免連續投票後失敗時回滾到錯誤狀態
+          previousVoteState: existingItem.previousVoteState ?? data.previousVoteState,
+          previousCounts: existingItem.previousCounts ?? data.previousCounts,
+          updatedAt: Date.now()
+        };
+
+        await this.storage.set({ voteQueue: queue });
+        this.log('投票已合併到現有隊列項目:', existingItem.id);
+
+        return {
+          itemId: existingItem.id,
+          message: '投票已更新到同步隊列'
+        };
+      }
+    }
+
     const item = {
       id: generateUUID(),
       videoId: data.videoId,
@@ -92,14 +130,17 @@ export class SubmissionQueueManager {
       translationID: data.translationID || null,
       originalSubtitle: data.originalSubtitle || null,
       slotKey: data.slotKey || null,
+      voteState: data.voteState || null,
+      previousVoteState: data.previousVoteState || null,
+      previousCounts: data.previousCounts || null,
       status: 'pending',
       createdAt: Date.now(),
+      updatedAt: Date.now(),
       syncedAt: null,
       retryCount: 0,
       error: null
     };
 
-    // 加入隊列
     await this.storage.appendToQueue('vote', item);
 
     this.log('投票已加入隊列:', item.id);

@@ -113,6 +113,24 @@ async function sendToAPI(url, body, method = 'POST') {
   }
 }
 
+async function sendToAPIWithAutoRefresh(url, body, method) {
+  try {
+    return await sendToAPI(url, body, method);
+  } catch (error) {
+    if (error.status === 401) {
+      console.log('[API Module] JWT expired, attempting refresh and retry...');
+      try {
+        await refreshJwtToken();
+        return await sendToAPI(url, body, method);
+      } catch (refreshError) {
+        console.error('[API Module] JWT refresh failed:', refreshError);
+        throw new Error('認證已過期且刷新失敗，請重新啟動擴展。');
+      }
+    }
+    throw error;
+  }
+}
+
 // ==================== 投票 API ====================
 
 /**
@@ -152,7 +170,37 @@ export async function submitVote(voteData) {
     console.warn("[API Module] Missing originalSubtitle for vote submission. API call might fail.");
   }
 
-  const response = await sendToAPI(url, body);
+  const response = await sendToAPIWithAutoRefresh(url, body);
+  return response.data || response;
+}
+
+/**
+ * 設定投票狀態（支援取消投票與切換投票）
+ * @param {Object} params - 投票狀態參數
+ * @param {string} params.translationID - 翻譯 ID（必填，非空字串）
+ * @param {string} params.voteState - 投票狀態：'like' | 'dislike' | 'none'
+ * @param {string} [params.clientVersion] - 前端版本（可選）
+ * @returns {Promise<Object>} - API 響應
+ * @throws {Error} - 參數驗證失敗或 API 錯誤
+ */
+export async function setVoteState({ translationID, voteState, clientVersion }) {
+  if (!translationID || typeof translationID !== 'string') {
+    throw new Error('Missing or invalid parameter: translationID must be a non-empty string');
+  }
+  if (!['like', 'dislike', 'none'].includes(voteState)) {
+    throw new Error("Missing or invalid parameter: voteState must be one of 'like', 'dislike', 'none'");
+  }
+
+  const apiBaseUrl = await getApiBaseUrl();
+  const url = `${apiBaseUrl}/votes/state`;
+  const body = {
+    translationID,
+    voteState
+  };
+  const resolvedClientVersion = clientVersion || getClientVersion();
+  if (resolvedClientVersion) body.clientVersion = resolvedClientVersion;
+
+  const response = await sendToAPIWithAutoRefresh(url, body, 'PUT');
   return response.data || response;
 }
 
@@ -193,7 +241,7 @@ export async function submitTranslation(translationData) {
   const resolvedClientVersion = clientVersion || getClientVersion();
   if (resolvedClientVersion) body.clientVersion = resolvedClientVersion;
 
-  const response = await sendToAPI(url, body);
+  const response = await sendToAPIWithAutoRefresh(url, body);
   return response.data || response;
 }
 
@@ -262,6 +310,7 @@ function parseSubtitlesResponse(response) {
       clientVersion: sub.clientVersion,
       upvotes: sub.upvotes,
       downvotes: sub.downvotes,
+      myVote: sub.myVote ?? null,
       status: sub.status
     }));
   } else {

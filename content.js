@@ -41,7 +41,7 @@
           debugMode = result.debugMode;
         }
       } catch (e) {
-        // 讀取失敗，使用預設值
+        console.warn('[Content Script] 讀取 debugMode 失敗，使用預設值:', e);
       }
 
       debugLog('開始初始化 ConfigManager...');
@@ -343,7 +343,7 @@
       let result;
 
       switch (type) {
-        // 投票消息
+        // 投票消息（支援 voteState 用於 translation-target 投票）
         case 'VOTE_ENQUEUE':
           result = await submissionQueueManager.enqueueVote(payload);
           break;

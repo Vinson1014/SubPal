@@ -346,6 +346,80 @@ class InteractionPanel {
     countElement.style.display = hasCount ? 'inline-block' : 'none';
   }
 
+  /**
+   * 設置投票狀態（讚/倒讚/無）
+   * @param {'like'|'dislike'|null} myVote - 當前投票狀態
+   */
+  setVoteState(myVote) {
+    const likeBtn = this.container?.querySelector('#subpal-like-btn');
+    const dislikeBtn = this.container?.querySelector('#subpal-dislike-btn');
+    if (!likeBtn || !dislikeBtn) {
+      this.log('setVoteState: 找不到投票按鈕');
+      return;
+    }
+
+    likeBtn.classList.remove('subpal-vote-active');
+    dislikeBtn.classList.remove('subpal-vote-active');
+    likeBtn.style.color = '';
+    dislikeBtn.style.color = '';
+
+    if (myVote === 'like') {
+      likeBtn.classList.add('subpal-vote-active');
+      likeBtn.style.color = '#34d399';
+    } else if (myVote === 'dislike') {
+      dislikeBtn.classList.add('subpal-vote-active');
+      dislikeBtn.style.color = '#f87171';
+    }
+
+    this.log('設置投票狀態:', myVote);
+  }
+
+  /**
+   * 設置投票等待狀態
+   * @param {boolean} isPending - 是否正在等待投票結果
+   */
+  setVotePending(isPending) {
+    const likeBtn = this.container?.querySelector('#subpal-like-btn');
+    const dislikeBtn = this.container?.querySelector('#subpal-dislike-btn');
+
+    if (isPending) {
+      if (likeBtn) likeBtn.style.opacity = '0.5';
+      if (dislikeBtn) dislikeBtn.style.opacity = '0.5';
+      if (likeBtn) likeBtn.style.pointerEvents = 'none';
+      if (dislikeBtn) dislikeBtn.style.pointerEvents = 'none';
+    } else {
+      if (likeBtn) likeBtn.style.opacity = '';
+      if (dislikeBtn) dislikeBtn.style.opacity = '';
+      if (likeBtn) likeBtn.style.pointerEvents = '';
+      if (dislikeBtn) dislikeBtn.style.pointerEvents = '';
+    }
+
+    this.log('設置投票等待狀態:', isPending);
+  }
+
+  /**
+   * 設置投票錯誤狀態
+   * @param {string|null} message - 錯誤訊息，null 表示清除錯誤
+   */
+  setVoteError(message) {
+    const likeBtn = this.container?.querySelector('#subpal-like-btn');
+    const dislikeBtn = this.container?.querySelector('#subpal-dislike-btn');
+
+    if (message) {
+      if (likeBtn) likeBtn.style.outline = '1px solid #f87171';
+      if (dislikeBtn) dislikeBtn.style.outline = '1px solid #f87171';
+      this.log('投票錯誤:', message);
+
+      setTimeout(() => {
+        if (likeBtn) likeBtn.style.outline = '';
+        if (dislikeBtn) dislikeBtn.style.outline = '';
+      }, 3000);
+    } else {
+      if (likeBtn) likeBtn.style.outline = '';
+      if (dislikeBtn) dislikeBtn.style.outline = '';
+    }
+  }
+
   // 查找現有按鈕（用於重用現有面板）
   findExistingButtons() {
     this.buttons.submit = this.container.querySelector('#subpal-submit-btn');

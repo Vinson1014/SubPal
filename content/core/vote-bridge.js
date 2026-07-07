@@ -52,16 +52,19 @@ export const voteBridge = {
    * @param {string} data.videoId - 影片 ID (必填)
    * @param {number} data.timestamp - 字幕時間戳 (必填)
    * @param {string} data.voteType - 投票類型 'upvote' | 'downvote' (必填)
-   * @param {string} [data.translationID] - 翻譯 ID (選填)
+   * @param {string} [data.translationID] - 翻譯 ID (選填，使用 voteState 時必填)
    * @param {string} [data.originalSubtitle] - 原始字幕 (選填)
    * @param {string} [data.slotKey] - 字幕 slot 識別值（選填）
+   * @param {string} [data.voteState] - 投票狀態 'like' | 'dislike' | 'none' (選填，用於 translation-target 投票)
+   * @param {string|null} [data.previousVoteState] - 前一次投票狀態 (用於樂觀更新回滾)
+   * @param {Object|null} [data.previousCounts] - 前一次計數 { like, dislike } (用於樂觀更新回滾)
    * @returns {Promise<Object>} - 返回 { itemId, message }
    */
   async enqueue(data) {
     this.log('enqueue 方法被調用，參數:', data);
 
     // 參數驗證
-    const { videoId, timestamp, voteType, translationID, originalSubtitle, slotKey } = data;
+    const { videoId, timestamp, voteType, translationID, originalSubtitle, slotKey, voteState, previousVoteState, previousCounts } = data;
 
     if (!videoId || typeof videoId !== 'string') {
       const error = new Error('缺少必要參數: videoId 必須是字符串');
@@ -81,6 +84,18 @@ export const voteBridge = {
       throw error;
     }
 
+    if (voteState !== undefined && !['like', 'dislike', 'none'].includes(voteState)) {
+      const error = new Error('voteState 必須是 "like"、"dislike" 或 "none"');
+      this.log('參數驗證失敗:', error.message);
+      throw error;
+    }
+
+    if (voteState && !translationID) {
+      const error = new Error('使用 voteState 時必須提供 translationID');
+      this.log('參數驗證失敗:', error.message);
+      throw error;
+    }
+
     try {
       this.log('發送 VOTE_ENQUEUE 消息到 content script');
       const response = await sendMessage({
@@ -91,7 +106,10 @@ export const voteBridge = {
           voteType,
           translationID: translationID || null,
           originalSubtitle: originalSubtitle || null,
-          slotKey: slotKey || null
+          slotKey: slotKey || null,
+          voteState: voteState || null,
+          previousVoteState: previousVoteState ?? null,
+          previousCounts: previousCounts ?? null
         }
       });
 
