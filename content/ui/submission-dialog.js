@@ -195,7 +195,18 @@ class SubmissionDialog {
     
     // 創建對話框內容
     this.dialog.innerHTML = `
-      <h3 style="margin-top: 0; margin-bottom: 18px; color: #222; font-size: 22px; font-weight: 600;">提交翻譯</h3>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0; margin-bottom: 18px;">
+        <h3 style="margin: 0; color: #222; font-size: 22px; font-weight: 600;">提交翻譯</h3>
+        <button id="submission-guidelines-toggle" type="button" aria-expanded="false" aria-controls="submission-guidelines-panel" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; background-color: #f5f5f5; color: #555; border: 1px solid #e0e0e0; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 500;"><span id="submission-guidelines-icon" aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border: 1.5px solid #777; border-radius: 50%; color: #777; font-size: 10px; line-height: 1; font-weight: 700; box-sizing: border-box;">?</span>提交規範</button>
+      </div>
+      <div id="submission-guidelines-panel" style="display: none; margin-bottom: 14px; padding: 10px 12px; background: #f9fafb; border: 1px solid #e0e0e0; border-radius: 5px; color: #555; font-size: 13px; line-height: 1.6;">
+        <p style="margin: 0 0 6px 0; font-weight: 600; color: #444;">翻譯提交規範</p>
+        <ul style="margin: 0; padding-left: 18px;">
+          <li>語句自然流暢，符合目標語言習慣。</li>
+          <li>保持前後文用語與語氣一致。</li>
+          <li>避免單句翻譯過長，可以分行但不要超過兩行。</li>
+        </ul>
+      </div>
       <div style="margin-bottom: 14px;">
         <label for="original-text" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">原始翻譯</label>
         <input id="original-text" type="text" value="${originalText.replace(/"/g, '&quot;')}" readonly
@@ -289,7 +300,8 @@ class SubmissionDialog {
     const handleFocusOut = (e) => {
       const clickedButton = e.relatedTarget && (
         e.relatedTarget.id === 'submit-translation' ||
-        e.relatedTarget.id === 'cancel-translation'
+        e.relatedTarget.id === 'cancel-translation' ||
+        e.relatedTarget.id === 'submission-guidelines-toggle'
       );
       
       if (!clickedButton && !this.dialog.contains(e.relatedTarget)) {
@@ -328,7 +340,8 @@ class SubmissionDialog {
       const clickedElement = e.target;
       const isButton = clickedElement.tagName === 'BUTTON' ||
                        clickedElement.id === 'submit-translation' ||
-                       clickedElement.id === 'cancel-translation';
+                       clickedElement.id === 'cancel-translation' ||
+                       clickedElement.id === 'submission-guidelines-toggle';
       
       if (!isButton) {
         e.stopPropagation();
@@ -347,7 +360,17 @@ class SubmissionDialog {
     submitButton.addEventListener('click', () => {
       this.handleSubmit();
     });
-    
+
+    // 提交規範面板切換
+    const guidelinesToggle = this.dialog.querySelector('#submission-guidelines-toggle');
+    const guidelinesPanel = this.dialog.querySelector('#submission-guidelines-panel');
+
+    guidelinesToggle.addEventListener('click', () => {
+      const isOpen = guidelinesPanel.style.display !== 'none';
+      guidelinesPanel.style.display = isOpen ? 'none' : 'block';
+      guidelinesToggle.setAttribute('aria-expanded', String(!isOpen));
+    });
+
     // 視窗大小變化處理
     const repositionWindow = () => {
       this.dialog.style.top = '50%';
