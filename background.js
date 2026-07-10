@@ -283,6 +283,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // 在 onMessage 中打印當前實例 ID
   console.log(`[Background] Message [${request.type}] received by SW Instance ID: ${serviceWorkerInstanceId}`, request, 'from:', sender.tab ? `Tab ${sender.tab.id}` : 'Popup/Options/Other');
 
+  if (request?.type === 'GET_CROWDSOURCING_TASKS') {
+    return handleRuntimeCrowdsourcingTasks(request, sender, sendResponse);
+  }
+
   // 只處理來自 popup 或選項頁面的消息 (sender.tab 為 undefined)
   if (sender.tab) {
     // 來自 content script 的消息應該通過 port 處理
@@ -488,6 +492,49 @@ async function handleCheckSubtitle(request, portSendResponse) {
   }
 }
 
+async function handleGetCrowdsourcingTasks(request, portSendResponse) {
+  const { videoID, languageCode, limit } = request;
+
+  if (!videoID || typeof videoID !== 'string' || !videoID.trim()) {
+    console.error('[Background] GET_CROWDSOURCING_TASKS error: Missing videoID');
+    portSendResponse({ success: false, error: '缺少或無效的 videoID' });
+    return;
+  }
+
+  try {
+    const data = await apiModule.fetchCrowdsourcingTasks({ videoID, languageCode, limit });
+    portSendResponse({ ...data, success: true });
+  } catch (error) {
+    console.error('[Background] Error fetching crowdsourcing tasks:', error);
+    portSendResponse({ success: false, error: `獲取眾包字幕任務失敗: ${error.message}` });
+  }
+}
+
+function isNetflixContentSender(sender) {
+  const senderUrl = sender?.url || sender?.tab?.url || '';
+  if (sender?.id && sender.id !== chrome.runtime.id) return false;
+  if (!sender?.tab?.id || !senderUrl) return false;
+
+  try {
+    const { hostname, protocol } = new URL(senderUrl);
+    return protocol === 'https:' && (hostname === 'netflix.com' || hostname.endsWith('.netflix.com'));
+  } catch (error) {
+    console.warn('[Background] Invalid sender URL for crowdsourcing tasks:', error.message);
+    return false;
+  }
+}
+
+function handleRuntimeCrowdsourcingTasks(request, sender, sendResponse) {
+  if (!isNetflixContentSender(sender)) {
+    console.warn('[Background] Unauthorized GET_CROWDSOURCING_TASKS sender');
+    sendResponse({ success: false, error: 'Unauthorized sender for GET_CROWDSOURCING_TASKS' });
+    return false;
+  }
+
+  handleGetCrowdsourcingTasks(request, sendResponse);
+  return true;
+}
+
 /**
  * 將訊息路由到對應模組 (通過 port)
  * @param {string} messageId - 消息 ID
@@ -523,7 +570,6 @@ function routeMessageToModulePort(messageId, request, port) {
     switch (moduleName) {
       case 'api':
         console.log('[Background] Handling in api module (port):', request.type);
-        // API 模組重構後，直接處理 CHECK_SUBTITLE 請求
         if (request.type === 'CHECK_SUBTITLE') {
           handleCheckSubtitle(request, portSendResponse);
         } else {

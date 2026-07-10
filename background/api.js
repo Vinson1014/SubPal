@@ -319,6 +319,38 @@ function parseSubtitlesResponse(response) {
   }
 }
 
+export async function fetchCrowdsourcingTasks({ videoID, languageCode, limit }) {
+  if (!videoID || typeof videoID !== 'string' || !videoID.trim()) {
+    throw new Error('Missing or invalid parameter: videoID must be a non-empty string');
+  }
+  const normalizedLanguageCode = typeof languageCode === 'string' ? languageCode.trim() : '';
+  if (normalizedLanguageCode.length < 2 || normalizedLanguageCode.length > 5) {
+    throw new Error('Missing or invalid parameter: languageCode must be 2-5 characters');
+  }
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 20)) {
+    throw new Error('Missing or invalid parameter: limit must be an integer from 1 to 20');
+  }
+
+  const apiBaseUrl = await getApiBaseUrl();
+  const query = new URLSearchParams({
+    videoID: videoID.trim(),
+    languageCode: normalizedLanguageCode
+  });
+  if (limit !== undefined) query.set('limit', String(limit));
+
+  const response = await sendToAPIWithAutoRefresh(`${apiBaseUrl}/crowdsourcing-tasks?${query.toString()}`, null, 'GET');
+  if (response && response.success === true && Array.isArray(response.data?.tasks)) {
+    return response.data;
+  }
+
+  console.error('[API Module] Crowdsourcing tasks response invalid:', {
+    success: response?.success,
+    hasData: Boolean(response?.data),
+    tasksIsArray: Array.isArray(response?.data?.tasks)
+  });
+  throw new Error(response?.error || 'API 回傳失敗或眾包任務數據格式不正確');
+}
+
 // ==================== 用戶 API ====================
 
 /**
