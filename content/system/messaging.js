@@ -238,19 +238,41 @@ export async function initMessaging() {
  * 註冊僅在內容腳本層面處理的內部事件處理器，支持多個處理函數
  * @param {string} type - 事件類型
  * @param {Function} handler - 處理函數
+ * @returns {Function} 取消訂閱函數
  */
 export function registerInternalEventHandler(type, handler) {
   if (!type || typeof handler !== 'function') {
     console.error('registerInternalEventHandler 參數錯誤', type, handler);
-    return;
+    return () => {};
   }
+
   let handlers = internalEventHandlers.get(type);
   if (!handlers) {
     handlers = [];
     internalEventHandlers.set(type, handlers);
   }
+
   handlers.push(handler);
   debugLog('註冊內部事件處理器', type, '總數:', handlers.length);
+
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+
+    const currentHandlers = internalEventHandlers.get(type);
+    if (!currentHandlers) return;
+
+    const index = currentHandlers.indexOf(handler);
+    if (index !== -1) {
+      currentHandlers.splice(index, 1);
+      debugLog('取消註冊內部事件處理器', type, '總數:', currentHandlers.length);
+    }
+
+    if (currentHandlers.length === 0) {
+      internalEventHandlers.delete(type);
+    }
+  };
 }
 
 /**
@@ -561,4 +583,3 @@ export function requestPageScriptInjection() {
       .catch(reject);
   });
 }
-
