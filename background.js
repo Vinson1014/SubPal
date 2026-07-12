@@ -545,6 +545,7 @@ function routeMessageToModulePort(messageId, request, port) {
   // 定義訊息類型到模組的映射
   const moduleMapping = {
     'CHECK_SUBTITLE': 'api',
+    'GET_CROWDSOURCING_TASKS': 'api',
     'SYNC_DATA': 'sync',
     'GET_SYNC_STATUS': 'sync',
     'TRIGGER_VOTE_SYNC': 'sync',
@@ -572,6 +573,8 @@ function routeMessageToModulePort(messageId, request, port) {
         console.log('[Background] Handling in api module (port):', request.type);
         if (request.type === 'CHECK_SUBTITLE') {
           handleCheckSubtitle(request, portSendResponse);
+        } else if (request.type === 'GET_CROWDSOURCING_TASKS') {
+          handleGetCrowdsourcingTasks(request, portSendResponse);
         } else {
           console.error('[Background] Unhandled API request type:', request.type);
           portSendResponse({ success: false, error: `Unhandled API request type: ${request.type}` });
