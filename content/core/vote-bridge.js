@@ -98,19 +98,24 @@ export const voteBridge = {
 
     try {
       this.log('發送 VOTE_ENQUEUE 消息到 content script');
+      const payload = {
+        videoId,
+        timestamp,
+        voteType,
+        translationID: translationID || null,
+        originalSubtitle: originalSubtitle || null,
+        slotKey: slotKey || null,
+        previousVoteState: previousVoteState ?? null,
+        previousCounts: previousCounts ?? null
+      };
+
+      if (voteState !== undefined) {
+        payload.voteState = voteState;
+      }
+
       const response = await sendMessage({
         type: 'VOTE_ENQUEUE',
-        payload: {
-          videoId,
-          timestamp,
-          voteType,
-          translationID: translationID || null,
-          originalSubtitle: originalSubtitle || null,
-          slotKey: slotKey || null,
-          voteState: voteState || null,
-          previousVoteState: previousVoteState ?? null,
-          previousCounts: previousCounts ?? null
-        }
+        payload
       });
 
       this.log('VOTE_ENQUEUE 響應:', response);
