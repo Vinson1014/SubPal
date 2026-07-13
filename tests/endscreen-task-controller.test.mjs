@@ -155,6 +155,34 @@ test('Given a task request is pending When VIDEO_ID_CHANGED makes its context st
   assert.deepEqual(taskBatches, []);
 });
 
+test('Given a task request is pending When the endscreen becomes inactive Then its late result is not published and the context remains once-finished', async () => {
+  let resolveRequest;
+  let requestCount = 0;
+  const pendingRequest = new Promise((resolve) => { resolveRequest = resolve; });
+  const { controller, scheduler, taskBatches } = createController(EndscreenTaskController, {
+    sendMessage: async () => {
+      requestCount += 1;
+      return await pendingRequest;
+    }
+  });
+
+  controller.observe(state2CreditsObservation(createContext(), { snapshot: { currentTime: 1111.25, duration: 2222.5, state: 'playing' } }));
+  controller.observe(state2CreditsObservation(createContext(), { snapshot: { currentTime: 1111.25, duration: 2222.5, state: 'playing' } }));
+  scheduler.advance(500);
+  controller.handleInternalEvent({ type: 'ENDSCREEN_INACTIVE' });
+  resolveRequest({ tasks: [{ taskID: 'stale-after-resume' }] });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(taskBatches, []);
+  controller.observe(state2CreditsObservation(createContext(), { snapshot: { currentTime: 1111.25, duration: 2222.5, state: 'playing' } }));
+  controller.observe(state2CreditsObservation(createContext(), { snapshot: { currentTime: 1111.25, duration: 2222.5, state: 'playing' } }));
+  scheduler.advance(500);
+  await Promise.resolve();
+
+  assert.equal(requestCount, 1, 'inactive signal 不應清除 once-per-context 完成狀態');
+});
+
 test('Given active media with promoted-preview evidence When it is confirmed twice Then it requests recommendation preview tasks', async () => {
   const { controller, scheduler, sentMessages } = createController(EndscreenTaskController);
 

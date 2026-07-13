@@ -60,6 +60,11 @@ class EndscreenTaskController {
   }
 
   handleInternalEvent(event) {
+    if (event?.type === 'ENDSCREEN_INACTIVE') {
+      this.contextGeneration += 1;
+      this.pendingConfirmation = null;
+      return;
+    }
     if (event?.type !== 'VIDEO_ID_CHANGED') return;
     this.contextGeneration += 1;
     this.pendingConfirmation = null;
