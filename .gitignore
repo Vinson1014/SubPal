@@ -29,6 +29,8 @@ desktop.ini
 *.log
 *.tmp
 *.bak
+.playwright-mcp/
+scripts/start-chrome-cdp.ps1
 node_modules/
 
 # 打包輸出
