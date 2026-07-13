@@ -159,8 +159,8 @@ export async function waitForResponse(sentMessages, messageId) {
 export function netflixSender(overrides = {}) {
   return {
     id: 'subpal-extension-id',
-    tab: { id: 7, url: 'https://www.netflix.com/watch/81234567' },
-    url: 'https://www.netflix.com/watch/81234567',
+    tab: { id: 7, url: 'https://www.netflix.com/watch/82147770' },
+    url: 'https://www.netflix.com/watch/82147770',
     ...overrides
   };
 }
@@ -170,6 +170,94 @@ export async function sendRuntimeMessage(background, request, sender) {
     const keepChannelOpen = background.sendRuntimeMessage(request, sender, resolve);
     if (keepChannelOpen !== true) setTimeout(() => resolve(undefined), 0);
   });
+}
+
+export async function loadRealContentTransport(background, sender = netflixSender()) {
+  class TestCustomEvent extends Event {
+    constructor(type, options = {}) {
+      super(type);
+      this.detail = options.detail;
+    }
+  }
+
+  const window = new EventTarget();
+  const portMessages = [];
+  const runtimeMessages = [];
+  const portMessageListeners = [];
+  const port = {
+    name: 'subtitle-assistant-channel',
+    sender,
+    postMessage(message) {
+      portMessages.push(message);
+      backgroundPortListener(message);
+    },
+    disconnect() {},
+    onDisconnect: { addListener() {} },
+    onMessage: { addListener(listener) { portMessageListeners.push(listener); } }
+  };
+  let backgroundPortListener = null;
+  const connectedPort = createPort();
+  connectedPort.port.sender = sender;
+  connectedPort.port.postMessage = (message) => {
+    for (const listener of portMessageListeners) listener(message);
+  };
+  background.connect(connectedPort.port);
+  backgroundPortListener = connectedPort.send;
+
+  const context = vm.createContext({
+    AbortController,
+    clearTimeout,
+    console,
+    crypto,
+    CustomEvent: TestCustomEvent,
+    document: {
+      createElement() { return {}; },
+      documentElement: { appendChild() {} },
+      head: { appendChild() {} }
+    },
+    Event,
+    EventTarget,
+    Math,
+    setTimeout,
+    window,
+    chrome: {
+      runtime: {
+        connect() { return port; },
+        getURL(path) { return `chrome-extension://test/${path}`; },
+        sendMessage(message, callback) {
+          runtimeMessages.push(message);
+          const keepOpen = background.sendRuntimeMessage(message, sender, callback);
+          if (keepOpen !== true && callback) setTimeout(() => callback(undefined), 0);
+        }
+      },
+      storage: { local: { async get() { return {}; } } }
+    }
+  });
+  const contentSource = await readFile(new URL('../content.js', import.meta.url), 'utf8');
+  new vm.Script(contentSource, { filename: 'content.js' }).runInContext(context);
+  const messagingSource = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
+  const messagingModule = new vm.SourceTextModule(messagingSource, { context, identifier: 'content/system/messaging.js' });
+  await messagingModule.link(() => { throw new Error('messaging.js should not import dependencies'); });
+  await messagingModule.evaluate();
+  const controllerSource = await readFile(new URL('../content/core/endscreen-task-controller.js', import.meta.url), 'utf8');
+  const controllerModule = new vm.SourceTextModule(controllerSource, { context, identifier: 'content/core/endscreen-task-controller.js' });
+  await controllerModule.link(() => { throw new Error('endscreen-task-controller.js should not import dependencies'); });
+  await controllerModule.evaluate();
+  const taskClientSource = await readFile(new URL('../content/system/crowdsourcing-task-client.js', import.meta.url), 'utf8');
+  const taskClientModule = new vm.SourceTextModule(taskClientSource, { context, identifier: 'content/system/crowdsourcing-task-client.js' });
+  await taskClientModule.link(() => { throw new Error('crowdsourcing-task-client.js should not import dependencies'); });
+  await taskClientModule.evaluate();
+
+  return {
+    EndscreenTaskController: controllerModule.namespace.EndscreenTaskController,
+    sendMessage: taskClientModule.namespace.requestCrowdsourcingTasks,
+    portMessages,
+    runtimeMessages,
+    window,
+    dispatchPublicEvent(type, detail) {
+      window.dispatchEvent(new TestCustomEvent(type, { detail }));
+    }
+  };
 }
 
 export function plain(value) {

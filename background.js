@@ -511,8 +511,8 @@ async function handleGetCrowdsourcingTasks(request, portSendResponse) {
 }
 
 function isNetflixContentSender(sender) {
-  const senderUrl = sender?.url || sender?.tab?.url || '';
-  if (sender?.id && sender.id !== chrome.runtime.id) return false;
+  const senderUrl = sender?.tab?.url || '';
+  if (sender?.id !== chrome.runtime.id) return false;
   if (!sender?.tab?.id || !senderUrl) return false;
 
   try {
@@ -531,6 +531,26 @@ function handleRuntimeCrowdsourcingTasks(request, sender, sendResponse) {
     return false;
   }
 
+  const senderUrl = sender.tab.url;
+  const senderVideoMatch = new URL(senderUrl).pathname.match(/^\/watch\/(\d+)(?:\/|$)/);
+  const senderVideoID = senderVideoMatch ? senderVideoMatch[1] : null;
+  const supportedLanguages = new Set([
+    'zh-TW', 'zh-CN', 'en', 'ja', 'ko', 'es', 'fr', 'de', 'it', 'pt', 'ru',
+    'ar', 'th', 'vi', 'id', 'ms', 'hi', 'tr', 'nl', 'pl', 'sv'
+  ]);
+  if (!senderVideoID || request.videoID !== senderVideoID) {
+    sendResponse({ success: false, error: 'videoID does not match sender watch URL' });
+    return false;
+  }
+  if (request.limit !== 5) {
+    sendResponse({ success: false, error: 'limit must equal 5' });
+    return false;
+  }
+  if (!supportedLanguages.has(request.languageCode)) {
+    sendResponse({ success: false, error: 'Unsupported languageCode' });
+    return false;
+  }
+
   handleGetCrowdsourcingTasks(request, sendResponse);
   return true;
 }
@@ -545,7 +565,6 @@ function routeMessageToModulePort(messageId, request, port) {
   // 定義訊息類型到模組的映射
   const moduleMapping = {
     'CHECK_SUBTITLE': 'api',
-    'GET_CROWDSOURCING_TASKS': 'api',
     'SYNC_DATA': 'sync',
     'GET_SYNC_STATUS': 'sync',
     'TRIGGER_VOTE_SYNC': 'sync',
@@ -573,8 +592,6 @@ function routeMessageToModulePort(messageId, request, port) {
         console.log('[Background] Handling in api module (port):', request.type);
         if (request.type === 'CHECK_SUBTITLE') {
           handleCheckSubtitle(request, portSendResponse);
-        } else if (request.type === 'GET_CROWDSOURCING_TASKS') {
-          handleGetCrowdsourcingTasks(request, portSendResponse);
         } else {
           console.error('[Background] Unhandled API request type:', request.type);
           portSendResponse({ success: false, error: `Unhandled API request type: ${request.type}` });
