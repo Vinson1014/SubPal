@@ -60,6 +60,10 @@ class UIManager {
       onUIReady: null,
       onError: null
     };
+    this.internalEventDisposers = [];
+    this._componentReinitializationPromise = null;
+    this._componentGeneration = 0;
+    this._pendingVideoChangeEvent = null;
     
     // 調試模式（將由 ConfigBridge 設置）
     this.debug = false;
@@ -140,10 +144,14 @@ class UIManager {
 
   // 統一的字幕顯示接口
   async showSubtitle(subtitleData) {
-    if (!this.isInitialized) {
+    if (this._componentReinitializationPromise || !this.isInitialized) {
+      if (this._componentReinitializationPromise) {
+        return;
+      }
       console.error('UI 管理器未初始化');
       return;
     }
+    const componentGeneration = this._componentGeneration;
 
     this.syncNativeSubtitleVisibilityForSubtitle(subtitleData, 'show-subtitle');
     
@@ -160,6 +168,10 @@ class UIManager {
             subtitleData.videoId || 'unknown', 
             subtitleData.timestamp ?? Date.now() / MS_PER_SECOND
           );
+
+          if (componentGeneration !== this._componentGeneration || !this.isInitialized) {
+            return;
+          }
           
           // 防禦性檢查：如果已顯示更新的字幕，跳過這次過時的更新
           if (this.currentSubtitle && this.currentSubtitle.timestamp > subtitleData.timestamp) {
@@ -176,6 +188,9 @@ class UIManager {
           }
         } catch (error) {
           console.error('字幕替換處理失敗:', error);
+          if (componentGeneration !== this._componentGeneration || !this.isInitialized) {
+            return;
+          }
         }
       }
       
@@ -208,6 +223,9 @@ class UIManager {
           const { voteStateByTranslation, voteQueue } = await chrome.storage.local.get([
             'voteStateByTranslation', 'voteQueue'
           ]);
+          if (componentGeneration !== this._componentGeneration || !this.isInitialized) {
+            return;
+          }
           const authoritative = voteStateByTranslation?.[processedSubtitle.translationID];
           const hasPendingVote = voteQueue?.some(item =>
             item.translationID === processedSubtitle.translationID &&
@@ -227,6 +245,9 @@ class UIManager {
           }
         } catch (e) {
           console.warn('讀取權威投票數據失敗:', e);
+          if (componentGeneration !== this._componentGeneration || !this.isInitialized) {
+            return;
+          }
         }
       }
 
@@ -251,7 +272,7 @@ class UIManager {
     if (!this.isInitialized) {
       return;
     }
-    
+
     this.log('隱藏字幕');
     this.currentSubtitle = null;
     
@@ -308,7 +329,7 @@ class UIManager {
     if (!oldPosition || !newPosition) {
       return true; // 任一位置為空視為變化
     }
-    
+
     const threshold = 5; // 5 像素以內的變化忽略
 
     // 檢查 displayAlign 是否有變化（處理可能為空的情況）
@@ -412,18 +433,29 @@ class UIManager {
     // 如果交互面板可見，同步更新其位置
     if (this.interactionPanel && this.currentSubtitle) {
       this.log('同步更新交互面板位置');
+      const componentGeneration = this._componentGeneration;
+      const interactionPanel = this.interactionPanel;
+      const subtitleSnapshot = {
+        ...this.currentSubtitle,
+        position: { ...this.currentSubtitle.position }
+      };
       
       // 延遲一點時間，確保字幕容器的 transform 動畫開始
       setTimeout(() => {
+        if (componentGeneration !== this._componentGeneration ||
+            this.interactionPanel !== interactionPanel) {
+          return;
+        }
+
         // 更新字幕位置資訊
         const newSubtitleData = {
-          ...this.currentSubtitle,
+          ...subtitleSnapshot,
           position: {
-            ...this.currentSubtitle.position,
-            top: this.currentSubtitle.position.top + offset
+            ...subtitleSnapshot.position,
+            top: subtitleSnapshot.position.top + offset
           }
         };
-        this.interactionPanel.updatePosition(newSubtitleData);
+        interactionPanel.updatePosition(newSubtitleData);
         this.log('延遲更新交互面板位置');
       }, 250); // 250ms 延遲，讓 CSS transition 開始
     }
@@ -431,85 +463,88 @@ class UIManager {
 
   // 設置事件處理器
   setupEventHandlers() {
-    registerInternalEventHandler('SUBTITLE_READINESS_CHANGED', (event) => {
+    this.disposeInternalEventHandlers();
+
+    this.internalEventDisposers.push(registerInternalEventHandler('SUBTITLE_READINESS_CHANGED', (event) => {
       this.syncNativeSubtitleVisibility(event.readiness?.renderReadiness, event.reason || 'subtitle-readiness-changed');
       this.handleFallbackNotification(event);
-    });
+    }));
 
     // 監聽 primary discovery DOM sample 檢測事件
-    registerInternalEventHandler('PRIMARY_DISCOVERY_DOM_SAMPLE_DETECTED', (event) => {
+    this.internalEventDisposers.push(registerInternalEventHandler('PRIMARY_DISCOVERY_DOM_SAMPLE_DETECTED', (event) => {
       this.handleDomSampleDetected(event);
-    });
+    }));
 
-    // 監聽影片切換事件 - 統一重新初始化所有UI組件
-    registerInternalEventHandler('VIDEO_ID_CHANGED', async (event) => {
+    this.internalEventDisposers.push(registerInternalEventHandler('VIDEO_ID_CHANGED', (event) => {
       this.log(`🎬 檢測到影片切換: ${event.oldVideoId} -> ${event.newVideoId}`);
+      this.reinitializeVideoComponents(event).catch((error) => {
+        console.error('❌ 影片切換UI重新初始化失敗:', error);
+        this.handleReinitializationError(error);
+      });
+    }));
 
-      // 清除備援通知計時器與狀態
+  }
+
+  reinitializeVideoComponents(event) {
+    this._pendingVideoChangeEvent = event;
+    if (this._componentReinitializationPromise) {
+      return this._componentReinitializationPromise;
+    }
+
+    const generation = ++this._componentGeneration;
+    this._componentReinitializationPromise = Promise.resolve().then(async () => {
+      this.isInitialized = false;
       this.clearRecoveryNotificationTimers();
       this.recoveryNotificationState = null;
       this._pendingRecoveryIsTransition = false;
+      this.showNativeSubtitles('video-id-changing');
+      this.acquisitionToastKeys.clear();
+      this.cleanupVideoComponents();
 
-      // 判斷是否為有效的新舊影片轉場
-      const isValidVideoTransition = event.oldVideoId && event.oldVideoId !== 'unknown' &&
-                                     event.newVideoId && event.newVideoId !== 'unknown';
-
-      try {
-        this.showNativeSubtitles('video-id-changing');
-        this.acquisitionToastKeys.clear();
-
-        // 1. 清理所有UI組件
-        this.cleanup();
-        this.log('✅ UI組件清理完成');
-        
-        // 2. 檢查新的 videoID 是否有效
-        if (event.newVideoId === 'unknown') {
-          this.log('用戶離開播放頁面，UI已清理，等待重新進入播放頁面');
-          this.isInitialized = false;
-          return; // 不重新初始化，等待用戶重新進入播放頁面
-        }
-        
-        // 3. 如果是有效videoID，直接重新初始化
-        this.log('🔄 開始UI重新初始化...');
-        await this.initializeComponents();
-        this.log('✅ UI組件重新初始化完成');
-        
-        // 4. 重新設置組件間關聯
-        this.setupComponentInteractions();
-        this.log('✅ 組件關聯重新設置完成');
-        
-        // 5. 新影片 primary TTML 尚未 ready 前，保留 Netflix 原生字幕。
-        this.showNativeSubtitles('video-id-changed-primary-not-ready');
-
-        // 6. 通知依賴 UI 元件的管理器重新同步狀態。
-        // 影片切換會重建 SubtitleDisplay，樣式管理器需重新把使用者設定注入新容器。
-        dispatchInternalEvent({
-          type: 'UI_COMPONENTS_REINITIALIZED',
-          reason: 'VIDEO_ID_CHANGED',
-          oldVideoId: event.oldVideoId,
-          newVideoId: event.newVideoId,
-          timestamp: Date.now()
-        });
-        
-        this.isInitialized = true;
-
-        // ★ 有效影片轉場標記：下次 SUBTITLE_READINESS_CHANGED 收到新的 valid context 時
-        // 使用轉場備援文案（3 秒），而非初始載入文案（8 秒）
-        if (isValidVideoTransition) {
-          this._pendingRecoveryIsTransition = true;
-        }
-
-        this.log('🎉 影片切換UI重新初始化完成！');
-        
-      } catch (error) {
-        console.error('❌ 影片切換UI重新初始化失敗:', error);
-        // 如果重新初始化失敗，嘗試恢復基本狀態
-        this.handleReinitializationError(error);
+      if (this._pendingVideoChangeEvent.newVideoId === 'unknown') {
+        return;
       }
+
+      await this.initializeComponents();
+      if (generation !== this._componentGeneration) {
+        this.cleanupVideoComponents();
+        return;
+      }
+
+      this.setupComponentInteractions();
+      this.showNativeSubtitles('video-id-changed-primary-not-ready');
+      this.isInitialized = true;
+
+      const completedEvent = this._pendingVideoChangeEvent;
+      if (completedEvent.oldVideoId && completedEvent.oldVideoId !== 'unknown' &&
+          completedEvent.newVideoId && completedEvent.newVideoId !== 'unknown') {
+        this._pendingRecoveryIsTransition = true;
+      }
+
+      dispatchInternalEvent({
+        type: 'UI_COMPONENTS_REINITIALIZED',
+        reason: 'VIDEO_ID_CHANGED',
+        oldVideoId: completedEvent.oldVideoId,
+        newVideoId: completedEvent.newVideoId,
+        timestamp: Date.now()
+      });
+      this.log('🎉 影片切換UI重新初始化完成！');
+    }).finally(() => {
+      if (generation === this._componentGeneration) {
+        this._pendingVideoChangeEvent = null;
+      }
+      this._componentReinitializationPromise = null;
     });
+
+    return this._componentReinitializationPromise;
   }
 
-  // 初始化所有UI組件
+  disposeInternalEventHandlers() {
+    for (const dispose of this.internalEventDisposers) {
+      dispose();
+    }
+    this.internalEventDisposers = [];
+  }
   async initializeComponents() {
     this.log('初始化所有UI組件...');
     
@@ -1363,8 +1398,7 @@ class UIManager {
     // 清理備援通知計時器與轉場標記
     this.resetRecoveryNotificationState();
 
-    // 清理懸停事件
-    this.clearSubtitleHoverEvents();
+    this.disposeInternalEventHandlers();
     
     // 清理播放器監聽器
     if (this.playerObserver) {
@@ -1373,6 +1407,34 @@ class UIManager {
       this.log('播放器監聽器已清理');
     }
     
+    this.cleanupVideoComponents();
+
+    if (this.subtitleReplacer) {
+      this.subtitleReplacer.cleanup();
+      this.subtitleReplacer = null;
+    }
+
+    // 清除永久失敗檢查計時器，避免 interval leak
+    if (this._permanentFailureCheckInterval) {
+      clearInterval(this._permanentFailureCheckInterval);
+      this._permanentFailureCheckInterval = null;
+      this.log('永久失敗檢查計時器已清除');
+    }
+
+    this._componentGeneration += 1;
+    this._pendingVideoChangeEvent = null;
+    this.isInitialized = false;
+    this.currentSubtitle = null;
+    this.currentMode = null;
+    this.acquisitionToastKeys.clear();
+    this.eventCallbacks = {};
+
+    this.log('UI 管理器資源清理完成');
+  }
+
+  cleanupVideoComponents() {
+    this.clearSubtitleHoverEvents();
+
     if (this.subtitleDisplay) {
       this.subtitleDisplay.cleanup();
       this.subtitleDisplay = null;
@@ -1402,26 +1464,8 @@ class UIManager {
       this.toastManager.cleanup();
       this.toastManager = null;
     }
-    
-    if (this.subtitleReplacer) {
-      this.subtitleReplacer.cleanup();
-      this.subtitleReplacer = null;
-    }
-    
-    // 清除永久失敗檢查計時器，避免 interval leak
-    if (this._permanentFailureCheckInterval) {
-      clearInterval(this._permanentFailureCheckInterval);
-      this._permanentFailureCheckInterval = null;
-      this.log('永久失敗檢查計時器已清除');
-    }
-
-    this.isInitialized = false;
     this.currentSubtitle = null;
     this.currentMode = null;
-    this.acquisitionToastKeys.clear();
-    this.eventCallbacks = {};
-    
-    this.log('UI 管理器資源清理完成');
   }
 
   // 恢復原生字幕（移除隱藏CSS）
