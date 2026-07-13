@@ -116,20 +116,23 @@
     }
   }
 
-  // 注入 page context script (content/index.js)
+  // 透過 DOM 注入，讓主模組在 MAIN world 執行並共享 page script handshake。
   function injectPageContextScript() {
     try {
-      debugLog('注入 page context script (content/index.js)...');
       const script = document.createElement('script');
       script.type = 'module';
       script.src = chrome.runtime.getURL('content/index.js');
-      script.onload = () => debugLog('Page context script (content/index.js) loaded.');
-      script.onerror = (err) => console.error('[Content Script] Failed to load page context script (content/index.js):', err);
+      script.onload = () => script.remove();
       (document.head || document.documentElement).appendChild(script);
-      debugLog('Page context script injected.');
+      debugLog('MAIN world 主模組注入完成。');
     } catch (e) {
-      console.error('[Content Script] Error injecting page context script:', e);
+      console.error('[Content Script] Error injecting MAIN world main module:', e);
     }
+  }
+
+  async function initializeIsolatedEndscreenTasks() {
+    const { startIsolatedEndscreenTasks } = await import(chrome.runtime.getURL('content/system/isolated-endscreen-tasks.js'));
+    await startIsolatedEndscreenTasks(configManager);
   }
 
   // 處理配置相關訊息
@@ -474,6 +477,8 @@
     const { messageId, message } = event.detail;
     debugLog('Received from page:', messageId, message);
 
+    if (message?.type === 'GET_CROWDSOURCING_TASKS') return;
+
     // 檢查是否為配置相關訊息（由 content script 處理，不轉發到 background）
     const configMessages = ['CONFIG_GET_ALL', 'CONFIG_GET', 'CONFIG_SET', 'CONFIG_SET_MULTIPLE'];
 
@@ -593,6 +598,12 @@
       }
 
       debugLog('All managers initialized.');
+
+      try {
+        await initializeIsolatedEndscreenTasks();
+      } catch (error) {
+        console.warn('[Content Script] 片尾任務模組初始化失敗:', error);
+      }
 
       // ConfigManager 初始化完成後，立即注入 page context script
       injectPageContextScript();
