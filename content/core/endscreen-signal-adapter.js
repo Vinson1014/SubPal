@@ -1,7 +1,8 @@
 class EndscreenSignalAdapter {
-  constructor({ document, Observer, schedule, cancel, getContext, controller }) {
+  constructor({ document, Observer, schedule, cancel, getContext, controller, onInactive }) {
     if (!document || typeof Observer !== 'function' || typeof schedule !== 'function' || typeof cancel !== 'function' || typeof getContext !== 'function' ||
-      typeof controller?.observe !== 'function' || typeof controller.dismiss !== 'function') {
+      typeof controller?.observe !== 'function' || typeof controller.dismiss !== 'function' ||
+      (onInactive !== undefined && typeof onInactive !== 'function')) {
       throw new TypeError('EndscreenSignalAdapter requires injected dependencies');
     }
 
@@ -11,6 +12,7 @@ class EndscreenSignalAdapter {
     this.cancel = cancel;
     this.getContext = getContext;
     this.controller = controller;
+    this.onInactive = onInactive ?? (() => {});
     this.observer = null;
     this.mediaListeners = new Map();
     this.pendingJob = null;
@@ -49,7 +51,11 @@ class EndscreenSignalAdapter {
       if (!this.started) return;
       this.refreshMediaListeners();
       const candidate = this.getCandidate();
-      if (candidate) this.controller.observe(candidate.observation);
+      if (candidate) {
+        this.controller.observe(candidate.observation);
+      } else {
+        this.onInactive();
+      }
     });
   }
 
