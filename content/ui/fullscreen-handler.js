@@ -47,6 +47,12 @@ class FullscreenHandler {
     
     // 延遲處理定時器
     this.delayedCheckTimer = null;
+    this.containerCreatedCheckTimer = null;
+    this.fullscreenEventHandlers = new Map();
+    this.configSubscriptionDisposer = null;
+    this.configChangeHandler = null;
+    this.containerCreatedEventHandler = null;
+    this.containerCreatedEventDisposer = null;
   }
 
   async initialize() {
@@ -61,10 +67,11 @@ class FullscreenHandler {
       this.log(`調試模式設置為: ${this.debug}`);
 
       // 訂閱配置變更
-      configBridge.subscribe('debugMode', (newValue) => {
+      this.configChangeHandler = (newValue) => {
         this.debug = newValue;
         this.log(`調試模式已更新: ${newValue}`);
-      });
+      };
+      this.configSubscriptionDisposer = configBridge.subscribe('debugMode', this.configChangeHandler);
 
       // 保存 ConfigBridge 實例
       this.configBridge = configBridge;
@@ -123,9 +130,11 @@ class FullscreenHandler {
    */
   setupFullscreenEventListeners() {
     this.fullscreenEvents.forEach(eventName => {
-      document.addEventListener(eventName, () => {
+      const handler = () => {
         this.handleFullscreenChange();
-      });
+      };
+      this.fullscreenEventHandlers.set(eventName, handler);
+      document.addEventListener(eventName, handler);
     });
     
     this.log('全螢幕事件監聽器設置完成');
@@ -168,6 +177,7 @@ class FullscreenHandler {
       
       // 延遲檢查，確保 UI 元素正確顯示
       this.delayedCheckTimer = setTimeout(() => {
+        this.delayedCheckTimer = null;
         this.log('執行延遲檢查，確保 UI 元素正確顯示');
         this.handleAllUIComponents();
         this.performDelayedUICheck();
@@ -457,11 +467,29 @@ class FullscreenHandler {
       clearTimeout(this.delayedCheckTimer);
       this.delayedCheckTimer = null;
     }
+
+    if (this.containerCreatedCheckTimer !== null) {
+      clearTimeout(this.containerCreatedCheckTimer);
+      this.containerCreatedCheckTimer = null;
+    }
+
+    if (this.containerCreatedEventDisposer) {
+      this.containerCreatedEventDisposer();
+      this.containerCreatedEventDisposer = null;
+      this.containerCreatedEventHandler = null;
+    }
+
+    if (this.configSubscriptionDisposer) {
+      this.configSubscriptionDisposer();
+      this.configSubscriptionDisposer = null;
+      this.configChangeHandler = null;
+    }
     
     // 移除事件監聽器
-    this.fullscreenEvents.forEach(eventName => {
-      document.removeEventListener(eventName, this.handleFullscreenChange);
+    this.fullscreenEventHandlers.forEach((handler, eventName) => {
+      document.removeEventListener(eventName, handler);
     });
+    this.fullscreenEventHandlers.clear();
     
     // 清理組件引用
     this.uiComponents.clear();
@@ -482,9 +510,10 @@ class FullscreenHandler {
    */
   setupEventHandlers() {
     // 監聽容器創建事件，解決全螢幕模式下容器創建時序問題
-    registerInternalEventHandler('SUBPAL_CONTAINER_CREATED', (event) => {
+    this.containerCreatedEventHandler = (event) => {
       this.handleContainerCreatedEvent(event);
-    });
+    };
+    this.containerCreatedEventDisposer = registerInternalEventHandler('SUBPAL_CONTAINER_CREATED', this.containerCreatedEventHandler);
 
     // VIDEO_ID_CHANGED 事件現在由 UI Manager 統一處理，這裡不再需要單獨處理
   }
@@ -504,10 +533,17 @@ class FullscreenHandler {
       this.handleAdditionalSubPalElements();
       
       // 延遲檢查確保處理完成
-      setTimeout(() => {
+      if (this.containerCreatedCheckTimer !== null) {
+        clearTimeout(this.containerCreatedCheckTimer);
+      }
+      let timerId;
+      timerId = setTimeout(() => {
+        if (this.containerCreatedCheckTimer !== timerId) return;
+        this.containerCreatedCheckTimer = null;
         this.log('延遲檢查新創建的容器是否正確處理');
         this.handleAdditionalSubPalElements();
       }, 100);
+      this.containerCreatedCheckTimer = timerId;
     } else {
       this.log('當前不在全螢幕模式，無需處理容器');
     }

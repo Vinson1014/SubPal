@@ -42,6 +42,16 @@ class UIAvoidanceHandler {
     this.scrubberRetryCount = 0;
     this.isPreviewActive = false;
     this.previewCheckRaf = null;
+    this.initialCheckTimer = null;
+    this.mouseLeaveTimer = null;
+    this.containerCreatedCheckTimer = null;
+    this.playerElement = null;
+    this.mouseMoveHandler = null;
+    this.mouseLeaveHandler = null;
+    this.configSubscriptionDisposer = null;
+    this.configChangeHandler = null;
+    this.containerCreatedEventHandler = null;
+    this.containerCreatedEventDisposer = null;
     this.scrubberBarSelectors = [
       '[data-uia="scrubber-bar"]',
       '[data-uia="timeline"]',
@@ -87,10 +97,11 @@ class UIAvoidanceHandler {
       this.log(`調試模式設置為: ${this.debug}`);
 
       // 訂閱配置變更
-      configBridge.subscribe('debugMode', (newValue) => {
+      this.configChangeHandler = (newValue) => {
         this.debug = newValue;
         this.log(`調試模式已更新: ${newValue}`);
-      });
+      };
+      this.configSubscriptionDisposer = configBridge.subscribe('debugMode', this.configChangeHandler);
 
       // 保存 ConfigBridge 實例
        this.configBridge = configBridge;
@@ -157,6 +168,7 @@ class UIAvoidanceHandler {
       this.log(`⏳ 未找到控制欄，準備第 ${this.retryCount + 1} 次重試... (${this.retryCount}/${this.maxRetries})`);
       
       this.retryTimer = setTimeout(() => {
+        this.retryTimer = null;
         this.searchControlBar();
       }, this.retryInterval);
     } else {
@@ -171,7 +183,7 @@ class UIAvoidanceHandler {
    * 停止控制欄搜尋
    */
   stopControlBarSearch() {
-    if (this.retryTimer) {
+    if (this.retryTimer !== null) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
       this.log('已停止控制欄搜尋');
@@ -234,7 +246,8 @@ class UIAvoidanceHandler {
 
     // 啟動後立即檢查一次當前狀態
     // 避免控制欄已可見但因無 mutation 觸發而漏掉閃避（載入初期常見）
-    setTimeout(() => {
+    this.initialCheckTimer = setTimeout(() => {
+      this.initialCheckTimer = null;
       if (this.controlBarSelector) {
         this.log('啟動後初始狀態檢查');
         this.handleControlBarChange();
@@ -268,6 +281,7 @@ class UIAvoidanceHandler {
     this.scrubberRetryCount++;
     if (this.scrubberRetryCount < this.maxRetries) {
       this.scrubberRetryTimer = setTimeout(() => {
+        this.scrubberRetryTimer = null;
         this.searchScrubberBar();
       }, this.retryInterval);
     } else {
@@ -354,22 +368,49 @@ class UIAvoidanceHandler {
       this.observer = null;
     }
 
-    if (this.avoidanceTimer) {
+    if (this.avoidanceTimer !== null) {
       clearTimeout(this.avoidanceTimer);
       this.avoidanceTimer = null;
     }
 
-    if (this.mouseTimer) {
+    if (this.mouseTimer !== null) {
       clearTimeout(this.mouseTimer);
       this.mouseTimer = null;
     }
 
+    if (this.initialCheckTimer !== null) {
+      clearTimeout(this.initialCheckTimer);
+      this.initialCheckTimer = null;
+    }
+
+    if (this.mouseLeaveTimer !== null) {
+      clearTimeout(this.mouseLeaveTimer);
+      this.mouseLeaveTimer = null;
+    }
+
+    if (this.containerCreatedCheckTimer !== null) {
+      clearTimeout(this.containerCreatedCheckTimer);
+      this.containerCreatedCheckTimer = null;
+    }
+
+    if (this.playerElement) {
+      if (this.mouseMoveHandler) {
+        this.playerElement.removeEventListener('mousemove', this.mouseMoveHandler);
+      }
+      if (this.mouseLeaveHandler) {
+        this.playerElement.removeEventListener('mouseleave', this.mouseLeaveHandler);
+      }
+      this.playerElement = null;
+      this.mouseMoveHandler = null;
+      this.mouseLeaveHandler = null;
+    }
+
     // 停止進度條搜尋與預覽偵測
-    if (this.scrubberRetryTimer) {
+    if (this.scrubberRetryTimer !== null) {
       clearTimeout(this.scrubberRetryTimer);
       this.scrubberRetryTimer = null;
     }
-    if (this.previewCheckRaf) {
+    if (this.previewCheckRaf !== null) {
       cancelAnimationFrame(this.previewCheckRaf);
       this.previewCheckRaf = null;
     }
@@ -451,7 +492,8 @@ class UIAvoidanceHandler {
     const playerElement = document.querySelector('.watch-video');
     if (!playerElement) return;
 
-    playerElement.addEventListener('mousemove', (e) => {
+    this.playerElement = playerElement;
+    this.mouseMoveHandler = (e) => {
       this.handleMouseMove();
       // 進度條預覽偵測：用 rAF throttle 避免高頻 reflow
       if (!this.previewCheckRaf) {
@@ -461,11 +503,13 @@ class UIAvoidanceHandler {
           this.checkPreviewZone(clientY);
         });
       }
-    });
-
-    playerElement.addEventListener('mouseleave', () => {
+    };
+    this.mouseLeaveHandler = () => {
       this.handleMouseLeave();
-    });
+    };
+
+    playerElement.addEventListener('mousemove', this.mouseMoveHandler);
+    playerElement.addEventListener('mouseleave', this.mouseLeaveHandler);
   }
 
   /**
@@ -491,8 +535,11 @@ class UIAvoidanceHandler {
    * 處理滑鼠移動
    */
   handleMouseMove() {
-    clearTimeout(this.mouseTimer);
+    if (this.mouseTimer !== null) {
+      clearTimeout(this.mouseTimer);
+    }
     this.mouseTimer = setTimeout(() => {
+      this.mouseTimer = null;
       if (this.controlBarSelector) {
         const currentState = this.detectControlBarState();
         this.processStateChange(currentState);
@@ -512,7 +559,11 @@ class UIAvoidanceHandler {
     }
 
     // 延遲檢查控制欄狀態
-    setTimeout(() => {
+    if (this.mouseLeaveTimer !== null) {
+      clearTimeout(this.mouseLeaveTimer);
+    }
+    this.mouseLeaveTimer = setTimeout(() => {
+      this.mouseLeaveTimer = null;
       if (this.controlBarSelector) {
         const currentState = this.detectControlBarState();
         if (!currentState.visible || currentState.opacity < this.config.opacityThreshold) {
@@ -702,8 +753,20 @@ class UIAvoidanceHandler {
     
     this.stop();
     this.stopControlBarSearch();
+    if (this.containerCreatedEventDisposer) {
+      this.containerCreatedEventDisposer();
+      this.containerCreatedEventDisposer = null;
+      this.containerCreatedEventHandler = null;
+    }
+    if (this.configSubscriptionDisposer) {
+      this.configSubscriptionDisposer();
+      this.configSubscriptionDisposer = null;
+      this.configChangeHandler = null;
+    }
     // 註：移除了 managedElements 清理，因為改用動態查找
     this.controlBar = null;
+    this.controlBarSelector = null;
+    this.scrubberBarSelector = null;
     this.lastState = null;
     
     this.isInitialized = false;
@@ -716,13 +779,23 @@ class UIAvoidanceHandler {
   setupEventHandlers() {
     // 監聽字幕容器建立事件：載入初期可能在容器建立前就已經嘗試過閃避（並失敗），
     // 容器建立後需要重新檢查一次當前控制欄狀態，補做閃避
-    registerInternalEventHandler('SUBPAL_CONTAINER_CREATED', (event) => {
+    this.containerCreatedEventHandler = (event) => {
       this.log(`收到容器建立事件 (${event.containerId})，重新檢查閃避狀態`);
       if (this.controlBarSelector && this.config.enabled) {
         // 延遲一格 tick，確保容器 DOM 完全就緒
-        setTimeout(() => this.handleControlBarChange(), 0);
+        if (this.containerCreatedCheckTimer !== null) {
+          clearTimeout(this.containerCreatedCheckTimer);
+        }
+        let timerId;
+        timerId = setTimeout(() => {
+          if (this.containerCreatedCheckTimer !== timerId) return;
+          this.containerCreatedCheckTimer = null;
+          this.handleControlBarChange();
+        }, 0);
+        this.containerCreatedCheckTimer = timerId;
       }
-    });
+    };
+    this.containerCreatedEventDisposer = registerInternalEventHandler('SUBPAL_CONTAINER_CREATED', this.containerCreatedEventHandler);
   }
 
   /**
