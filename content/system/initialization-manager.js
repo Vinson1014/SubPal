@@ -5,10 +5,8 @@
  * 解決 Page Script 注入、Netflix API 可用性、模式選擇等問題
  */
 
-import { sendMessage, registerInternalEventHandler, requestPageScriptInjection, waitForPageScript } from './messaging.js';
+import { requestPageScriptInjection, sendMessage, waitForPageScript } from './messaging.js';
 import { getVideoId } from '../core/video-info.js';
-import { EndscreenTaskBridge } from '../core/endscreen-task-bridge.js';
-import { toAPILanguageCode } from '../utils/language-code.js';
 
 class InitializationManager {
   constructor() {
@@ -33,7 +31,6 @@ class InitializationManager {
       subtitleStyleManager: null,
       subtitleCoordinator: null,
       playbackContextManager: null,
-      endscreenTaskBridge: null,
       dualSubtitleConfig: null
     };
     
@@ -374,7 +371,6 @@ class InitializationManager {
       }
 
       await this.initializePlaybackContextManager();
-      this.initializeEndscreenTaskBridge();
       
       this.state.netflixAPIAvailable = true;
       return true;
@@ -410,41 +406,6 @@ class InitializationManager {
     }
   }
 
-  initializeEndscreenTaskBridge() {
-    if (this.components.endscreenTaskBridge || !this.state.configLoaded || !this.state.playbackContextReady) {
-      return false;
-    }
-
-    try {
-      const languageCode = this.configBridge.get('subtitle.primaryLanguage');
-      if (typeof languageCode !== 'string' || languageCode.trim().length === 0) {
-        return false;
-      }
-
-      const apiLanguageCode = toAPILanguageCode(languageCode);
-
-      const playbackContextManager = this.components.playbackContextManager;
-      const bridge = new EndscreenTaskBridge({
-        document,
-        Observer: MutationObserver,
-        schedule: (...args) => window.setTimeout(...args),
-        cancel: (timerId) => window.clearTimeout(timerId),
-        clock: Date.now,
-        debounceMs: 500,
-        sendMessage,
-        languageCode: apiLanguageCode,
-        getContext: () => playbackContextManager.getCurrentContext(),
-        registerInternalEventHandler
-      });
-
-      bridge.start();
-      this.components.endscreenTaskBridge = bridge;
-      return true;
-    } catch (error) {
-      console.warn('片尾任務橋接器初始化失敗，略過本階段任務取得:', error);
-      return false;
-    }
-  }
 
   /**
    * 步驟5: 等待用戶進入播放頁面
@@ -843,10 +804,6 @@ class InitializationManager {
   async cleanup() {
     this.log('清理初始化管理器資源...');
 
-    if (this.components.endscreenTaskBridge) {
-      this.components.endscreenTaskBridge.cleanup();
-    }
-    
     if (this.components.uiManager) {
       this.components.uiManager.cleanup();
     }
