@@ -6,6 +6,15 @@
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
+function escapeTextForHtml(value) {
+  return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function setConnection(element, isConnected) {
+  element._isConnected = isConnected;
+  for (const child of element.children) setConnection(child, isConnected);
+}
+
 // ─── 模組載入 ───
 
 /**
@@ -13,7 +22,12 @@ import vm from 'node:vm';
  */
 export async function loadPanel({ configBridge } = {}) {
   const source = await readFile(new URL('../content/ui/endscreen-task-panel.js', import.meta.url), 'utf8');
+  const actionSource = await readFile(new URL('../content/ui/endscreen-task-action-controller.js', import.meta.url), 'utf8');
   const context = vm.createContext({ console });
+  const actionModule = new vm.SourceTextModule(actionSource, {
+    context,
+    identifier: 'content/ui/endscreen-task-action-controller.js'
+  });
   const module = new vm.SourceTextModule(source, {
     context,
     identifier: 'content/ui/endscreen-task-panel.js',
@@ -30,7 +44,10 @@ export async function loadPanel({ configBridge } = {}) {
       return bridgeModule;
     }
   });
-  await module.link(() => { throw new Error('endscreen-task-panel.js should not import external dependencies'); });
+  await module.link((specifier) => {
+    if (specifier === './endscreen-task-action-controller.js') return actionModule;
+    throw new Error(`Unexpected panel dependency: ${specifier}`);
+  });
   await module.evaluate();
   return module.namespace.EndscreenTaskPanel;
 }
@@ -43,12 +60,13 @@ export async function loadPanel({ configBridge } = {}) {
  * setAttribute, querySelector, contains, focus
  */
 export class FakeElement {
-  constructor(tagName = 'div') {
+  constructor(tagName = 'div', ownerDocument = null) {
     this.tagName = tagName;
+    this.ownerDocument = ownerDocument;
     this.children = [];
     this.parentNode = null;
-    this.textContent = '';
-    this.innerHTML = '';
+    this._textContent = '';
+    this._innerHTML = '';
     this.style = {};
     this.attributes = {};
     this.listeners = new Map();
@@ -65,23 +83,27 @@ export class FakeElement {
   get className() { return this.attributes.class ?? ''; }
   set className(value) { this.attributes.class = String(value); }
 
+  get innerHTML() { return this._innerHTML; }
+  set innerHTML(value) { this._innerHTML = String(value); }
+
   // textContent setter — 同時更新 innerHTML 並清除子節點（模擬真實 DOM 行為）
   get textContent() { return this._textContent ?? ''; }
   set textContent(value) {
     // 真實 DOM：設定 textContent 會移除所有子節點
     for (const child of this.children) {
       child.parentNode = null;
-      child._isConnected = false;
+      setConnection(child, false);
     }
     this.children = [];
     this._textContent = String(value);
-    this.innerHTML = String(value);
+    this._innerHTML = escapeTextForHtml(value);
   }
 
   appendChild(child) {
     this.children.push(child);
     child.parentNode = this;
-    child._isConnected = true;
+    if (!child.ownerDocument) child.ownerDocument = this.ownerDocument;
+    setConnection(child, this._isConnected);
     return child;
   }
 
@@ -91,7 +113,7 @@ export class FakeElement {
       if (idx !== -1) this.parentNode.children.splice(idx, 1);
     }
     this.parentNode = null;
-    this._isConnected = false;
+    setConnection(this, false);
   }
 
   removeChild(child) {
@@ -99,7 +121,7 @@ export class FakeElement {
     if (idx !== -1) {
       this.children.splice(idx, 1);
       child.parentNode = null;
-      child._isConnected = false;
+      setConnection(child, false);
     }
     return child;
   }
@@ -160,10 +182,14 @@ export class FakeElement {
   }
 
   focus() {
+    const activeElement = this.ownerDocument?.activeElement;
+    if (activeElement && activeElement !== this) activeElement.blur();
+    if (this.ownerDocument) this.ownerDocument.activeElement = this;
     this._focused = true;
   }
 
   blur() {
+    if (this.ownerDocument?.activeElement === this) this.ownerDocument.activeElement = null;
     this._focused = false;
   }
 
@@ -185,13 +211,18 @@ export class FakeElement {
  */
 export class FakeDocument {
   constructor() {
-    this.body = new FakeElement('body');
-    this.documentElement = new FakeElement('html');
+    this.activeElement = null;
+    this.body = new FakeElement('body', this);
+    this.documentElement = new FakeElement('html', this);
     this._elementIdCounter = 0;
   }
 
   createElement(tagName) {
-    return new FakeElement(tagName);
+    return new FakeElement(tagName, this);
+  }
+
+  createElementNS(_namespace, tagName) {
+    return this.createElement(tagName);
   }
 
   getElementById(id) {
