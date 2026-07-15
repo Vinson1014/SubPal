@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <body>
+    <main class="watch-video" style="position: relative; min-height: 100vh;"></main>
+    <script type="module">
+      import { SubmissionDialog } from '../../content/ui/submission-dialog.js';
+
+      const dialog = new SubmissionDialog();
+      window.__SubmissionDialog = SubmissionDialog;
+      dialog.isInitialized = true;
+      dialog.configBridge = { get: () => 'zh-Hant' };
+      await dialog.open({
+        videoId: 'netflix-81234567',
+        timestamp: 124.5,
+        original: '這是一句需要改善的官方中文字幕。',
+        text: '這是預設的改善翻譯。',
+        slotKey: 'slot-000124'
+      });
+      window.__submissionDialogViewport = dialog;
+    </script>
+  </body>
+</html>
