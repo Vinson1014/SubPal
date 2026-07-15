@@ -32,6 +32,11 @@ class SubmissionDialog {
       reason: '',
       reasonCursor: 0
     };
+    this.isSubmitting = false;
+    this.submissionError = null;
+    this.openGeneration = 0;
+    this.configBridge = null;
+    this.configSubscriptionDisposer = null;
     
     // 事件回調
     this.eventCallbacks = {
@@ -56,7 +61,7 @@ class SubmissionDialog {
       this.log(`調試模式設置為: ${this.debug}`);
 
       // 訂閱配置變更
-      configBridge.subscribe('debugMode', (newValue) => {
+      this.configSubscriptionDisposer = configBridge.subscribe('debugMode', (newValue) => {
         this.debug = newValue;
         this.log(`調試模式已更新: ${newValue}`);
       });
@@ -80,11 +85,12 @@ class SubmissionDialog {
       return;
     }
     
-    if (this.isOpen) {
+    if (this.isOpen || this.dialog || this.overlay) {
       this.log('對話框已經打開，先關閉現有對話框');
       this.close();
     }
-    
+
+    const openGeneration = ++this.openGeneration;
     this.log('打開提交對話框', subtitleData);
     this.currentSubtitleData = subtitleData;
     
@@ -95,24 +101,25 @@ class SubmissionDialog {
       return;
     }
     
-    // 創建對話框
-    await this.createDialog();
-    
-    // 設置事件處理器
-    this.setupEventHandlers();
-    
-    // 載入用戶語言設置
-    await this.loadUserLanguage();
-    
-    // 顯示對話框
-    this.show();
-    
-    this.isOpen = true;
+    try {
+      await this.createDialog();
+      if (openGeneration !== this.openGeneration || this.currentSubtitleData !== subtitleData) return;
+
+      this.setupEventHandlers();
+      await this.loadUserLanguage();
+      if (openGeneration !== this.openGeneration || this.currentSubtitleData !== subtitleData || !this.dialog) return;
+
+      this.show();
+      this.isOpen = true;
+    } catch (error) {
+      if (openGeneration === this.openGeneration) this.cleanupOpenResources();
+      throw error;
+    }
   }
 
   // 關閉對話框
   close() {
-    if (!this.isOpen) {
+    if (!this.isOpen && !this.dialog && !this.overlay) {
       return;
     }
     
@@ -122,7 +129,7 @@ class SubmissionDialog {
     this.hide();
     
     // 清理資源
-    this.cleanup();
+    this.cleanupOpenResources();
     
     this.isOpen = false;
     this.currentSubtitleData = null;
@@ -158,8 +165,8 @@ class SubmissionDialog {
   createDialog() {
     this.log('創建提交對話框');
     
-    const originalText = this.currentSubtitleData.original || this.currentSubtitleData.text;
-    const currentText = this.currentSubtitleData.text;
+    const originalText = String(this.currentSubtitleData.original || this.currentSubtitleData.text || '');
+    const currentText = String(this.currentSubtitleData.text || '');
     
     // 創建 overlay 層（相對於播放器定位）
     this.overlay = document.createElement('div');
@@ -177,6 +184,9 @@ class SubmissionDialog {
     // 創建浮動視窗
     this.dialog = document.createElement('div');
     this.dialog.id = 'subpal-translation-floating-window';
+    this.dialog.setAttribute('role', 'dialog');
+    this.dialog.setAttribute('aria-modal', 'true');
+    this.dialog.setAttribute('aria-labelledby', 'submission-dialog-title');
     this.dialog.style.cssText = `
       position: absolute;
       top: 50%;
@@ -187,7 +197,7 @@ class SubmissionDialog {
       border-radius: 8px;
       box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
       z-index: 999999;
-      width: 450px;
+      width: min(450px, calc(100vw - 32px));
       max-height: 80vh;
       overflow-y: auto;
       box-sizing: border-box;
@@ -196,7 +206,7 @@ class SubmissionDialog {
     // 創建對話框內容
     this.dialog.innerHTML = `
       <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0; margin-bottom: 18px;">
-        <h3 style="margin: 0; color: #222; font-size: 22px; font-weight: 600;">提交翻譯</h3>
+        <h3 id="submission-dialog-title" style="margin: 0; color: #222; font-size: 22px; font-weight: 600;">提交翻譯</h3>
         <button id="submission-guidelines-toggle" type="button" aria-expanded="false" aria-controls="submission-guidelines-panel" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; background-color: #f5f5f5; color: #555; border: 1px solid #e0e0e0; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 500;"><span id="submission-guidelines-icon" aria-hidden="true" style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border: 1.5px solid #777; border-radius: 50%; color: #777; font-size: 10px; line-height: 1; font-weight: 700; box-sizing: border-box;">?</span>提交規範</button>
       </div>
       <div id="submission-guidelines-panel" style="display: none; margin-bottom: 14px; padding: 10px 12px; background: #f9fafb; border: 1px solid #e0e0e0; border-radius: 5px; color: #555; font-size: 13px; line-height: 1.6;">
@@ -209,22 +219,23 @@ class SubmissionDialog {
       </div>
       <div style="margin-bottom: 14px;">
         <label for="original-text" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">原始翻譯</label>
-        <input id="original-text" type="text" value="${originalText.replace(/"/g, '&quot;')}" readonly
+        <input id="original-text" type="text" readonly
           style="width: 100%; box-sizing: border-box; background: #f3f4f6; color: #222; border: 1px solid #e0e0e0; border-radius: 5px; padding: 8px 10px; font-size: 15px; margin-bottom: 0;"/>
       </div>
       <div style="margin-bottom: 14px;">
-        <label for="language-select" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">字幕語言</label>
-        <div id="language-display" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; color: #222; background: #f3f4f6;"></div>
+        <label for="language-display" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">字幕語言</label>
+        <output id="language-display" style="display: block; width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; color: #222; background: #f3f4f6;"></output>
       </div>
       <div style="margin-bottom: 14px;">
         <label for="translation-input" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">修正翻譯</label>
-        <textarea id="translation-input" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; height: 70px; color: #222; background: #fff; resize: vertical;">${currentText}</textarea>
+        <textarea id="translation-input" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; height: 70px; color: #222; background: #fff; resize: vertical;"></textarea>
       </div>
       <div style="margin-bottom: 18px;">
         <label for="reason-input" style="display: block; margin-bottom: 6px; color: #444; font-size: 15px;">調整原因</label>
         <textarea id="reason-input" style="width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1.5px solid #bfc7d1; border-radius: 5px; font-size: 15px; height: 50px; color: #222; background: #fff; resize: vertical;" placeholder="請簡述為何需要調整翻譯"></textarea>
       </div>
       <div style="text-align: right;">
+        <div id="submission-error" role="alert" style="display: none; margin-bottom: 10px; color: #d32f2f; text-align: left;"></div>
         <button id="cancel-translation" style="padding: 8px 18px; margin-right: 10px; background-color: #f5f5f5; color: #888; border: none; border-radius: 4px; cursor: pointer; font-size: 15px;">取消</button>
         <button id="submit-translation" style="padding: 8px 18px; background-color: #1976d2; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 15px; font-weight: 500;">提交</button>
       </div>
@@ -237,9 +248,13 @@ class SubmissionDialog {
     // 獲取表單元素引用
     this.inputs = {
       languageDisplay: this.dialog.querySelector('#language-display'),
+      originalInput: this.dialog.querySelector('#original-text'),
       translationInput: this.dialog.querySelector('#translation-input'),
       reasonInput: this.dialog.querySelector('#reason-input')
     };
+    this.inputs.originalInput.value = originalText;
+    this.inputs.translationInput.value = currentText;
+    this.submissionError = this.dialog.querySelector('#submission-error');
     
     this.log('提交對話框創建完成');
   }
@@ -358,7 +373,7 @@ class SubmissionDialog {
     });
     
     submitButton.addEventListener('click', () => {
-      this.handleSubmit();
+      void this.handleSubmit();
     });
 
     // 提交規範面板切換
@@ -436,7 +451,7 @@ class SubmissionDialog {
   }
 
   // 處理表單提交
-  handleSubmit() {
+  async handleSubmit() {
     this.log('處理表單提交');
     
     const { languageDisplay, translationInput, reasonInput } = this.inputs;
@@ -469,14 +484,44 @@ class SubmissionDialog {
       languageCode: apiLanguageCode,
       slotKey: this.currentSubtitleData.slotKey || null
     };
+
+    if (this.currentSubtitleData.resolutionContext) {
+      submissionData.resolutionContext = this.currentSubtitleData.resolutionContext;
+      submissionData.translationID = this.currentSubtitleData.translationID ?? null;
+    }
+    if (this.currentSubtitleData.sourceTranslationID) {
+      submissionData.sourceTranslationID = this.currentSubtitleData.sourceTranslationID;
+    }
     
     this.log('提交數據:', submissionData);
     
-    // 觸發提交回調
-    this.triggerCallback('onSubmit', submissionData);
-    
-    // 關閉對話框
-    this.close();
+    if (this.isSubmitting) return undefined;
+    this.setSubmitting(true);
+    try {
+      const submitResult = await Promise.resolve(this.triggerCallback('onSubmit', submissionData));
+      if (submitResult?.status !== 'success') {
+        throw new Error(submitResult?.error || '翻譯提交失敗，請再試一次。');
+      }
+      this.close();
+      return submitResult;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '翻譯提交失敗，請再試一次。';
+      this.setSubmitting(false, message);
+      return { status: 'error', error: message };
+    }
+  }
+
+  setSubmitting(isSubmitting, error = '') {
+    this.isSubmitting = isSubmitting;
+    const submitButton = this.dialog?.querySelector('#submit-translation');
+    const cancelButton = this.dialog?.querySelector('#cancel-translation');
+    for (const button of [submitButton, cancelButton]) {
+      if (button) button.disabled = isSubmitting;
+    }
+    if (this.submissionError) {
+      this.submissionError.textContent = error;
+      this.submissionError.style.display = error ? 'block' : 'none';
+    }
   }
 
   // 顯示對話框
@@ -491,9 +536,9 @@ class SubmissionDialog {
     this.log('提交對話框已隱藏');
   }
 
-  // 清理資源
-  cleanup() {
+  cleanupOpenResources() {
     this.log('清理提交對話框資源');
+    this.openGeneration += 1;
     
     // 執行清理函數
     if (this.cleanupFunctions) {
@@ -515,6 +560,10 @@ class SubmissionDialog {
     this.videoPlayer = null;
     this.inputs = {};
     this.lastFocusedInput = null;
+    this.isSubmitting = false;
+    this.submissionError = null;
+    this.isOpen = false;
+    this.currentSubtitleData = null;
     this.savedStates = {
       translation: '',
       translationCursor: 0,
@@ -523,13 +572,28 @@ class SubmissionDialog {
     };
   }
 
+  cleanup() {
+    this.cleanupOpenResources();
+    const unsubscribe = this.configSubscriptionDisposer;
+    this.configSubscriptionDisposer = null;
+    unsubscribe?.();
+    this.configBridge = null;
+    this.isInitialized = false;
+    this.eventCallbacks = {
+      onSubmit: null,
+      onCancel: null,
+      onClose: null
+    };
+  }
+
   // 觸發回調
   triggerCallback(callbackName, data = null) {
     const callback = this.eventCallbacks[callbackName];
     if (callback && typeof callback === 'function') {
       this.log(`觸發回調: ${callbackName}`);
-      callback(data);
+      return callback(data);
     }
+    return undefined;
   }
 
   // 註冊事件回調
