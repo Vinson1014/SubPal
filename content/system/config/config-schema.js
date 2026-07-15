@@ -147,6 +147,19 @@ export const CONFIG_SCHEMA = {
     category: 'system'
   },
 
+  /**
+   * 片尾字幕任務開關
+   * false: 不初始化片尾任務面板、訊號偵測和任務請求
+   */
+  crowdsourcing: {
+    endscreenTasksEnabled: {
+      type: 'boolean',
+      default: true,
+      description: '片尾字幕任務開關',
+      category: 'crowdsourcing'
+    }
+  },
+
   // ==================== 字幕設定 ====================
 
   subtitle: {

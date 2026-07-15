@@ -851,6 +851,10 @@ input[type="color"]::-webkit-color-swatch {
   transition: all var(--transition-normal);
 }
 
+.toggle-switch input:focus-visible + .toggle-slider {
+  box-shadow: 0 0 0 2px var(--color-bg-deep), 0 0 0 5px var(--color-accent);
+}
+
 .toggle-switch input:checked + .toggle-slider {
   background: var(--color-accent);
 }

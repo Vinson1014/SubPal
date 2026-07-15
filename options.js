@@ -188,6 +188,14 @@ async function restoreOptionsUI() {
       debugModeCheckbox.checked = config['debugMode'];
     }
 
+    const endscreenTasksEnabledCheckbox = document.getElementById('endscreenTasksEnabledCheckbox');
+    if (endscreenTasksEnabledCheckbox) {
+      const endscreenTasksEnabled = config['crowdsourcing.endscreenTasksEnabled'];
+      endscreenTasksEnabledCheckbox.checked = typeof endscreenTasksEnabled === 'boolean'
+        ? endscreenTasksEnabled
+        : DEFAULT_CONFIG['crowdsourcing.endscreenTasksEnabled'];
+    }
+
     // API URL
     const apiBaseUrlInput = document.getElementById('apiBaseUrlInput');
     if (apiBaseUrlInput) {
@@ -481,6 +489,13 @@ function setupEventListeners() {
   if (debugModeCheckbox) {
     debugModeCheckbox.addEventListener('change', async (e) => {
       await saveConfig('debugMode', e.target.checked);
+    });
+  }
+
+  const endscreenTasksEnabledCheckbox = document.getElementById('endscreenTasksEnabledCheckbox');
+  if (endscreenTasksEnabledCheckbox) {
+    endscreenTasksEnabledCheckbox.addEventListener('change', async (e) => {
+      await saveConfig('crowdsourcing.endscreenTasksEnabled', e.target.checked);
     });
   }
 
