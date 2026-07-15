@@ -17,6 +17,25 @@
 
 import { StorageAdapter, generateUUID } from '../system/config/storage-adapter.js';
 
+function normalizeResolutionContext(context) {
+  if (!context || typeof context !== 'object') {
+    throw new Error('resolutionContext 必須是物件');
+  }
+
+  const requiredKeys = ['taskID', 'targetType', 'action', 'slotKey', 'timestamp'];
+  if (!requiredKeys.every((key) => Object.hasOwn(context, key))) {
+    throw new Error('resolutionContext 缺少必要欄位');
+  }
+
+  return {
+    taskID: context.taskID,
+    targetType: context.targetType,
+    action: context.action,
+    slotKey: context.slotKey,
+    timestamp: context.timestamp
+  };
+}
+
 /**
  * SubmissionQueueManager 類
  * 管理所有提交數據的隊列操作和狀態追蹤
@@ -112,6 +131,13 @@ export class SubmissionQueueManager {
           updatedAt: Date.now()
         };
 
+        if (data.resolutionContext !== undefined && data.resolutionContext !== null) {
+          queue[existingIndex].resolutionContext = normalizeResolutionContext(data.resolutionContext);
+        } else {
+          delete queue[existingIndex].resolutionContext;
+          if (data.voteState === undefined) delete queue[existingIndex].voteState;
+        }
+
         await this.storage.set({ voteQueue: queue });
         this.log('投票已合併到現有隊列項目:', existingItem.id);
 
@@ -140,6 +166,10 @@ export class SubmissionQueueManager {
       retryCount: 0,
       error: null
     };
+
+    if (data.resolutionContext !== undefined && data.resolutionContext !== null) {
+      item.resolutionContext = normalizeResolutionContext(data.resolutionContext);
+    }
 
     await this.storage.appendToQueue('vote', item);
 
@@ -274,6 +304,17 @@ export class SubmissionQueueManager {
       retryCount: 0,
       error: null
     };
+
+    if (data.resolutionContext !== undefined && data.resolutionContext !== null) {
+      item.resolutionContext = normalizeResolutionContext(data.resolutionContext);
+      item.translationID = data.translationID ?? null;
+    } else if (Object.hasOwn(data, 'translationID')) {
+      item.translationID = data.translationID ?? null;
+    }
+
+    if (data.sourceTranslationID !== undefined) {
+      item.sourceTranslationID = data.sourceTranslationID;
+    }
 
     // 加入隊列
     await this.storage.appendToQueue('translation', item);
