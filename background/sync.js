@@ -15,6 +15,25 @@ const REPLACEMENT_EVENT_QUEUE_KEY = 'replacementEventQueue';
 const REPLACEMENT_EVENT_HISTORY_KEY = 'replacementEventHistory';
 const VOTE_STATE_BY_TRANSLATION_KEY = 'voteStateByTranslation';
 
+function normalizeResolutionContext(context) {
+  if (!context || typeof context !== 'object') {
+    throw new Error('resolutionContext must be an object');
+  }
+
+  const requiredKeys = ['taskID', 'targetType', 'action', 'slotKey', 'timestamp'];
+  if (!requiredKeys.every((key) => Object.hasOwn(context, key))) {
+    throw new Error('resolutionContext is missing required fields');
+  }
+
+  return {
+    taskID: context.taskID,
+    targetType: context.targetType,
+    action: context.action,
+    slotKey: context.slotKey,
+    timestamp: context.timestamp
+  };
+}
+
 // 同步狀態標誌
 let isSyncingVotes = false;
 let isSyncingTranslations = false;
@@ -189,6 +208,10 @@ async function moveToHistory(queueType, itemId, historyType) {
     status: 'completed',
     syncedAt: Date.now()
   };
+
+  if (completedItem.resolutionContext !== undefined && completedItem.resolutionContext !== null) {
+    completedItem.resolutionContext = normalizeResolutionContext(completedItem.resolutionContext);
+  }
 
   // 移除敏感或不需要的欄位
   delete completedItem.retryCount;
@@ -417,11 +440,15 @@ async function sendVoteToAPI(voteData) {
 
     // 新投票狀態 API：使用 setVoteState 處理有 translationID 和 voteState 的項目
     if (voteData.translationID && voteData.voteState) {
-      result = await apiModule.setVoteState({
+      const payload = {
         translationID: voteData.translationID,
         voteState: voteData.voteState,
         clientVersion: voteData.clientVersion || null
-      });
+      };
+      if (voteData.resolutionContext !== undefined && voteData.resolutionContext !== null) {
+        payload.resolutionContext = normalizeResolutionContext(voteData.resolutionContext);
+      }
+      result = await apiModule.setVoteState(payload);
 
       // 儲存權威響應數據到 voteStateByTranslation
       if (result && voteData.translationID) {
@@ -444,14 +471,18 @@ async function sendVoteToAPI(voteData) {
       }
     } else {
       // 舊版投票 API：使用 submitVote 處理 legacy 項目
-      result = await apiModule.submitVote({
+      const payload = {
         videoID: voteData.videoId,
         timestamp: voteData.timestamp,
         voteType: voteData.voteType,
         translationID: voteData.translationID || null,
         originalSubtitle: voteData.originalSubtitle || null,
         slotKey: voteData.slotKey || null
-      });
+      };
+      if (voteData.resolutionContext !== undefined && voteData.resolutionContext !== null) {
+        payload.resolutionContext = normalizeResolutionContext(voteData.resolutionContext);
+      }
+      result = await apiModule.submitVote(payload);
     }
 
     return { success: true, data: result };
@@ -470,7 +501,7 @@ async function sendTranslationToAPI(translationData) {
 
   try {
     // 直接調用 API 模組的 submitTranslation 函數
-    const result = await apiModule.submitTranslation({
+    const payload = {
       videoId: translationData.videoId,
       timestamp: translationData.timestamp,
       original: translationData.original,
@@ -478,7 +509,17 @@ async function sendTranslationToAPI(translationData) {
       submissionReason: translationData.submissionReason || '',
       languageCode: translationData.languageCode,
       slotKey: translationData.slotKey || null
-    });
+    };
+    if (translationData.resolutionContext !== undefined && translationData.resolutionContext !== null) {
+      payload.translationID = translationData.translationID ?? null;
+      payload.resolutionContext = normalizeResolutionContext(translationData.resolutionContext);
+    } else if (Object.hasOwn(translationData, 'translationID')) {
+      payload.translationID = translationData.translationID ?? null;
+    }
+    if (translationData.sourceTranslationID !== undefined) {
+      payload.sourceTranslationID = translationData.sourceTranslationID;
+    }
+    const result = await apiModule.submitTranslation(payload);
 
     console.log('[Sync] Translation submitted successfully:', result);
     return { success: true };

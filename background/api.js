@@ -14,6 +14,25 @@ async function getApiBaseUrl() {
   return result.api?.baseUrl || 'https://subnfbackend.zeabur.app';
 }
 
+function normalizeResolutionContext(context) {
+  if (!context || typeof context !== 'object') {
+    throw new Error('resolutionContext must be an object');
+  }
+
+  const requiredKeys = ['taskID', 'targetType', 'action', 'slotKey', 'timestamp'];
+  if (!requiredKeys.every((key) => Object.hasOwn(context, key))) {
+    throw new Error('resolutionContext is missing required fields');
+  }
+
+  return {
+    taskID: context.taskID,
+    targetType: context.targetType,
+    action: context.action,
+    slotKey: context.slotKey,
+    timestamp: context.timestamp
+  };
+}
+
 /**
  * 取得前端 clientVersion，供後端 rollout 與行為觀測使用。
  * @returns {string|null}
@@ -147,7 +166,7 @@ async function sendToAPIWithAutoRefresh(url, body, method) {
  * @throws {Error} - 錯誤包含 status, code, details 屬性
  */
 export async function submitVote(voteData) {
-  const { translationID, videoID, originalSubtitle, timestamp, voteType, slotKey, clientVersion } = voteData;
+  const { translationID, videoID, originalSubtitle, timestamp, voteType, slotKey, clientVersion, resolutionContext } = voteData;
 
   if (!videoID || typeof timestamp !== 'number' || !['upvote', 'downvote'].includes(voteType)) {
     throw new Error('Missing or invalid parameters for vote submission');
@@ -165,6 +184,9 @@ export async function submitVote(voteData) {
   if (slotKey) body.slotKey = slotKey;
   const resolvedClientVersion = clientVersion || getClientVersion();
   if (resolvedClientVersion) body.clientVersion = resolvedClientVersion;
+  if (resolutionContext !== undefined && resolutionContext !== null) {
+    body.resolutionContext = normalizeResolutionContext(resolutionContext);
+  }
 
   if (!body.originalSubtitle) {
     console.warn("[API Module] Missing originalSubtitle for vote submission. API call might fail.");
@@ -183,7 +205,7 @@ export async function submitVote(voteData) {
  * @returns {Promise<Object>} - API 響應
  * @throws {Error} - 參數驗證失敗或 API 錯誤
  */
-export async function setVoteState({ translationID, voteState, clientVersion }) {
+export async function setVoteState({ translationID, voteState, clientVersion, resolutionContext }) {
   if (!translationID || typeof translationID !== 'string') {
     throw new Error('Missing or invalid parameter: translationID must be a non-empty string');
   }
@@ -199,6 +221,9 @@ export async function setVoteState({ translationID, voteState, clientVersion }) 
   };
   const resolvedClientVersion = clientVersion || getClientVersion();
   if (resolvedClientVersion) body.clientVersion = resolvedClientVersion;
+  if (resolutionContext !== undefined && resolutionContext !== null) {
+    body.resolutionContext = normalizeResolutionContext(resolutionContext);
+  }
 
   const response = await sendToAPIWithAutoRefresh(url, body, 'PUT');
   return response.data || response;
@@ -221,7 +246,19 @@ export async function setVoteState({ translationID, voteState, clientVersion }) 
  * @throws {Error} - 錯誤包含 status, code, details 屬性
  */
 export async function submitTranslation(translationData) {
-  const { videoId, timestamp, original, translation, submissionReason, languageCode, slotKey, clientVersion } = translationData;
+  const {
+    videoId,
+    timestamp,
+    original,
+    translation,
+    submissionReason,
+    languageCode,
+    slotKey,
+    clientVersion,
+    translationID,
+    sourceTranslationID,
+    resolutionContext
+  } = translationData;
 
   if (!videoId || typeof timestamp !== 'number' || !original || !translation || !languageCode) {
     throw new Error('Missing or invalid parameters for translation submission');
@@ -238,6 +275,13 @@ export async function submitTranslation(translationData) {
     submissionReason: submissionReason || ''
   };
   if (slotKey) body.slotKey = slotKey;
+  if (resolutionContext !== undefined && resolutionContext !== null) {
+    body.translationID = translationID ?? null;
+    body.resolutionContext = normalizeResolutionContext(resolutionContext);
+  } else if (Object.hasOwn(translationData, 'translationID')) {
+    body.translationID = translationID ?? null;
+  }
+  if (sourceTranslationID !== undefined) body.sourceTranslationID = sourceTranslationID;
   const resolvedClientVersion = clientVersion || getClientVersion();
   if (resolvedClientVersion) body.clientVersion = resolvedClientVersion;
 
