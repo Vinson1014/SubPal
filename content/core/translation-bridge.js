@@ -13,6 +13,25 @@ import { sendMessage } from '../system/messaging.js';
 /**
  * 翻譯 Bridge 對象
  */
+function normalizeResolutionContext(context) {
+  if (!context || typeof context !== 'object') {
+    throw new Error('resolutionContext 必須是物件');
+  }
+
+  const requiredKeys = ['taskID', 'targetType', 'action', 'slotKey', 'timestamp'];
+  if (!requiredKeys.every((key) => Object.hasOwn(context, key))) {
+    throw new Error('resolutionContext 缺少必要欄位');
+  }
+
+  return {
+    taskID: context.taskID,
+    targetType: context.targetType,
+    action: context.action,
+    slotKey: context.slotKey,
+    timestamp: context.timestamp
+  };
+}
+
 export const translationBridge = {
   isInitialized: false,
   debug: false,
@@ -62,7 +81,18 @@ export const translationBridge = {
     this.log('enqueue 方法被調用，參數:', data);
 
     // 參數驗證
-    const { videoId, timestamp, original, translation, languageCode, submissionReason, slotKey } = data;
+    const {
+      videoId,
+      timestamp,
+      original,
+      translation,
+      languageCode,
+      submissionReason,
+      slotKey,
+      translationID,
+      sourceTranslationID,
+      resolutionContext
+    } = data;
 
     // 驗證所有必填參數
     if (!videoId || typeof videoId !== 'string') {
@@ -103,17 +133,30 @@ export const translationBridge = {
 
     try {
       this.log('發送 TRANSLATION_ENQUEUE 消息到 content script');
+      const payload = {
+        videoId,
+        timestamp,
+        original: original.trim(),
+        translation: translation.trim(),
+        languageCode,
+        submissionReason: submissionReason.trim(),
+        slotKey: slotKey || null
+      };
+
+      if (resolutionContext !== undefined && resolutionContext !== null) {
+        payload.resolutionContext = normalizeResolutionContext(resolutionContext);
+        payload.translationID = translationID ?? null;
+      } else if (Object.hasOwn(data, 'translationID')) {
+        payload.translationID = translationID ?? null;
+      }
+
+      if (sourceTranslationID !== undefined) {
+        payload.sourceTranslationID = sourceTranslationID;
+      }
+
       const response = await sendMessage({
         type: 'TRANSLATION_ENQUEUE',
-        payload: {
-          videoId,
-          timestamp,
-          original: original.trim(),
-          translation: translation.trim(),
-          languageCode,
-          submissionReason: submissionReason.trim(),
-          slotKey: slotKey || null
-        }
+        payload
       });
 
       this.log('TRANSLATION_ENQUEUE 響應:', response);
