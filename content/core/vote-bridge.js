@@ -13,6 +13,25 @@ import { sendMessage } from '../system/messaging.js';
 /**
  * 投票 Bridge 對象
  */
+function normalizeResolutionContext(context) {
+  if (!context || typeof context !== 'object') {
+    throw new Error('resolutionContext 必須是物件');
+  }
+
+  const requiredKeys = ['taskID', 'targetType', 'action', 'slotKey', 'timestamp'];
+  if (!requiredKeys.every((key) => Object.hasOwn(context, key))) {
+    throw new Error('resolutionContext 缺少必要欄位');
+  }
+
+  return {
+    taskID: context.taskID,
+    targetType: context.targetType,
+    action: context.action,
+    slotKey: context.slotKey,
+    timestamp: context.timestamp
+  };
+}
+
 export const voteBridge = {
   isInitialized: false,
   debug: false,
@@ -64,7 +83,18 @@ export const voteBridge = {
     this.log('enqueue 方法被調用，參數:', data);
 
     // 參數驗證
-    const { videoId, timestamp, voteType, translationID, originalSubtitle, slotKey, voteState, previousVoteState, previousCounts } = data;
+    const {
+      videoId,
+      timestamp,
+      voteType,
+      translationID,
+      originalSubtitle,
+      slotKey,
+      voteState,
+      previousVoteState,
+      previousCounts,
+      resolutionContext
+    } = data;
 
     if (!videoId || typeof videoId !== 'string') {
       const error = new Error('缺少必要參數: videoId 必須是字符串');
@@ -111,6 +141,10 @@ export const voteBridge = {
 
       if (voteState !== undefined) {
         payload.voteState = voteState;
+      }
+
+      if (resolutionContext !== undefined && resolutionContext !== null) {
+        payload.resolutionContext = normalizeResolutionContext(resolutionContext);
       }
 
       const response = await sendMessage({

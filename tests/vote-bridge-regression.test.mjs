@@ -77,6 +77,17 @@ function legacyVote(voteType) {
   };
 }
 
+function resolutionContext(overrides = {}) {
+  return {
+    taskID: 'candidate:550e8400-e29b-41d4-a716-446655440000',
+    targetType: 'candidate-translation',
+    action: 'review-candidate',
+    slotKey: 'slot-000321',
+    timestamp: 321.2,
+    ...overrides
+  };
+}
+
 test('Given legacy upvote and downvote calls When voteBridge serializes them Then voteState is omitted', async () => {
   const messages = [];
   const voteBridge = await loadVoteBridge(async (message) => {
@@ -161,4 +172,55 @@ test('Given sendMessage returns an error When voteBridge enqueues Then the respo
     voteBridge.enqueue(legacyVote('upvote')),
     /投票加入隊列失敗: queue rejected vote/
   );
+});
+
+test('Given a normal subtitle hover vote When voteBridge enqueues it Then the legacy payload shape remains unchanged', async () => {
+  const messages = [];
+  const voteBridge = await loadVoteBridge(async (message) => {
+    messages.push(message);
+    return { itemId: 'hover-vote-1' };
+  });
+
+  await voteBridge.enqueue({
+    ...legacyVote('upvote'),
+    translationID: null,
+    slotKey: 'slot-000124'
+  });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    type: 'VOTE_ENQUEUE',
+    payload: {
+      videoId: 'netflix-81234567',
+      timestamp: 12.5,
+      voteType: 'upvote',
+      translationID: null,
+      originalSubtitle: 'Original subtitle',
+      slotKey: 'slot-000124',
+      previousVoteState: null,
+      previousCounts: null
+    }
+  }]);
+});
+
+test('Given a candidate review vote When voteBridge enqueues it Then translationID and exactly five resolutionContext keys reach the queue', async () => {
+  const messages = [];
+  const voteBridge = await loadVoteBridge(async (message) => {
+    messages.push(message);
+    return { itemId: 'candidate-vote-1' };
+  });
+  const context = resolutionContext();
+
+  await voteBridge.enqueue({
+    ...legacyVote('upvote'),
+    translationID: '550e8400-e29b-41d4-a716-446655440000',
+    voteState: 'like',
+    resolutionContext: context
+  });
+
+  const payload = JSON.parse(JSON.stringify(messages[0].payload));
+  assert.equal(payload.translationID, '550e8400-e29b-41d4-a716-446655440000');
+  assert.deepEqual(payload.resolutionContext, context);
+  assert.deepEqual(Object.keys(payload.resolutionContext).sort(), [
+    'action', 'slotKey', 'targetType', 'taskID', 'timestamp'
+  ]);
 });
