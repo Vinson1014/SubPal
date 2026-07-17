@@ -2,7 +2,7 @@
  * 片尾任務面板測試
  *
  * 測試策略：
- * 1. 面板行為測試 — 驗證 show/hide/render/skip/close/idempotent/safe text
+ * 1. 面板行為測試 — 驗證 show/hide/render/next-task/close/idempotent/safe text
  * 2. 所有權測試 — 驗證 MAIN 初始化不持有片尾任務 transport 或 panel bridge
  *
  * 執行方式：node --experimental-vm-modules --test tests/endscreen-task-panel.test.mjs
@@ -26,6 +26,59 @@ import {
 } from './endscreen-task-panel-fixtures.mjs';
 
 const CJK_UI_FONT_STACK = '"Netflix Sans", system-ui, "Segoe UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", "Noto Sans CJK TC", Arial, sans-serif';
+
+function createViewport(innerWidth, innerHeight) {
+  const listeners = new Map();
+  return {
+    innerWidth,
+    innerHeight,
+    addEventListener(type, handler) {
+      listeners.set(type, handler);
+    },
+    removeEventListener(type, handler) {
+      if (listeners.get(type) === handler) listeners.delete(type);
+    },
+    resizeTo(width, height) {
+      this.innerWidth = width;
+      this.innerHeight = height;
+      listeners.get('resize')?.();
+    },
+    get listenerCount() {
+      return listeners.size;
+    }
+  };
+}
+
+function assertClearOfNetflixCTA(panelEl, viewport) {
+  const cta = { left: 102, top: 712, right: 342, bottom: 760 };
+  const panel = {
+    left: Number.parseInt(panelEl.style.left, 10),
+    right: viewport.innerWidth,
+    top: 0,
+    bottom: viewport.innerHeight - Number.parseInt(panelEl.style.bottom, 10)
+  };
+  const intersects = panel.left < cta.right && panel.right > cta.left
+    && panel.top < cta.bottom && panel.bottom > cta.top;
+
+  assert.equal(intersects, false,
+    '面板與 Netflix 的主要下一集 CTA 必須保留不重疊間距');
+  assert.ok(panel.bottom <= cta.top - 8,
+    '面板底部必須在 CTA 上方至少保留 8px 間距');
+}
+
+function assertViewportContainment(panelEl, viewport) {
+  const left = Number.parseInt(panelEl.style.left, 10);
+  const desktopCap = Number.parseInt(panelEl.style.maxWidth.match(/\d+(?=px)/)?.[0], 10);
+  const availableWidth = viewport.innerWidth - (left * 2);
+  const renderedWidth = Math.min(desktopCap, availableWidth);
+  const right = left + renderedWidth;
+
+  assert.ok(left >= 24, '面板必須保留既有 24px 左側安全邊界');
+  assert.ok(right <= viewport.innerWidth - 24,
+    '面板總寬度必須在左右安全邊界內，保留可見右側邊框與圓角');
+  assert.equal(panelEl.style.boxSizing, 'border-box',
+    '寬度契約必須將既有邊框納入面板總寬度');
+}
 
 test('Given two-world ownership When sources are inspected Then only the isolated bootstrap imports the panel', async () => {
   const isolated = await readFile(new URL('../content/system/isolated-endscreen-tasks.js', import.meta.url), 'utf8');
@@ -75,6 +128,121 @@ test('Given a panel instance When show is called with a non-empty official task 
   assert.ok(typeEl.textContent.includes('官方字幕'), '應標示為官方字幕任務');
 });
 
+test('Given a 1440×900 viewport When the panel renders Then it preserves the established desktop anchor and sizing baseline', async () => {
+  const Panel = await loadPanel();
+  const document = new FakeDocument();
+  document.defaultView = createViewport(1440, 900);
+  const { panel } = await createHarness(Panel, { document });
+
+  panel.show([createOfficialTask()], createContext());
+
+  const panelEl = document.getElementById('subpal-endscreen-panel');
+  assert.equal(panelEl.style.left, '24px');
+  assert.equal(panelEl.style.bottom, '80px');
+  assert.ok(panelEl.style.maxWidth.includes('380px'), '桌面最大寬度上限不得改變');
+  assert.ok(panelEl.style.minWidth.includes('280px'), '空間充足時應維持既有最小寬度');
+  assert.equal(panelEl.style.padding, '0', '寬度基準不包含額外外層內距');
+  assert.equal(panelEl.style.border, '1px solid rgba(255, 255, 255, 0.12)',
+    '寬度基準必須保留既有可見邊框');
+  assert.equal(panelEl.style.boxSizing, 'border-box', '桌面寬度上限必須包含既有邊框');
+});
+
+test('Given a 390×844 viewport When either endscreen panel variant renders Then it clears the Netflix primary CTA', async () => {
+  const Panel = await loadPanel();
+
+  for (const task of [createOfficialTask(), createCandidateTask()]) {
+    const document = new FakeDocument();
+    document.defaultView = createViewport(390, 844);
+    const { panel } = await createHarness(Panel, { document });
+    panel.show([task], createContext());
+
+    assertClearOfNetflixCTA(document.getElementById('subpal-endscreen-panel'), document.defaultView);
+  }
+});
+
+test('Given a 390×844 viewport with hostile debug text When each panel variant renders Then its total width remains inside the safe area', async () => {
+  const Panel = await loadPanel();
+  const hostileReason = 'unbroken-debug-reason-'.repeat(40);
+
+  for (const task of [
+    createOfficialTask({ rankReasons: [hostileReason] }),
+    createCandidateTask({ rankReasons: [hostileReason] })
+  ]) {
+    const document = new FakeDocument();
+    document.defaultView = createViewport(390, 844);
+    const { panel } = await createHarness(Panel, { document });
+    panel.debug = true;
+    panel.show([task], createContext());
+
+    assertViewportContainment(document.getElementById('subpal-endscreen-panel'), document.defaultView);
+  }
+});
+
+test('Given a visible desktop panel When the viewport becomes 390×844 Then it moves clear of the Netflix primary CTA', async () => {
+  const Panel = await loadPanel();
+  const document = new FakeDocument();
+  document.defaultView = createViewport(1440, 900);
+  const { panel } = await createHarness(Panel, { document });
+  panel.show([createOfficialTask()], createContext());
+
+  document.defaultView.resizeTo(390, 844);
+
+  assertClearOfNetflixCTA(document.getElementById('subpal-endscreen-panel'), document.defaultView);
+  panel.hide();
+  assert.equal(document.defaultView.listenerCount, 0,
+    '隱藏面板時應移除 viewport resize listener');
+});
+
+test('Given a visible panel When cleanup is called Then it removes the viewport resize listener', async () => {
+  const Panel = await loadPanel();
+  const document = new FakeDocument();
+  document.defaultView = createViewport(1440, 900);
+  const { panel } = await createHarness(Panel, { document });
+  panel.show([createOfficialTask()], createContext());
+
+  assert.equal(document.defaultView.listenerCount, 1, '顯示面板時應註冊 viewport resize listener');
+
+  panel.cleanup();
+
+  assert.equal(document.defaultView.listenerCount, 0,
+    'cleanup 應移除 viewport resize listener');
+});
+
+test('Given an explicit timecode seek control When inspected Then it exposes the visible label, exact aria name, quiet sizing, and invalid disablement contract', async () => {
+  const Panel = await loadPanel();
+  const { panel, document } = await createHarness(Panel);
+
+  panel.show([createOfficialTask()], createContext());
+
+  const jumpButton = document.getElementById('subpal-endscreen-panel')
+    .querySelector('.subpal-endscreen-timecode-jump-btn');
+  assert.ok(jumpButton, 'timecode should be rendered as a quick-jump control');
+  assert.equal(jumpButton.tagName, 'button');
+  assert.equal(jumpButton.type, 'button');
+  assert.equal(jumpButton.textContent, '跳至 02:04');
+  assert.equal(jumpButton.getAttribute('aria-label'), '跳至 02:04 字幕時間點');
+  assert.equal(jumpButton.style.border, '1px solid rgba(255, 255, 255, 0.15)');
+  assert.equal(jumpButton.style.width, '100%');
+  assert.equal(jumpButton.style.minHeight, '34px');
+  assert.equal(jumpButton.style.fontFamily, '"SF Mono", "Monaco", "Consolas", monospace');
+  assert.equal(jumpButton.style.fontVariantNumeric, 'tabular-nums');
+
+  jumpButton.dispatchEvent({ type: 'focus' });
+  assert.equal(jumpButton.style.boxShadow, '0 0 0 3px rgba(16, 185, 129, 0.15)');
+  jumpButton.dispatchEvent({ type: 'blur' });
+  assert.equal(jumpButton.style.boxShadow, 'none');
+
+  const { panel: invalidPanel, document: invalidDocument } = await createHarness(Panel);
+  let invalidDispatches = 0;
+  invalidPanel.onAction(() => { invalidDispatches += 1; });
+  invalidPanel.show([createOfficialTask({ timestamp: Number.NaN })], createContext());
+  const invalidJumpButton = invalidDocument.getElementById('subpal-endscreen-panel')
+    .querySelector('.subpal-endscreen-timecode-jump-btn');
+  assert.equal(invalidJumpButton.disabled, true, '非有限 timestamp 必須停用跳轉控制');
+  invalidJumpButton.dispatchEvent({ type: 'click', target: invalidJumpButton, preventDefault: () => {}, stopPropagation: () => {} });
+  assert.equal(invalidDispatches, 0, '停用的跳轉控制不得發送 intent');
+});
+
 test('Given a panel instance When show is called with a candidate task Then it renders the suggested subtitle', async () => {
   const Panel = await loadPanel();
   const { panel, document } = await createHarness(Panel);
@@ -108,7 +276,7 @@ test('Given a panel instance When show is called with an official task Then no s
   assert.equal(suggestedEl, null, '官方字幕任務不應有候選翻譯區塊');
 });
 
-test('Given a panel instance When show is called Then it renders skip, not-now, and close buttons', async () => {
+test('Given a panel instance When one task is shown Then it omits the next-task control but retains close', async () => {
   const Panel = await loadPanel();
   const { panel, document } = await createHarness(Panel);
   const task = createOfficialTask();
@@ -117,15 +285,8 @@ test('Given a panel instance When show is called Then it renders skip, not-now, 
 
   const panelEl = document.getElementById('subpal-endscreen-panel');
 
-  const skipBtn = panelEl.querySelector('.subpal-endscreen-skip-btn');
-  assert.ok(skipBtn, '應有 skip 按鈕');
-  assert.equal(skipBtn.style.color, 'rgba(255, 255, 255, 0.6)', '略過按鈕應使用安靜文字色');
-  assert.equal(skipBtn.style.fontFamily, 'inherit', '略過按鈕應繼承面板字型');
-
-  const notNowBtn = panelEl.querySelector('.subpal-endscreen-not-now-btn');
-  assert.ok(notNowBtn, '應有 not-now 按鈕');
-  assert.equal(notNowBtn.style.fontFamily, 'inherit', '次要按鈕應繼承面板字型');
-
+  assert.equal(panelEl.querySelector('.subpal-endscreen-next-task-btn'), null,
+    '單一任務不得建立沒有作用的下一題控制');
   const closeBtn = panelEl.querySelector('.subpal-endscreen-close-btn');
   assert.ok(closeBtn, '應有 close 按鈕');
 });
@@ -389,51 +550,68 @@ test('Given a visible panel When its current status is queried Then it reports i
   assert.equal(status.taskCount, 2, '狀態應顯示任務數');
 });
 
-test('Given a visible panel When skip button is clicked Then the panel hides and onSkip callback fires', async () => {
+test('Given multiple visible tasks When next-task is clicked Then it advances normally without hiding or dismissing', async () => {
   const Panel = await loadPanel();
   const { panel, document } = await createHarness(Panel);
-  let skipCalled = false;
-  panel.onSkip(() => { skipCalled = true; });
-
-  panel.show([createOfficialTask()], createContext());
-  const skipBtn = document.getElementById('subpal-endscreen-panel')
-    .querySelector('.subpal-endscreen-skip-btn');
-
-  skipBtn.dispatchEvent({ type: 'click', target: skipBtn, preventDefault: () => {}, stopPropagation: () => {} });
-
-  assert.ok(skipCalled, 'skip 回調應被觸發');
-  assert.equal(document.getElementById('subpal-endscreen-panel'), null, 'skip 後面板應隱藏');
-});
-
-test('Given multiple visible tasks When skip is clicked Then it advances exactly one task and only the final skip closes', async () => {
-  const Panel = await loadPanel();
-  const { panel, document } = await createHarness(Panel);
-  const skipped = [];
   let dismissed = 0;
-  panel.onSkip((payload) => { skipped.push(payload); });
   panel.onDismiss(() => { dismissed += 1; });
   const firstTask = createOfficialTask();
   const secondTask = createCandidateTask();
 
   panel.show([firstTask, secondTask], createContext());
-  let skipBtn = document.getElementById('subpal-endscreen-panel')
-    .querySelector('.subpal-endscreen-skip-btn');
-  skipBtn.dispatchEvent({ type: 'click', target: skipBtn, preventDefault: () => {}, stopPropagation: () => {} });
+  const panelElement = document.getElementById('subpal-endscreen-panel');
+  const nextBtn = panelElement.querySelector('.subpal-endscreen-next-task-btn');
+  assert.ok(nextBtn, '多任務面板應有下一題控制');
+  assert.equal(nextBtn.textContent, '下一題', '下一題控制應保留可見中文文案');
+  assert.equal(nextBtn.textContent.includes('→'), false, '下一題不得使用箭頭文字 glyph');
+  assert.equal(nextBtn.children[0].tagName, 'svg', '下一題應使用 inline SVG chevron');
+  assert.equal(nextBtn.children[0].getAttribute('aria-hidden'), 'true',
+    '下一題 chevron 應對輔助科技隱藏');
+  assert.equal(nextBtn.parentNode.style.justifyContent, 'flex-end', '下一題應右對齊');
+  nextBtn.focus();
 
-  let panelEl = document.getElementById('subpal-endscreen-panel');
-  assert.ok(panelEl, '非最後一項略過後應保留面板');
-  assert.equal(panelEl.querySelector('.subpal-endscreen-timecode').textContent, secondTask.timecode,
-    '略過後應重繪下一項任務');
-  assert.equal(skipped.length, 1, '每次略過應只發出一個意圖');
-  assert.equal(skipped[0].task, firstTask, '略過意圖應指出被略過的任務');
+  nextBtn.dispatchEvent({ type: 'click', target: nextBtn, preventDefault: () => {}, stopPropagation: () => {} });
 
-  skipBtn = panelEl.querySelector('.subpal-endscreen-skip-btn');
-  skipBtn.dispatchEvent({ type: 'click', target: skipBtn, preventDefault: () => {}, stopPropagation: () => {} });
+  assert.equal(document.getElementById('subpal-endscreen-panel'), panelElement,
+    '下一題不得移除既有面板節點');
+  assert.equal(panelElement.querySelector('.subpal-endscreen-timecode').textContent,
+    `跳至 ${secondTask.timecode}`, '下一題應重繪下一項任務');
+  assert.equal(dismissed, 0, '下一題不得通知擁有者 dismiss');
+  assert.equal(panel.isVisible, true, '下一題後面板仍應可見');
+  assert.equal(document.activeElement, panelElement.querySelector('.subpal-endscreen-next-task-btn'),
+    '正常前進後焦點應回到重建的下一題控制');
+});
 
-  assert.equal(document.getElementById('subpal-endscreen-panel'), null, '最後一項略過後應關閉面板');
-  assert.equal(skipped.length, 2, '最後一項略過仍應只額外發出一個意圖');
-  assert.equal(skipped[1].task, secondTask, '最後略過意圖應指出最後任務');
-  assert.equal(dismissed, 2, '略過與任務前進都應通知擁有者取消進行中的動作');
+test('Given multiple visible tasks When next-task is clicked repeatedly Then it wraps 1→2→1 indefinitely without hiding or dismissing', async () => {
+  const Panel = await loadPanel();
+  const { panel, document } = await createHarness(Panel);
+  let dismissed = 0;
+  panel.onDismiss(() => { dismissed += 1; });
+  const firstTask = createOfficialTask();
+  const secondTask = createCandidateTask();
+
+  panel.show([firstTask, secondTask], createContext());
+  const panelEl = document.getElementById('subpal-endscreen-panel');
+  const clickNext = () => {
+    const nextBtn = panelEl.querySelector('.subpal-endscreen-next-task-btn');
+    assert.ok(nextBtn, '多任務面板應持續提供下一題控制');
+    nextBtn.focus();
+    nextBtn.dispatchEvent({ type: 'click', target: nextBtn, preventDefault: () => {}, stopPropagation: () => {} });
+    return nextBtn;
+  };
+
+  clickNext();
+  assert.equal(panelEl.querySelector('.subpal-endscreen-timecode').textContent, `跳至 ${secondTask.timecode}`);
+  assert.equal(document.activeElement, panelEl.querySelector('.subpal-endscreen-next-task-btn'));
+
+  clickNext();
+  assert.equal(panelEl.querySelector('.subpal-endscreen-timecode').textContent, `跳至 ${firstTask.timecode}`);
+  assert.equal(document.activeElement, panelEl.querySelector('.subpal-endscreen-next-task-btn'),
+    '包覆前進後焦點應回到新建立的下一題控制');
+  assert.equal(document.getElementById('subpal-endscreen-panel'), panelEl,
+    '包覆前進不得移除面板節點');
+  assert.equal(panel.isVisible, true, '包覆前進後面板仍應可見');
+  assert.equal(dismissed, 0, '任何下一題前進都不得通知擁有者 dismiss');
 });
 
 test('Given an opt-out request When the confirmation opens Then it is a blocking dialog with initial cancel focus and safe Escape/outside behavior', async () => {
@@ -591,6 +769,25 @@ test('Given a visible panel When deterministic action states are set Then primar
   assert.equal(panel.getStatus().actionState, 'loading', '狀態 API 應提供目前行動狀態');
 });
 
+test('Given multiple visible tasks When action state changes Then next-task is disabled only during loading', async () => {
+  const Panel = await loadPanel();
+  const { panel, document } = await createHarness(Panel);
+
+  panel.show([createOfficialTask(), createCandidateTask()], createContext());
+  const getNextButton = () => document.getElementById('subpal-endscreen-panel')
+    .querySelector('.subpal-endscreen-next-task-btn');
+
+  assert.equal(getNextButton().disabled, false, 'idle 時下一題應可用');
+  panel.setActionState('loading');
+  assert.equal(getNextButton().disabled, true, 'loading 時下一題應停用');
+  panel.setActionState('success');
+  assert.equal(getNextButton().disabled, false, 'success 時下一題應恢復');
+  panel.setActionState('error');
+  assert.equal(getNextButton().disabled, false, 'error 時下一題應恢復');
+  panel.setActionState('idle');
+  assert.equal(getNextButton().disabled, false, 'idle 時下一題應維持可用');
+});
+
 test('Given an injected initialized debug config source When its value changes Then visible rank reasons rerender and the subscription disposes', async () => {
   const Panel = await loadPanel();
   const callbacks = new Set();
@@ -639,22 +836,6 @@ test('Given a visible panel When close button is clicked Then the panel hides an
   assert.ok(closeCalled, 'close 回調應被觸發');
   assert.ok(dismissCalled, 'close 回調應通知擁有者取消進行中的動作');
   assert.equal(document.getElementById('subpal-endscreen-panel'), null, 'close 後面板應隱藏');
-});
-
-test('Given a visible panel When not-now button is clicked Then the panel hides', async () => {
-  const Panel = await loadPanel();
-  const { panel, document } = await createHarness(Panel);
-  let dismissCalled = false;
-  panel.onDismiss(() => { dismissCalled = true; });
-
-  panel.show([createOfficialTask()], createContext());
-  const notNowBtn = document.getElementById('subpal-endscreen-panel')
-    .querySelector('.subpal-endscreen-not-now-btn');
-
-  notNowBtn.dispatchEvent({ type: 'click', target: notNowBtn, preventDefault: () => {}, stopPropagation: () => {} });
-
-  assert.equal(document.getElementById('subpal-endscreen-panel'), null, 'not-now 後面板應隱藏');
-  assert.ok(dismissCalled, 'not-now 回調應通知擁有者取消進行中的動作');
 });
 
 test('Given a panel instance When show is called Then the panel has accessible aria labels', async () => {

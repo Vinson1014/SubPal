@@ -25,7 +25,8 @@ const OPT_OUT_STATES = new Set(['idle', 'pending', 'error']);
 const OVERLAY_UI_FONT_STACK = '"Netflix Sans", system-ui, "Segoe UI", "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", "Noto Sans CJK TC", Arial, sans-serif';
 const VOTE_ICON_PATHS = {
   like: 'M2 9h4v12H2zM22 10c0-1.1-.9-2-2-2h-6.3l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L13.17 1 6.59 7.59C6.22 7.95 6 8.45 6 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z',
-  dislike: 'M2 14h4V2H2zM22 13c0 1.1-.9 2-2 2h-6.3l.95 4.57.03.32c0 .41-.17.79-.44 1.06L13.17 23l-6.58-6.59C6.22 16.05 6 15.55 6 15V5c0-1.1.9-2 2-2h9c.83 0 1.54.5 1.84 1.22l3.02 7.05c.09.23.14.47.14.73v2z'
+  dislike: 'M2 14h4V2H2zM22 13c0 1.1-.9 2-2 2h-6.3l.95 4.57.03.32c0 .41-.17.79-.44 1.06L13.17 23l-6.58-6.59C6.22 16.05 6 15.55 6 15V5c0-1.1.9-2 2-2h9c.83 0 1.54.5 1.84 1.22l3.02 7.05c.09.23.14.47.14.73v2z',
+  'chevron-right': 'M9 18l6-6-6-6'
 };
 
 /**
@@ -61,6 +62,7 @@ class EndscreenTaskPanel {
     this.currentContext = null;
     this.currentTaskIndex = 0;
     this.attachAnimationTimer = null;
+    this.viewportResizeHandler = null;
     this.configSubscriptionDisposer = null;
     this.confirmationOverlay = null;
     this.confirmationDialog = null;
@@ -69,7 +71,6 @@ class EndscreenTaskPanel {
 
     // 事件回調（展示性，Phase 5 接管實際邏輯）
     this.eventCallbacks = {
-      onSkip: null,
       onClose: null,
       onDismiss: null,
       onAction: null,
@@ -156,6 +157,7 @@ class EndscreenTaskPanel {
     this.log('隱藏片尾任務面板');
 
     this.clearAttachAnimationTimer();
+    this.clearViewportResizeHandler();
     if (this.container && this.container.parentNode) {
       this.container.parentNode.removeChild(this.container);
     }
@@ -202,11 +204,11 @@ class EndscreenTaskPanel {
     // 面板樣式：定位於左下角，避開 Netflix 主要「下一集」CTA
     Object.assign(this.container.style, {
       position: 'fixed',
-      bottom: '80px',
       left: '24px',
       zIndex: '10002',
-      maxWidth: '380px',
-      minWidth: '280px',
+      boxSizing: 'border-box',
+      maxWidth: 'min(380px, calc(100vw - 48px))',
+      minWidth: 'min(280px, calc(100vw - 48px))',
       padding: '0',
       borderRadius: '8px',
       backgroundColor: 'rgba(20, 20, 24, 0.92)',
@@ -222,9 +224,21 @@ class EndscreenTaskPanel {
       opacity: '0',
       transform: 'translateY(8px)'
     });
+    this.updateViewportPosition();
+    if (typeof doc.defaultView?.addEventListener === 'function') {
+      this.viewportResizeHandler = () => this.updateViewportPosition();
+      doc.defaultView.addEventListener('resize', this.viewportResizeHandler);
+    }
     this.container.addEventListener('click', (e) => {
       e.stopPropagation();
     });
+  }
+
+  updateViewportPosition() {
+    if (!this.container) return;
+
+    const isNarrowViewport = this.document?.defaultView?.innerWidth <= 640;
+    this.container.style.bottom = isNarrowViewport ? '140px' : '80px';
   }
 
   /**
@@ -401,7 +415,7 @@ class EndscreenTaskPanel {
       contextLabel.className = 'subpal-endscreen-rank-context';
       // 安全渲染：使用 textContent 組合，不使用 innerHTML
       contextLabel.textContent = `排序原因：${rankReasons.join(', ')}`;
-      contextLabel.style.cssText = 'font-size: 11px; color: rgba(255, 255, 255, 0.4);';
+      contextLabel.style.cssText = 'font-size: 11px; color: rgba(255, 255, 255, 0.4); overflow-wrap: anywhere;';
       contextSection.appendChild(contextLabel);
 
       this.container.appendChild(contextSection);
@@ -454,21 +468,26 @@ class EndscreenTaskPanel {
       }));
     }
 
-    actionBar.appendChild(this.createControl({
-      className: 'subpal-endscreen-not-now-btn',
-      text: '稍後再說',
-      variant: 'secondary',
-      onClick: () => this.handleNotNow()
-    }));
-    actionBar.appendChild(this.createControl({
-      className: 'subpal-endscreen-skip-btn',
-      text: '略過',
-      ariaLabel: '略過此任務',
-      variant: 'quiet',
-      onClick: () => this.handleSkip()
-    }));
-
     this.container.appendChild(actionBar);
+
+    if (this.currentTasks.length > 1) {
+      const navigationBar = doc.createElement('div');
+      Object.assign(navigationBar.style, {
+        display: 'flex',
+        justifyContent: 'flex-end',
+        padding: '0 16px 12px'
+      });
+      navigationBar.appendChild(this.createControl({
+        className: 'subpal-endscreen-next-task-btn',
+        text: '下一題',
+        ariaLabel: '下一題',
+        variant: 'quiet',
+        icon: 'chevron-right',
+        disabled: this.actionController.state === 'loading',
+        onClick: () => this.handleNextTask()
+      }));
+      this.container.appendChild(navigationBar);
+    }
 
     if (this.actionController.state === 'loading' || this.actionController.state === 'success' || this.actionController.state === 'error') {
       const actionStatus = doc.createElement('div');
@@ -521,7 +540,7 @@ class EndscreenTaskPanel {
         : `1px solid ${isQuiet ? 'rgba(255, 255, 255, 0.15)' : 'rgba(255, 255, 255, 0.2)'}`;
     button.type = 'button';
     button.className = className;
-    button.textContent = icon ? '' : text;
+    button.textContent = isVote ? '' : text;
     button.setAttribute('aria-label', ariaLabel || text);
     if (isVote) button.setAttribute('aria-pressed', String(active));
     button.disabled = disabled;
@@ -552,7 +571,15 @@ class EndscreenTaskPanel {
       svg.setAttribute('aria-hidden', 'true');
       const path = createSvgElement('path');
       path.setAttribute('d', VOTE_ICON_PATHS[icon]);
-      path.setAttribute('fill', 'currentColor');
+      if (icon === 'chevron-right') {
+        path.setAttribute('fill', 'none');
+        path.setAttribute('stroke', 'currentColor');
+        path.setAttribute('stroke-width', '2');
+        path.setAttribute('stroke-linecap', 'round');
+        path.setAttribute('stroke-linejoin', 'round');
+      } else {
+        path.setAttribute('fill', 'currentColor');
+      }
       svg.appendChild(path);
       button.appendChild(svg);
     }
@@ -764,31 +791,24 @@ class EndscreenTaskPanel {
     this.attachAnimationTimer = null;
   }
 
-  // ── 事件處理 ──
+  clearViewportResizeHandler() {
+    if (!this.viewportResizeHandler) return;
 
-  handleSkip() {
-    this.log('skip 按鈕被點擊');
-    const task = this.currentTasks?.[this.currentTaskIndex] || null;
-    this.triggerCallback('onSkip', {
-      intent: 'skip-task',
-      task,
-      context: this.currentContext
-    });
-    this.triggerCallback('onDismiss');
-    if (this.currentTasks && this.currentTaskIndex + 1 < this.currentTasks.length) {
-      this.currentTaskIndex += 1;
-      this.actionController.reset();
-      this.clearOptOutConfirmation();
-      this.renderContent();
-      return;
-    }
-    this.hide();
+    this.document?.defaultView?.removeEventListener?.('resize', this.viewportResizeHandler);
+    this.viewportResizeHandler = null;
   }
 
-  handleNotNow() {
-    this.log('not-now 按鈕被點擊');
-    this.triggerCallback('onDismiss');
-    this.hide();
+  // ── 事件處理 ──
+
+  handleNextTask() {
+    if (!this.currentTasks || this.currentTasks.length < 2 || this.actionController.state === 'loading') return;
+
+    this.log('下一題按鈕被點擊');
+    this.currentTaskIndex = (this.currentTaskIndex + 1) % this.currentTasks.length;
+    this.actionController.reset();
+    this.clearOptOutConfirmation();
+    this.renderContent();
+    this.container?.querySelector('.subpal-endscreen-next-task-btn')?.focus();
   }
 
   handleClose() {
@@ -815,10 +835,6 @@ class EndscreenTaskPanel {
   }
 
   // ── 回調註冊 ──
-
-  onSkip(callback) {
-    this.eventCallbacks.onSkip = callback;
-  }
 
   onClose(callback) {
     this.eventCallbacks.onClose = callback;
@@ -855,6 +871,7 @@ class EndscreenTaskPanel {
     }
 
     this.clearAttachAnimationTimer();
+    this.clearViewportResizeHandler();
 
     if (this.container && this.container.parentNode) {
       this.container.parentNode.removeChild(this.container);

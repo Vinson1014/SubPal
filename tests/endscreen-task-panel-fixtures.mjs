@@ -398,7 +398,6 @@ export function createTrackedConfigBridge() {
 export async function createHarness(Panel, overrides = {}) {
   const document = new FakeDocument();
   const scheduler = overrides.scheduler ?? createScheduler();
-  const callbacks = { onSkip: [], onClose: [], onAction: [] };
 
   const panel = new Panel({
     document,
@@ -410,5 +409,5 @@ export async function createHarness(Panel, overrides = {}) {
   // FakeDocument 沒有 defaultView，所以 initialize() 會跳過 ConfigBridge 匯入
   await panel.initialize();
 
-  return { panel, document, scheduler, callbacks };
+  return { panel, document, scheduler };
 }
