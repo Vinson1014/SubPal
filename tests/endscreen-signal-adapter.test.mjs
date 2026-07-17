@@ -30,8 +30,9 @@ test('Given one trusted active promoted preview with every empirical marker When
   const Adapter = await loadAdapter();
   const harness = createHarness({
     media: { currentTime: 20, duration: 1800, ended: false, paused: false },
-    markers: [{ uia: 'background-video' }, { uia: 'promoted-video' }, { uia: 'postplay-background-play' }]
+    markers: [{ uia: 'background-video-container' }, { uia: 'background-video' }, { uia: 'promoted-video' }, { uia: 'postplay-background-play' }]
   });
+  harness.roots[0].dataset.uia = 'watch-video';
   start(Adapter, harness);
 
   harness.video.dispatch('play');
@@ -43,6 +44,59 @@ test('Given one trusted active promoted preview with every empirical marker When
     variant: 'recommendation-preview',
     evidence: { promotedPreview: true }
   }]);
+});
+
+test('Given the live Netflix recommendation hierarchy with an opacity-zero video wrapper When the preview plays Then it observes recommendation-preview', async () => {
+  const Adapter = await loadAdapter();
+  const harness = createHarness({
+    media: { currentTime: 21, duration: 63, ended: false, paused: false },
+    markers: [
+      { uia: 'background-video-container' },
+      { uia: 'background-video', style: { opacity: '0' } },
+      { uia: 'promoted-video' },
+      { uia: 'postplay-background-play' }
+    ]
+  });
+  const watchVideo = harness.roots[0];
+  watchVideo.dataset.uia = 'watch-video';
+  const trailer = watchVideo.append(new FakeNode());
+  const backgroundContainer = harness.markerNodes[0];
+  const backgroundVideo = harness.markerNodes[1];
+  const promotedVideo = harness.markerNodes[2];
+  const playAction = harness.markerNodes[3];
+  watchVideo.children = watchVideo.children.filter((node) =>
+    ![harness.video, backgroundContainer, backgroundVideo, promotedVideo, playAction].includes(node)
+  );
+  trailer.append(backgroundContainer);
+  backgroundContainer.append(backgroundVideo);
+  backgroundVideo.append(new FakeNode()).append(harness.video);
+  trailer.append(new FakeNode()).append(promotedVideo).append(playAction);
+  start(Adapter, harness);
+
+  harness.video.dispatch('play');
+  harness.scheduler.flush();
+
+  assert.equal(harness.observations[0]?.variant, 'recommendation-preview');
+});
+
+test('Given the recommendation shell is visible during its countdown pause When the media pauses Then it preserves a paused preview observation', async () => {
+  const Adapter = await loadAdapter();
+  const harness = createHarness({
+    media: { currentTime: 21, duration: 63, ended: false, paused: true },
+    markers: [
+      { uia: 'background-video-container' },
+      { uia: 'promoted-video' },
+      { uia: 'postplay-background-play' }
+    ]
+  });
+  harness.roots[0].dataset.uia = 'watch-video';
+  start(Adapter, harness);
+
+  harness.video.dispatch('pause');
+  harness.scheduler.flush();
+
+  assert.equal(harness.observations[0]?.variant, 'recommendation-preview');
+  assert.equal(harness.observations[0]?.snapshot?.state, 'paused');
 });
 
 test('Given one trusted live State 2 credits capture with direct player-root children at alternate finite media values When it plays Then it observes the hardened State 2 contract once', async () => {

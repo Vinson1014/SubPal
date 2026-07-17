@@ -24,6 +24,12 @@ export class FakeNode {
   }
 
   append(child) { child.parentNode = this; this.children.push(child); return child; }
+  remove() {
+    if (!this.parentNode) return;
+    this.parentNode.children.splice(this.parentNode.children.indexOf(this), 1);
+    this.parentNode = null;
+    this.isConnected = false;
+  }
   contains(node) { for (let current = node; current; current = current.parentNode) if (current === this) return true; return false; }
   getClientRects() { return this.rendered ? [{}] : []; }
   addEventListener(type, listener) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]); }
@@ -61,10 +67,17 @@ export class FakeObserver {
 
 function createScheduler() {
   const jobs = [];
+  let now = 0;
+  const runDue = () => {
+    const due = jobs.filter((job) => !job.cancelled && job.runAt <= now);
+    for (const job of due) jobs.splice(jobs.indexOf(job), 1);
+    for (const job of due) job.callback();
+  };
   return {
-    schedule(callback) { const job = { callback, cancelled: false }; jobs.push(job); return job; },
+    schedule(callback, delay = 0) { const job = { callback, cancelled: false, runAt: now + delay }; jobs.push(job); return job; },
     cancel(job) { job.cancelled = true; },
-    flush() { for (const job of jobs.splice(0)) if (!job.cancelled) job.callback(); },
+    flush() { runDue(); },
+    advance(milliseconds) { now += milliseconds; runDue(); },
     get pending() { return jobs.filter((job) => !job.cancelled).length; }
   };
 }

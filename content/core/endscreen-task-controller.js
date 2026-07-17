@@ -1,3 +1,5 @@
+const TYPE_B_ENDSCREEN_TASKS_ENABLED = false;
+
 class EndscreenTaskController {
   constructor({ clock, schedule, sendMessage, onTasks, languageCode, debounceMs = 500 }) {
     if (typeof clock !== 'function' || typeof schedule !== 'function' || typeof sendMessage !== 'function' || typeof onTasks !== 'function') {
@@ -83,8 +85,9 @@ class EndscreenTaskController {
     if (!this.isTrustedContext(context) || !hasValidSnapshot) return false;
 
     if (observation.variant === 'recommendation-preview') {
+      if (!TYPE_B_ENDSCREEN_TASKS_ENABLED) return false;
       return (
-        snapshot.state === 'playing' &&
+        (snapshot.state === 'playing' || snapshot.state === 'paused') &&
         observation.evidence?.promotedPreview === true
       );
     }

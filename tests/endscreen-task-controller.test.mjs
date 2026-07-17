@@ -183,15 +183,31 @@ test('Given a task request is pending When the endscreen becomes inactive Then i
   assert.equal(requestCount, 1, 'inactive signal 不應清除 once-per-context 完成狀態');
 });
 
-test('Given active media with promoted-preview evidence When it is confirmed twice Then it requests recommendation preview tasks', async () => {
-  const { controller, scheduler, sentMessages } = createController(EndscreenTaskController);
+test('Given Type B State B recommendation preview evidence When it is temporarily disabled and confirmed twice Then it sends no requests or task batches', async () => {
+  const { controller, scheduler, sentMessages, taskBatches } = createController(EndscreenTaskController);
 
   controller.observe(recommendationPreviewObservation());
   controller.observe(recommendationPreviewObservation());
   scheduler.advance(500);
   await Promise.resolve();
 
-  assert.equal(sentMessages.length, 1);
+  assert.deepEqual(sentMessages, []);
+  assert.deepEqual(taskBatches, []);
+});
+
+test('Given Type B State A paused recommendation countdown evidence When it is temporarily disabled and confirmed twice Then it sends no requests or task batches', async () => {
+  const { controller, scheduler, sentMessages, taskBatches } = createController(EndscreenTaskController);
+  const countdownPreview = recommendationPreviewObservation(createContext(), {
+    snapshot: { currentTime: 15, duration: 63, state: 'paused' }
+  });
+
+  controller.observe(countdownPreview);
+  controller.observe(countdownPreview);
+  scheduler.advance(500);
+  await Promise.resolve();
+
+  assert.deepEqual(sentMessages, []);
+  assert.deepEqual(taskBatches, []);
 });
 
 test('Given stale preview markers at terminal media When they are observed Then they never request tasks', async () => {

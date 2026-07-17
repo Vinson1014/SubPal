@@ -124,6 +124,7 @@ class IsolatedEndscreenTasks {
         controller,
         onInactive: () => {
           if (!this.isCurrentLifecycle(lifecycle) || this.panel !== panel || this.controller !== controller) return;
+          if (panel.isVisible) return;
           this.closePendingSubmission('片尾任務已結束，請再試一次。');
           panel.hide();
           controller.handleInternalEvent({ type: 'ENDSCREEN_INACTIVE' });

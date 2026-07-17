@@ -1,3 +1,5 @@
+const INACTIVE_DEBOUNCE_MS = 500;
+
 class EndscreenSignalAdapter {
   constructor({ document, Observer, schedule, cancel, getContext, controller, onInactive }) {
     if (!document || typeof Observer !== 'function' || typeof schedule !== 'function' || typeof cancel !== 'function' || typeof getContext !== 'function' ||
@@ -16,6 +18,7 @@ class EndscreenSignalAdapter {
     this.observer = null;
     this.mediaListeners = new Map();
     this.pendingJob = null;
+    this.pendingInactiveJob = null;
     this.started = false;
     this.onMediaSignal = () => this.queueObservation();
     this.onDocumentClick = (event) => this.forwardDismissal(event);
@@ -38,6 +41,8 @@ class EndscreenSignalAdapter {
     this.observer = null;
     if (this.pendingJob !== null) this.cancel(this.pendingJob);
     this.pendingJob = null;
+    if (this.pendingInactiveJob !== null) this.cancel(this.pendingInactiveJob);
+    this.pendingInactiveJob = null;
     for (const [media, listeners] of this.mediaListeners) {
       for (const type of listeners) media.removeEventListener(type, this.onMediaSignal);
     }
@@ -52,9 +57,22 @@ class EndscreenSignalAdapter {
       this.refreshMediaListeners();
       const candidate = this.getCandidate();
       if (candidate) {
+        if (this.pendingInactiveJob !== null) this.cancel(this.pendingInactiveJob);
+        this.pendingInactiveJob = null;
         this.controller.observe(candidate.observation);
-      } else {
-        this.onInactive();
+      } else if (this.pendingInactiveJob === null) {
+        this.pendingInactiveJob = this.schedule(() => {
+          this.pendingInactiveJob = null;
+          if (!this.started) return;
+          this.refreshMediaListeners();
+          const confirmedCandidate = this.getCandidate();
+          if (confirmedCandidate) {
+            this.controller.observe(confirmedCandidate.observation);
+            return;
+          }
+          if (this.getRecommendationShell(null)) return;
+          this.onInactive();
+        }, INACTIVE_DEBOUNCE_MS);
       }
     });
   }
@@ -84,13 +102,13 @@ class EndscreenSignalAdapter {
     const context = this.getContext();
     if (!this.isTrustedContext(context)) return null;
 
-    const media = this.onlyLive(this.document.querySelectorAll('video'));
+    const media = this.onlyConnected(this.document.querySelectorAll('video'));
     if (!media || media.readyState !== 4 || !this.hasFiniteTimeline(media)) return null;
 
-    if (media.ended || media.paused) return null;
+    if (media.ended) return null;
     const watchCreditsCta = this.onlyLive(this.document.querySelectorAll('[data-uia="watch-credits-seamless-button"]'));
     const nextEpisodeCta = this.onlyLive(this.document.querySelectorAll('[data-uia="next-episode-seamless-button"]'));
-    const state2Root = watchCreditsCta && nextEpisodeCta && this.sharedPlayerOwner(media, [watchCreditsCta, nextEpisodeCta]);
+    const state2Root = !media.paused && watchCreditsCta && nextEpisodeCta && this.sharedPlayerOwner(media, [watchCreditsCta, nextEpisodeCta]);
     if (state2Root) {
       return {
         root: state2Root,
@@ -104,20 +122,15 @@ class EndscreenSignalAdapter {
       };
     }
 
-    const markers = [
-      this.onlyLive(this.document.querySelectorAll('[data-uia="background-video"]')),
-      this.onlyLive(this.document.querySelectorAll('[data-uia="promoted-video"]')),
-      this.onlyLive(this.document.querySelectorAll('[data-uia="postplay-background-play"]'))
-    ];
-    if (markers.includes(null)) return null;
-    const root = this.sharedOwner(media, markers);
-    if (!root) return null;
+    const recommendationShell = this.getRecommendationShell(media);
+    if (!recommendationShell) return null;
+    const { root, markers } = recommendationShell;
     return {
       root,
       actionMarker: markers[2],
       observation: {
         context,
-        snapshot: { currentTime: media.currentTime, duration: media.duration, state: 'playing' },
+        snapshot: { currentTime: media.currentTime, duration: media.duration, state: media.paused ? 'paused' : 'playing' },
         variant: 'recommendation-preview',
         evidence: { promotedPreview: true }
       }
@@ -127,6 +140,22 @@ class EndscreenSignalAdapter {
   onlyLive(nodes) {
     const candidates = Array.from(nodes).filter((node) => this.isLive(node));
     return candidates.length === 1 ? candidates[0] : null;
+  }
+
+  onlyConnected(nodes) {
+    const candidates = Array.from(nodes).filter((node) => node?.isConnected);
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
+  getRecommendationShell(media) {
+    const markers = [
+      this.onlyLive(this.document.querySelectorAll('[data-uia="background-video-container"]')),
+      this.onlyLive(this.document.querySelectorAll('[data-uia="promoted-video"]')),
+      this.onlyLive(this.document.querySelectorAll('[data-uia="postplay-background-play"]'))
+    ];
+    if (markers.includes(null)) return null;
+    const root = this.sharedWatchVideoOwner(media, markers);
+    return root ? { root, markers } : null;
   }
 
   isLive(node) {
@@ -145,18 +174,13 @@ class EndscreenSignalAdapter {
     return Number.isFinite(media.currentTime) && Number.isFinite(media.duration) && media.duration > 0 && media.currentTime >= 0;
   }
 
-  sharedOwner(media, markers) {
-    const root = media.parentNode;
-    if (!root || root === this.document || !this.isLive(root)) return null;
-    if (markers.every((marker) => marker.parentNode === root)) return root;
-
-    const playerRoots = [];
-    for (let candidate = root.parentNode; candidate && candidate !== this.document; candidate = candidate.parentNode) {
-      if (candidate.dataset?.uia === 'player' && this.isLive(candidate) && markers.every((marker) => candidate.contains(marker))) {
-        playerRoots.push(candidate);
-      }
-    }
-    return playerRoots.length === 1 ? playerRoots[0] : null;
+  sharedWatchVideoOwner(media, markers) {
+    const watchVideoRoots = Array.from(this.document.querySelectorAll('[data-uia="watch-video"]')).filter((candidate) =>
+      this.isLive(candidate) &&
+      (!media || candidate.contains(media)) &&
+      markers.every((marker) => candidate.contains(marker))
+    );
+    return watchVideoRoots.length === 1 ? watchVideoRoots[0] : null;
   }
 
   sharedPlayerOwner(media, markers) {
