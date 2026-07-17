@@ -36,6 +36,11 @@ function safeText(value) {
   return String(value);
 }
 
+function createControlId() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  return `control-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
 class EndscreenTaskPanel {
   /**
    * @param {Object} options
@@ -314,14 +319,25 @@ class EndscreenTaskPanel {
     const timecodeBar = doc.createElement('div');
     timecodeBar.style.cssText = 'padding: 4px 16px;';
 
-    const timecode = doc.createElement('span');
-    timecode.className = 'subpal-endscreen-timecode';
-    timecode.textContent = safeText(task.timecode);
+    const actionIsDisabled = this.actionController.isBlocked();
+    const canJumpToTimecode = Number.isFinite(task.timestamp) && task.timestamp >= 0;
+    const timecode = this.createControl({
+      className: 'subpal-endscreen-timecode subpal-endscreen-timecode-jump-btn',
+      text: `跳至 ${safeText(task.timecode)}`,
+      ariaLabel: `跳至 ${safeText(task.timecode)} 字幕時間點`,
+      variant: 'quiet',
+      disabled: actionIsDisabled || !canJumpToTimecode,
+      onClick: (event) => this.handleAction('jump-to-timecode', event)
+    });
+    timecode.setAttribute('data-control-id', createControlId());
+    timecode.setAttribute('data-subpal-jump-video-id', String(this.currentContext?.videoId || ''));
+    timecode.setAttribute('data-subpal-jump-session-id', String(this.currentContext?.sessionId || ''));
+    timecode.setAttribute('data-subpal-jump-epoch', String(this.currentContext?.epoch ?? ''));
+    timecode.setAttribute('data-subpal-jump-target-timestamp', String(task.timestamp));
     Object.assign(timecode.style, {
+      width: '100%',
+      boxSizing: 'border-box',
       fontFamily: '"SF Mono", "Monaco", "Consolas", monospace',
-      fontSize: '13px',
-      fontWeight: '600',
-      color: 'rgba(255, 255, 255, 0.8)',
       fontVariantNumeric: 'tabular-nums'
     });
     timecodeBar.appendChild(timecode);
@@ -399,7 +415,6 @@ class EndscreenTaskPanel {
       flexWrap: 'wrap'
     });
 
-    const actionIsDisabled = this.actionController.isBlocked();
     const voteState = this.actionController.selectedVote(task);
     if (task.action === 'review-candidate') {
       actionBar.appendChild(this.createControl({
@@ -464,6 +479,8 @@ class EndscreenTaskPanel {
         ? '正在處理，請稍候。'
         : isError
           ? this.actionController.error || '無法完成此任務，請再試一次。'
+          : this.actionController.successfulIntent === 'jump-to-timecode'
+            ? '已跳轉至字幕時間點。'
           : this.actionController.successfulVoteState === 'like'
             ? '已送出喜歡評價。'
             : this.actionController.successfulVoteState === 'dislike'
@@ -781,10 +798,15 @@ class EndscreenTaskPanel {
     this.hide();
   }
 
-  handleAction(intent) {
+  handleAction(intent, event = null) {
     this.log('任務行動按鈕被點擊', { intent });
     const task = this.currentTasks?.[this.currentTaskIndex];
-    return this.actionController.handle(intent, task, this.currentContext, this.eventCallbacks.onAction);
+    const metadata = intent === 'jump-to-timecode' ? {
+      controlId: event?.currentTarget?.getAttribute?.('data-control-id'),
+      requestId: event?.currentTarget?.getAttribute?.('data-subpal-jump-request-id'),
+      issuedAt: Number(event?.currentTarget?.getAttribute?.('data-subpal-jump-issued-at'))
+    } : {};
+    return this.actionController.handle(intent, task, this.currentContext, this.eventCallbacks.onAction, metadata);
   }
 
   triggerCallback(name, data = null) {

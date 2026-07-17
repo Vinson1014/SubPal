@@ -61,7 +61,7 @@ test('Given a panel instance When show is called with a non-empty official task 
   // 面板應顯示 timecode
   const timecodeEl = panelEl.querySelector('.subpal-endscreen-timecode');
   assert.ok(timecodeEl, '應有 timecode 元素');
-  assert.equal(timecodeEl.textContent, '02:04', 'timecode 應為 02:04');
+  assert.equal(timecodeEl.textContent, '跳至 02:04', 'timecode 應顯示明確跳轉文案');
 
   // 面板應顯示原始字幕（使用 textContent，非 innerHTML）
   const originalEl = panelEl.querySelector('.subpal-endscreen-original');
@@ -198,7 +198,7 @@ test('Given a visible panel When show is called again with different tasks Then 
   const timecode2 = panelEl2.querySelector('.subpal-endscreen-timecode').textContent;
 
   assert.notEqual(timecode1, timecode2, '更新後 timecode 應改變');
-  assert.equal(timecode2, '05:21', '更新後 timecode 應為候選任務的 05:21');
+  assert.equal(timecode2, '跳至 05:21', '更新後 timecode 應顯示候選任務的跳轉文案');
 });
 
 test('Given a panel with task text containing HTML When it is rendered Then the text is safely escaped via textContent', async () => {
@@ -564,7 +564,7 @@ test('Given a visible panel When opt-out is cancelled Then it preserves the curr
 
   assert.equal(callbackCount, 0, '取消不得發出 opt-out 意圖');
   assert.equal(document.getElementById('subpal-endscreen-panel')
-    .querySelector('.subpal-endscreen-timecode').textContent, task.timecode, '取消不得變更目前任務');
+    .querySelector('.subpal-endscreen-timecode').textContent, `跳至 ${task.timecode}`, '取消不得變更目前任務');
   assert.equal(optOutBtn._focused, true, '取消後應將焦點還給啟動控制項');
 });
 

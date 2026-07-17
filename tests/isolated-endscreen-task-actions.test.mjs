@@ -60,8 +60,10 @@ function createPayload(intent, task = officialTask) {
   };
 }
 
-function createOwner({ translationResult = { itemId: 'translation-1' }, translationError = null, voteResult = { itemId: 'vote-1' } } = {}) {
-  const calls = { opens: [], translations: [], votes: [] };
+function createOwner({ translationResult = { itemId: 'translation-1' }, translationError = null, voteResult = { itemId: 'vote-1' }, sendPageMessage = async (message) => ({ success: true, status: 'success', action: 'jump-to-timecode', requestId: message.requestId, controlId: message.controlId, issuedAt: message.issuedAt, expected: message.expected, targetTimestamp: message.expected.targetTimestamp, targetMilliseconds: message.expected.targetTimestamp * 1000, snapshot: { videoId: message.expected.videoId, sessionId: message.expected.sessionId, currentTime: message.expected.targetTimestamp * 1000 } }), pathname = '/watch/81234567', playbackContext = { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, state: 'ready' }, playbackContextManager = { getCurrentContext: () => ({ ...playbackContext }) } } = {}) {
+  const calls = { opens: [], translations: [], votes: [], pageMessages: [] };
+  const location = { pathname };
+  const internalEventHandlers = new Map();
   class Dialog {
     constructor() {
       this.isInitialized = false;
@@ -131,20 +133,41 @@ function createOwner({ translationResult = { itemId: 'translation-1' }, translat
   const owner = new IsolatedEndscreenTasks({
     document: {},
     Observer: class {},
-    location: { pathname: '/watch/81234567' },
+    location,
     configManager: { get: () => true, subscribe: () => () => {} },
     schedule: () => 0,
     cancel: () => {},
     clock: () => 0,
     sendMessage: async () => ({ tasks: [] }),
+    sendPageMessage(message) {
+      calls.pageMessages.push(message);
+      return sendPageMessage(message);
+    },
+    registerInternalEventHandler(type, handler) {
+      const handlers = internalEventHandlers.get(type) ?? new Set();
+      handlers.add(handler);
+      internalEventHandlers.set(type, handlers);
+      return () => handlers.delete(handler);
+    },
+    routeTarget: new EventTarget(),
+    playbackContextManager,
     Dialog,
     translation: translationBridge,
     vote: voteBridge,
     config
   });
   owner.lifecycleGeneration = 1;
-  owner.panel = {};
-  return { owner, calls };
+  owner.panel = { hide() {} };
+  return {
+    owner,
+    calls,
+    location,
+    emitInternal(event) {
+      const handlers = [...(internalEventHandlers.get(event.type) ?? [])];
+      for (const handler of handlers) handler(event);
+      return handlers.length;
+    }
+  };
 }
 
 async function settleActionStart() {
@@ -244,6 +267,302 @@ test('Given a candidate vote action When handled by the isolated owner Then vote
   forged.translationID = 'forged-candidate-id';
   assert.equal((await owner.handlePanelAction(owner.panel, 1, forged)).status, 'error');
   assert.equal(calls.votes.length, 1);
+});
+
+test('Given a non-jump action When handled by the isolated owner Then no page seek command is dispatched', async () => {
+  const { owner, calls } = createOwner();
+
+  const result = await owner.handlePanelAction(owner.panel, 1, createPayload('vote-like', candidateTask));
+
+  assert.deepEqual(result, { status: 'success' });
+  assert.deepEqual(calls.pageMessages, []);
+});
+
+test('Given a jump intent with the content-owned context When handled Then it dispatches the exact jump command contract', async () => {
+  const { owner, calls } = createOwner();
+  const expected = {
+    videoId: '81234567',
+    sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001',
+    epoch: 7,
+    targetTimestamp: 124.5
+  };
+
+  const result = await owner.handlePanelAction(owner.panel, 1, {
+    intent: 'jump-to-timecode',
+    expected,
+    controlId: 'control-render-1',
+    requestId: 'page-request-1',
+    issuedAt: 1000
+  });
+
+  assert.equal(result.status, 'success');
+  assert.deepEqual(calls.pageMessages, [{
+    type: 'JUMP_TO_TIMECODE',
+    intent: 'jump-to-timecode',
+    expected,
+    controlId: 'control-render-1',
+    requestId: 'page-request-1',
+    issuedAt: 1000
+  }]);
+});
+
+test('Given invalid jump timestamp or content context When handled Then it fails before page dispatch', async () => {
+  const invalidTimestamps = [Number.NaN, Number.POSITIVE_INFINITY, -1];
+  for (const targetTimestamp of invalidTimestamps) {
+    const { owner, calls } = createOwner();
+    const result = await owner.handlePanelAction(owner.panel, 1, {
+      intent: 'jump-to-timecode',
+    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp },
+      controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+    });
+
+    assert.equal(result.status, 'error');
+    assert.equal(result.reason, 'invalid-target-timestamp');
+    assert.deepEqual(calls.pageMessages, []);
+  }
+
+  const { owner, calls } = createOwner({
+    pathname: '/browse',
+    playbackContext: {
+      videoId: '81234567',
+      sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001',
+      epoch: 7,
+      state: 'transitioning'
+    }
+  });
+  const result = await owner.handlePanelAction(owner.panel, 1, {
+    intent: 'jump-to-timecode',
+    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 },
+    controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+  });
+
+  assert.equal(result.reason, 'stale-context');
+  assert.deepEqual(calls.pageMessages, []);
+});
+
+test('Given a forged jump identity When handled Then it fails closed before page dispatch', async () => {
+  const { owner, calls } = createOwner();
+  const forgedValues = [
+    { videoId: 'wrong-video', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 },
+    { videoId: '81234567', sessionId: 'watch-other', epoch: 7, targetTimestamp: 1 },
+    { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 8, targetTimestamp: 1 }
+  ];
+
+  for (const expected of forgedValues) {
+    const result = await owner.handlePanelAction(owner.panel, 1, {
+      intent: 'jump-to-timecode',
+      expected, controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+    });
+    assert.equal(result.reason, 'content-context-mismatch');
+  }
+
+  assert.deepEqual(calls.pageMessages, []);
+});
+
+test('Given a jump page response that resolves after route invalidation When handled Then late success is suppressed', async () => {
+  let resolvePageMessage;
+  const { owner, calls } = createOwner({
+    sendPageMessage: () => new Promise((resolve) => { resolvePageMessage = resolve; })
+  });
+  const action = owner.handlePanelAction(owner.panel, 1, {
+    intent: 'jump-to-timecode',
+    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 },
+    controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+  });
+
+  await Promise.resolve();
+  owner.lifecycleGeneration += 1;
+  resolvePageMessage({ success: true, status: 'success' });
+
+  const result = await action;
+  assert.equal(result.status, 'error');
+  assert.equal(result.reason, 'stale-lifecycle');
+  assert.equal(calls.pageMessages.length, 1);
+});
+
+test('Given a watch-A page action is pending When internal VIDEO_ID_CHANGED reports watch B Then its late success is rejected', async () => {
+  let resolvePageMessage;
+  const { owner, calls, location, emitInternal } = createOwner({
+    sendPageMessage: () => new Promise((resolve) => { resolvePageMessage = resolve; })
+  });
+  owner.refreshRoute();
+  owner.bindRouteListeners(1);
+  const action = owner.handlePanelAction(owner.panel, 1, {
+    intent: 'jump-to-timecode',
+    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 },
+    controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+  });
+  await Promise.resolve();
+
+  location.pathname = '/watch/87654321';
+  assert.equal(emitInternal({ type: 'VIDEO_ID_CHANGED', oldVideoId: '81234567', newVideoId: '87654321' }), 1);
+  resolvePageMessage({
+    success: true,
+    status: 'success',
+    action: 'jump-to-timecode',
+    requestId: 'page-request-1',
+    controlId: 'control-render-1',
+    issuedAt: 1000,
+    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 },
+    targetTimestamp: 1,
+    targetMilliseconds: 1000,
+    snapshot: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', currentTime: 1000 }
+  });
+
+  const result = await action;
+  assert.equal(result.status, 'error');
+  assert.equal(result.reason, 'stale-lifecycle');
+  assert.equal(calls.pageMessages.length, 1);
+});
+
+test('Given an advisory jump success When PlaybackContext changes while awaiting it Then UI success is rejected independently', async () => {
+  let contextReads = 0;
+  const playbackContextManager = {
+    getCurrentContext() {
+      contextReads += 1;
+      return {
+        videoId: '81234567',
+        sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001',
+        epoch: contextReads >= 3 ? 8 : 7,
+        state: 'ready'
+      };
+    }
+  };
+  const { owner } = createOwner({ playbackContextManager });
+  const result = await owner.handlePanelAction(owner.panel, 1, {
+    intent: 'jump-to-timecode',
+    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 },
+    controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+  });
+
+  assert.equal(result.status, 'error');
+  assert.equal(result.reason, 'post-context-mismatch');
+});
+
+test('Given an advisory jump success with a mismatched post time When UI verifies it Then success is rejected', async () => {
+  const { owner } = createOwner({
+    sendPageMessage: async (message) => ({
+      success: true,
+      status: 'success',
+      action: 'jump-to-timecode',
+      requestId: message.requestId,
+      controlId: message.controlId,
+      issuedAt: message.issuedAt,
+      expected: message.expected,
+      targetTimestamp: message.expected.targetTimestamp,
+      targetMilliseconds: 1000,
+      snapshot: {
+        videoId: message.expected.videoId,
+        sessionId: message.expected.sessionId,
+        currentTime: 5000
+      }
+    })
+  });
+  const result = await owner.handlePanelAction(owner.panel, 1, {
+    intent: 'jump-to-timecode',
+    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 },
+    controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+  });
+
+  assert.equal(result.status, 'error');
+  assert.equal(result.reason, 'post-time-mismatch');
+});
+
+test('Given a synthetic route session When the real playback context uses a UUID session Then dispatch fails closed', async () => {
+  const { owner, calls } = createOwner();
+  const result = await owner.handlePanelAction(owner.panel, 1, {
+    intent: 'jump-to-timecode',
+    expected: { videoId: '81234567', sessionId: 'watch-81234567', epoch: 1, targetTimestamp: 1 },
+    controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+  });
+
+  assert.equal(result.reason, 'content-context-mismatch');
+  assert.deepEqual(calls.pageMessages, []);
+});
+
+test('Given a transitioning or changed real playback context When dispatch is attempted Then it fails stale before page transport', async () => {
+  let currentContext = { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, state: 'transitioning' };
+  let contextReads = 0;
+  const playbackContextManager = {
+    getCurrentContext: () => {
+      contextReads += 1;
+      return { ...currentContext, ...(contextReads >= 3 ? { epoch: 8 } : {}) };
+    }
+  };
+  const { owner, calls } = createOwner({ playbackContextManager });
+  const payload = {
+    intent: 'jump-to-timecode',
+    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 },
+    controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+  };
+
+  const transitioning = await owner.handlePanelAction(owner.panel, 1, payload);
+  assert.equal(transitioning.reason, 'stale-context');
+
+  currentContext = { ...currentContext, state: 'ready' };
+  const action = owner.handlePanelAction(owner.panel, 1, payload);
+  const changed = await action;
+
+  assert.equal(changed.reason, 'stale-context');
+  assert.deepEqual(calls.pageMessages, []);
+});
+
+test('Given a structured page failure When the content transport resolves it Then the exact reason remains retryable', async () => {
+  const { owner, calls } = createOwner({
+    sendPageMessage: async (message) => ({
+      success: false,
+      status: 'error',
+      action: 'jump-to-timecode',
+      reason: 'session-mismatch',
+      requestId: message.requestId,
+      controlId: message.controlId,
+      issuedAt: message.issuedAt,
+      expected: message.expected,
+      targetTimestamp: message.expected.targetTimestamp
+    })
+  });
+  const result = await owner.handlePanelAction(owner.panel, 1, {
+    intent: 'jump-to-timecode',
+    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 },
+    controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+  });
+
+  assert.equal(result.status, 'error');
+  assert.equal(result.reason, 'session-mismatch');
+  assert.equal(calls.pageMessages.length, 1);
+});
+
+test('Given a structured partial page result after a verified seek When coordinated Then diagnostics and the specific retryable fallback are preserved', async () => {
+  const fallback = '已跳轉至字幕時間點，但無法安全還原播放器介面，請使用 Netflix 原生控制。';
+  const { owner } = createOwner({
+    sendPageMessage: async (message) => ({
+      success: false,
+      status: 'partial',
+      partial: true,
+      action: 'jump-to-timecode',
+      reason: 'player-ui-restore-timeout',
+      error: fallback,
+      requestId: message.requestId,
+      controlId: message.controlId,
+      issuedAt: message.issuedAt,
+      expected: message.expected,
+      targetTimestamp: message.expected.targetTimestamp,
+      targetMilliseconds: 1000,
+      snapshot: { videoId: message.expected.videoId, sessionId: message.expected.sessionId, currentTime: 1000 },
+      playerUiRestore: { status: 'failed', reason: 'player-ui-restore-timeout', activated: true }
+    })
+  });
+
+  const result = await owner.handlePanelAction(owner.panel, 1, {
+    intent: 'jump-to-timecode',
+    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 },
+    controlId: 'control-render-1', requestId: 'page-request-1', issuedAt: 1000
+  });
+
+  assert.equal(result.status, 'partial');
+  assert.equal(result.error, fallback);
+  assert.equal(result.reason, 'player-ui-restore-timeout');
+  assert.deepEqual(result.playerUiRestore, { status: 'failed', reason: 'player-ui-restore-timeout', activated: true });
 });
 
 test('Given an official or candidate action mismatch When handled by the isolated owner Then it fails closed without opening or enqueueing', async () => {
@@ -445,6 +764,30 @@ test('Given a pending submission When the panel is dismissed Then its later subm
   });
 
   assert.equal((await action).status, 'error');
+  assert.deepEqual(calls.translations, []);
+});
+
+test('Given a watch-A submission is pending When internal VIDEO_ID_CHANGED reports watch B Then it is cancelled and a late submit cannot enqueue', async () => {
+  const { owner, calls, location, emitInternal } = createOwner();
+  owner.refreshRoute();
+  owner.bindRouteListeners(1);
+  const action = owner.handlePanelAction(owner.panel, 1, createPayload('submit-improvement'));
+  await settleActionStart();
+  const dialog = owner.submissionDialog;
+
+  location.pathname = '/watch/87654321';
+  assert.equal(emitInternal({ type: 'VIDEO_ID_CHANGED', oldVideoId: '81234567', newVideoId: '87654321' }), 1);
+
+  assert.equal((await action).status, 'error');
+  await dialog.submit({
+    videoId: context.videoId,
+    timestamp: resolutionContext.timestamp,
+    original: officialTask.originalSubtitle,
+    translation: 'Late improved subtitle',
+    languageCode: 'zh-TW',
+    submissionReason: 'improvement',
+    slotKey: resolutionContext.slotKey
+  });
   assert.deepEqual(calls.translations, []);
 });
 

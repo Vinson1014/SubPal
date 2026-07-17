@@ -600,7 +600,7 @@
     /**
      * 取得目前 Netflix player 狀態快照（僅診斷，不影響字幕邏輯）
      */
-    getActivePlaybackSnapshot() {
+    getActivePlaybackSnapshot({ preferFreshApi = false } = {}) {
       const snapshot = {
         pageUrl: location.href,
         pageUrlVideoId: this.extractVideoIdFromUrl(location.href),
@@ -622,7 +622,7 @@
       };
 
       try {
-        let api = playerHelper?.playerAPI || getNetflixPlayerAPI();
+        let api = preferFreshApi ? getNetflixPlayerAPI() : playerHelper?.playerAPI || getNetflixPlayerAPI();
 
         if (!api) {
           snapshot.error = 'Netflix player API unavailable';
@@ -1619,6 +1619,7 @@
   const playerHelper = new NetflixPlayerHelper();
   const subtitleInterceptor = new SubtitleInterceptor();
   subtitleInterceptor.start();
+  document?.addEventListener?.('click', recordTrustedTimecodeClick, true);
 
   /**
    * 檢查Netflix API可用性
@@ -1641,11 +1642,483 @@
     }
   }
 
+  const JUMP_LATCH_TTL_MS = 1000;
+  const MAX_JUMP_CLICK_LATCHES = 32;
+  const JUMP_POST_CHECK_INTERVAL_MS = 25;
+  const JUMP_POST_CHECK_TIMEOUT_MS = 500;
+  const JUMP_PLAYER_UI_RESTORE_INTERVAL_MS = 25;
+  const JUMP_PLAYER_UI_RESTORE_TIMEOUT_MS = 500;
+  const jumpClickLatches = new Map();
+
+  function createPageRequestId() {
+    if (typeof window.crypto?.randomUUID === 'function') return window.crypto.randomUUID();
+    return `jump-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  }
+
+  function createJumpFailure(reason, error = '目前無法跳轉至字幕時間點，請繼續觀看。', request = {}) {
+    return {
+      success: false,
+      status: 'error',
+      action: 'jump-to-timecode',
+      reason,
+      error,
+      requestId: request.requestId || null,
+      controlId: request.controlId || null,
+      issuedAt: request.issuedAt ?? null,
+      expected: request.expected || null,
+      targetTimestamp: request.expected?.targetTimestamp ?? null
+    };
+  }
+
+  function readJumpExpectedFromControl(control) {
+    const expected = {
+      videoId: control?.getAttribute?.('data-subpal-jump-video-id'),
+      sessionId: control?.getAttribute?.('data-subpal-jump-session-id'),
+      epoch: Number(control?.getAttribute?.('data-subpal-jump-epoch')),
+      targetTimestamp: Number(control?.getAttribute?.('data-subpal-jump-target-timestamp'))
+    };
+    return validateJumpExpected(expected) ? null : expected;
+  }
+
+  function purgeJumpClickLatches(now = Date.now()) {
+    for (const [requestId, latch] of jumpClickLatches) {
+      if (now - latch.issuedAt > JUMP_LATCH_TTL_MS || now < latch.issuedAt) {
+        jumpClickLatches.delete(requestId);
+      }
+    }
+    while (jumpClickLatches.size >= MAX_JUMP_CLICK_LATCHES) {
+      jumpClickLatches.delete(jumpClickLatches.keys().next().value);
+    }
+  }
+
+  function recordTrustedTimecodeClick(event) {
+    if (event?.isTrusted !== true || window.navigator?.userActivation?.isActive !== true) return;
+    const control = event.target?.closest?.('.subpal-endscreen-timecode');
+    const controlId = control?.getAttribute?.('data-control-id');
+    const expected = readJumpExpectedFromControl(control);
+    if (!control || !controlId || !expected) return;
+    const requestId = createPageRequestId();
+    const issuedAt = Date.now();
+    purgeJumpClickLatches(issuedAt);
+    jumpClickLatches.set(requestId, { requestId, control, controlId, issuedAt, expected, action: 'jump-to-timecode', type: 'JUMP_TO_TIMECODE' });
+    control.setAttribute('data-subpal-jump-request-id', requestId);
+    control.setAttribute('data-subpal-jump-issued-at', String(issuedAt));
+  }
+
+  function validateJumpExpected(expected) {
+    const expectedKeys = ['epoch', 'sessionId', 'targetTimestamp', 'videoId'];
+    if (!expected || typeof expected !== 'object' || Object.keys(expected).sort().join('|') !== expectedKeys.join('|')) {
+      return createJumpFailure('invalid-expected-context', '跳轉資料無效，請再試一次。');
+    }
+    if (!Number.isInteger(expected.epoch) || expected.epoch < 0 ||
+        typeof expected.videoId !== 'string' || !expected.videoId ||
+        typeof expected.sessionId !== 'string' || !expected.sessionId) {
+      return createJumpFailure('invalid-expected-context', '跳轉資料無效，請再試一次。');
+    }
+    if (!Number.isFinite(expected.targetTimestamp) || expected.targetTimestamp < 0) {
+      return createJumpFailure('invalid-target-timestamp', '時間點資料無效，請再試一次。');
+    }
+    return null;
+  }
+
+  function validateJumpRequest(request) {
+    const expectedError = validateJumpExpected(request?.expected);
+    if (expectedError) return expectedError;
+    if (typeof request.controlId !== 'string' || !request.controlId || typeof request.requestId !== 'string' || !request.requestId || !Number.isFinite(request.issuedAt)) {
+      return createJumpFailure('trusted-click-required', '請由字幕時間點按鈕重新操作。', request);
+    }
+    const latch = jumpClickLatches.get(request.requestId);
+    if (!latch) return createJumpFailure('click-latch-missing', '請由字幕時間點按鈕重新操作。', request);
+    jumpClickLatches.delete(request.requestId);
+    const age = Date.now() - latch.issuedAt;
+    if (age < 0 || age > JUMP_LATCH_TTL_MS) {
+      return createJumpFailure('click-latch-expired', '請由字幕時間點按鈕重新操作。', request);
+    }
+    const expectedMatches = latch.expected.videoId === request.expected.videoId &&
+      latch.expected.sessionId === request.expected.sessionId &&
+      latch.expected.epoch === request.expected.epoch &&
+      latch.expected.targetTimestamp === request.expected.targetTimestamp;
+    if (latch.controlId !== request.controlId || latch.issuedAt !== request.issuedAt ||
+        latch.action !== request.intent || latch.type !== request.type || !expectedMatches) {
+      return createJumpFailure('click-latch-mismatch', '請由字幕時間點按鈕重新操作。', request);
+    }
+    return null;
+  }
+
+  function validateJumpSnapshot(snapshot, expected, request = {}) {
+    if (!snapshot || snapshot.error === 'Netflix player API unavailable') {
+      return createJumpFailure('player-api-unavailable', undefined, request);
+    }
+    if (snapshot.sessionSelectionConfidence !== 'high' ||
+        snapshot.selectedSessionReason !== 'watch-player-api-video-id-match' ||
+        !isWatchSessionId(snapshot.selectedSessionId)) {
+      return createJumpFailure('untrusted-session', undefined, request);
+    }
+    if (!Number.isFinite(snapshot.duration) || snapshot.duration <= 0) {
+      return createJumpFailure('duration-unavailable', undefined, request);
+    }
+    const reasonableWatchSessions = Array.isArray(snapshot.openSessions)
+      ? snapshot.openSessions.filter((session) => session?.isWatchSession && session.hasReasonablePlaybackState)
+      : [];
+    if (reasonableWatchSessions.length !== 1) {
+      return createJumpFailure('ambiguous-watch-session', undefined, request);
+    }
+    const activeWatchSession = reasonableWatchSessions[0];
+    if (activeWatchSession.sessionId !== expected.sessionId) {
+      return createJumpFailure('session-mismatch', undefined, request);
+    }
+    if (snapshot.playerApiVideoId !== expected.videoId || activeWatchSession.playerApiVideoId !== expected.videoId) {
+      return createJumpFailure('video-mismatch', undefined, request);
+    }
+    if (snapshot.movieId !== expected.videoId || activeWatchSession.movieId !== expected.videoId) {
+      return createJumpFailure('movie-mismatch', undefined, request);
+    }
+    if (snapshot.selectedSessionId !== expected.sessionId) {
+      return createJumpFailure('session-mismatch', undefined, request);
+    }
+    return null;
+  }
+
+  function isConnectedAndVisible(element) {
+    if (!element || element.isConnected !== true || typeof element.getClientRects !== 'function' || element.getClientRects().length === 0) {
+      return false;
+    }
+    const style = typeof window.getComputedStyle === 'function' ? window.getComputedStyle(element) : null;
+    return !style || (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0');
+  }
+
+  function queryWithin(wrapper, selector) {
+    if (typeof wrapper?.querySelectorAll === 'function') return Array.from(wrapper.querySelectorAll(selector));
+    const element = wrapper?.querySelector?.(selector) || null;
+    return element ? [element] : [];
+  }
+
+  function findExpectedPlayer(expected) {
+    return Array.from(document.querySelectorAll?.('[data-uia="player"]') || [])
+      .filter(player => player?.isConnected === true && player.getAttribute?.('data-videoid') === expected.videoId);
+  }
+
+  function isOwnedConnectedControl(control, expectedPlayer) {
+    return control?.isConnected === true && control.closest?.('[data-uia="player"]') === expectedPlayer;
+  }
+
+  function isDisabledControl(control) {
+    return control?.disabled === true || control?.getAttribute?.('aria-disabled') === 'true' || control?.matches?.(':disabled') === true;
+  }
+
+  function captureTypeAPlayer(expected) {
+    const players = findExpectedPlayer(expected);
+    if (players.length !== 1) return null;
+    const expectedPlayer = players[0];
+    const liveCredits = queryWithin(expectedPlayer, 'button[data-uia="watch-credits-seamless-button"]')
+      .filter(control => isConnectedAndVisible(control) && !isDisabledControl(control) && isOwnedConnectedControl(control, expectedPlayer));
+    const liveNextEpisode = queryWithin(expectedPlayer, 'button[data-uia="next-episode-seamless-button"]')
+      .filter(control => isConnectedAndVisible(control) && isOwnedConnectedControl(control, expectedPlayer));
+    if (liveCredits.length !== 1 || liveNextEpisode.length !== 1) return null;
+    return { player: expectedPlayer };
+  }
+
+  function hasTypeACta(expectedPlayer, selector) {
+    return queryWithin(expectedPlayer, selector).some(control => isConnectedAndVisible(control) && isOwnedConnectedControl(control, expectedPlayer));
+  }
+
+  async function restoreTypeAPlayerUi(expected, request, typeACapture) {
+    const creditsSelector = 'button[data-uia="watch-credits-seamless-button"]';
+    const nextEpisodeSelector = 'button[data-uia="next-episode-seamless-button"]';
+    const controlsStandardSelector = '[data-uia="controls-standard"]';
+    const timelineSelector = '[data-uia="timeline"]';
+    const playPauseSelectors = ['[data-uia="control-play-pause"]', '[data-uia="control-play-pause-play"]', '[data-uia="control-play"]', '[data-uia="control-pause"]'];
+    const maxChecks = Math.max(1, Math.ceil(JUMP_PLAYER_UI_RESTORE_TIMEOUT_MS / JUMP_PLAYER_UI_RESTORE_INTERVAL_MS));
+    const startedAt = Date.now();
+    let activated = false;
+    let pendingReason = 'player-ui-restore-control-missing';
+
+    for (let checks = 0; checks < maxChecks; checks += 1) {
+      const identitySnapshot = subtitleInterceptor.getActivePlaybackSnapshot({ preferFreshApi: true });
+      if (validateJumpSnapshot(identitySnapshot, expected, request)) {
+        return { success: false, status: 'failed', reason: 'player-ui-restore-identity-changed', activated };
+      }
+
+      const players = findExpectedPlayer(expected);
+      if (players.length !== 1) {
+        pendingReason = players.length === 0 ? 'player-ui-restore-ownership-missing' : 'player-ui-restore-ownership-ambiguous';
+      } else {
+        const expectedPlayer = players[0];
+        const creditsLive = hasTypeACta(expectedPlayer, creditsSelector);
+        const nextEpisodeLive = hasTypeACta(expectedPlayer, nextEpisodeSelector);
+        if (creditsLive || nextEpisodeLive) {
+          if (creditsLive && !activated) {
+            const creditsControls = queryWithin(expectedPlayer, creditsSelector)
+              .filter(control => isConnectedAndVisible(control) && !isDisabledControl(control) &&
+                typeof control.click === 'function' && isOwnedConnectedControl(control, expectedPlayer));
+            if (creditsControls.length === 1) {
+              try {
+                creditsControls[0].click();
+                activated = true;
+              } catch {
+                return { success: false, status: 'failed', reason: 'player-ui-restore-activation-failed', activated };
+              }
+            } else {
+              pendingReason = 'player-ui-restore-control-unusable';
+            }
+          } else {
+            pendingReason = 'player-ui-restore-type-a-cta-live';
+          }
+        } else {
+          const media = queryWithin(expectedPlayer, 'video').filter(element => element?.isConnected === true);
+          if (media.length !== 1 || !isConnectedAndVisible(media[0]) || media[0].ended !== false) {
+            pendingReason = 'player-ui-restore-media-unusable';
+          } else {
+            const controlsStandard = queryWithin(expectedPlayer, controlsStandardSelector).some(control => isOwnedConnectedControl(control, expectedPlayer));
+            const timeline = queryWithin(expectedPlayer, timelineSelector).some(control => isOwnedConnectedControl(control, expectedPlayer));
+            const playPause = playPauseSelectors.some(selector => queryWithin(expectedPlayer, selector)
+              .some(control => isOwnedConnectedControl(control, expectedPlayer)));
+            const legacyControls = queryWithin(expectedPlayer, '[data-uia="player-controls"]')
+              .some(control => isConnectedAndVisible(control) && isOwnedConnectedControl(control, expectedPlayer));
+            if ((controlsStandard && timeline && playPause) || legacyControls) {
+              return { success: true, status: 'restored', reason: 'player-ui-restored', activated };
+            }
+            pendingReason = 'player-ui-restore-control-missing';
+          }
+        }
+      }
+
+      if (checks + 1 >= maxChecks || Date.now() - startedAt >= JUMP_PLAYER_UI_RESTORE_TIMEOUT_MS) {
+        return { success: false, status: 'failed', reason: pendingReason, activated };
+      }
+      await new Promise(resolve => setTimeout(resolve, JUMP_PLAYER_UI_RESTORE_INTERVAL_MS));
+    }
+
+    return { success: false, status: 'failed', reason: pendingReason, activated };
+  }
+
+  async function restorePlayerUiAfterVerifiedJump(expected, request, typeACapture = null) {
+    if (typeACapture) return restoreTypeAPlayerUi(expected, request, typeACapture);
+    const minimizedSelector = '[data-uia="watch-video-player-view-minimized"]';
+    const creditsSelector = 'button[data-uia="watch-credits-seamless-button"]';
+    const findExpectedPlayers = () => findExpectedPlayer(expected);
+    const findRelatedMinimizedMarker = (expectedPlayer) => {
+      const markers = Array.from(document.querySelectorAll?.(minimizedSelector) || []);
+      if (markers.length === 0) return { marker: null, reason: null };
+      if (markers.length > 1) return { marker: null, reason: 'player-ui-restore-marker-ownership-ambiguous' };
+      const marker = markers[0];
+      const isRelated = marker?.isConnected === true && (
+        expectedPlayer.contains?.(marker) === true || marker.contains?.(expectedPlayer) === true
+      );
+      return isRelated
+        ? { marker, reason: null }
+        : { marker: null, reason: 'player-ui-restore-marker-ownership-invalid' };
+    };
+    const ownershipReason = (players) => players.length === 0
+      ? 'player-ui-restore-ownership-missing'
+      : 'player-ui-restore-ownership-ambiguous';
+    const maxChecks = Math.max(1, Math.ceil(JUMP_PLAYER_UI_RESTORE_TIMEOUT_MS / JUMP_PLAYER_UI_RESTORE_INTERVAL_MS));
+    const startedAt = Date.now();
+    let pendingReason = 'player-ui-restore-control-missing';
+
+    for (let checks = 0; checks < maxChecks; checks += 1) {
+      const identitySnapshot = subtitleInterceptor.getActivePlaybackSnapshot({ preferFreshApi: true });
+      if (validateJumpSnapshot(identitySnapshot, expected, request)) {
+        return { success: false, status: 'failed', reason: 'player-ui-restore-identity-changed', activated: false };
+      }
+
+      const players = findExpectedPlayers();
+      if (players.length !== 1) {
+        pendingReason = ownershipReason(players);
+      } else {
+        const expectedPlayer = players[0];
+        const minimized = findRelatedMinimizedMarker(expectedPlayer);
+        if (minimized.reason) {
+          pendingReason = minimized.reason;
+        } else if (!isConnectedAndVisible(minimized.marker)) {
+          return { success: true, status: 'not-needed', reason: 'player-ui-restore-not-needed', activated: false };
+        } else {
+          const creditsControls = queryWithin(expectedPlayer, creditsSelector);
+          if (creditsControls.length === 0) {
+            const media = queryWithin(expectedPlayer, 'video').filter(element => element?.isConnected === true);
+            if (media.length !== 1 || !isConnectedAndVisible(media[0]) || media[0].ended !== false) {
+              return { success: false, status: 'failed', reason: 'player-ui-restore-media-unusable', activated: false };
+            }
+            const playerControlsVisible = queryWithin(expectedPlayer, '[data-uia="player-controls"]').some(isConnectedAndVisible);
+            if (playerControlsVisible) {
+              return { success: true, status: 'restored', reason: 'player-ui-restored', activated: false };
+            }
+            pendingReason = 'player-ui-restore-control-missing';
+          } else if (creditsControls.length > 1) {
+            return { success: false, status: 'failed', reason: 'player-ui-restore-control-unavailable', activated: false };
+          } else {
+            const creditsButton = creditsControls[0];
+            const isDisabled = creditsButton.disabled === true ||
+              creditsButton.getAttribute?.('aria-disabled') === 'true' || creditsButton.matches?.(':disabled') === true;
+            if (!isConnectedAndVisible(creditsButton) || isDisabled || typeof creditsButton.click !== 'function') {
+              pendingReason = 'player-ui-restore-control-unusable';
+            } else if (creditsButton.closest?.('[data-uia="player"]') !== expectedPlayer) {
+              pendingReason = 'player-ui-restore-control-wrong-player';
+            } else {
+              const media = queryWithin(expectedPlayer, 'video').filter(element => element?.isConnected === true);
+              if (media.length !== 1 || media[0].ended !== false) {
+                return { success: false, status: 'failed', reason: 'player-ui-restore-media-unusable', activated: false };
+              }
+
+              try {
+                creditsButton.click();
+                break;
+              } catch {
+                return { success: false, status: 'failed', reason: 'player-ui-restore-activation-failed', activated: false };
+              }
+            }
+          }
+        }
+      }
+
+      if (checks + 1 >= maxChecks || Date.now() - startedAt >= JUMP_PLAYER_UI_RESTORE_TIMEOUT_MS) {
+        return {
+          success: false,
+          status: pendingReason === 'player-ui-restore-control-missing' ? 'unavailable' : 'failed',
+          reason: pendingReason,
+          activated: false
+        };
+      }
+      await new Promise(resolve => setTimeout(resolve, JUMP_PLAYER_UI_RESTORE_INTERVAL_MS));
+    }
+
+    const verificationStartedAt = Date.now();
+    pendingReason = 'player-ui-restore-timeout';
+    for (let checks = 0; checks < maxChecks; checks += 1) {
+      const snapshot = subtitleInterceptor.getActivePlaybackSnapshot({ preferFreshApi: true });
+      if (validateJumpSnapshot(snapshot, expected, request)) {
+        return { success: false, status: 'failed', reason: 'player-ui-restore-identity-changed', activated: true };
+      }
+
+      const players = findExpectedPlayers();
+      if (players.length !== 1) {
+        pendingReason = ownershipReason(players);
+      } else {
+        const currentPlayer = players[0];
+        const minimized = findRelatedMinimizedMarker(currentPlayer);
+        const minimizedVisible = isConnectedAndVisible(minimized.marker);
+        const creditsVisible = queryWithin(currentPlayer, creditsSelector).some(isConnectedAndVisible);
+        const playerControlsVisible = queryWithin(currentPlayer, '[data-uia="player-controls"]').some(isConnectedAndVisible);
+        if (!minimized.reason && (!minimizedVisible && !creditsVisible || playerControlsVisible)) {
+          return { success: true, status: 'restored', reason: 'player-ui-restored', activated: true };
+        }
+        pendingReason = minimized.reason || 'player-ui-restore-timeout';
+      }
+      if (checks + 1 >= maxChecks || Date.now() - verificationStartedAt >= JUMP_PLAYER_UI_RESTORE_TIMEOUT_MS) break;
+      await new Promise(resolve => setTimeout(resolve, JUMP_PLAYER_UI_RESTORE_INTERVAL_MS));
+    }
+    return { success: false, status: 'failed', reason: pendingReason, activated: true };
+  }
+
+  async function handleJumpToTimecode(request) {
+    const requestError = validateJumpRequest(request);
+    if (requestError) return requestError;
+    const { expected } = request;
+
+    const initialSnapshot = subtitleInterceptor.getActivePlaybackSnapshot({ preferFreshApi: true });
+    const initialError = validateJumpSnapshot(initialSnapshot, expected, request);
+    if (initialError) return initialError;
+
+    const api = getNetflixPlayerAPI();
+    if (!api) return createJumpFailure('player-api-unavailable', undefined, request);
+
+    let videoPlayer = null;
+    try {
+      videoPlayer = api.videoPlayer?.getVideoPlayerBySessionId?.(expected.sessionId) || null;
+    } catch (error) {
+      debugLog('取得跳轉播放器失敗:', error.message);
+    }
+    if (!videoPlayer || typeof videoPlayer.seek !== 'function') {
+      return createJumpFailure('player-unavailable', undefined, request);
+    }
+
+    if (typeof videoPlayer.getMovieId === 'function') {
+      const movieId = videoPlayer.getMovieId();
+      if (movieId !== null && movieId !== undefined && String(movieId) !== expected.videoId) {
+        return createJumpFailure('video-mismatch', undefined, request);
+      }
+    }
+
+    // 在取得 player 後再次確認，避免 session 在 dispatch 與 seek 之間切換。
+    const beforeSeekSnapshot = subtitleInterceptor.getActivePlaybackSnapshot({ preferFreshApi: true });
+    const beforeSeekError = validateJumpSnapshot(beforeSeekSnapshot, expected, request);
+    if (beforeSeekError) return beforeSeekError;
+
+    const targetMilliseconds = Math.min(
+      Math.max(expected.targetTimestamp * 1000, 0),
+      beforeSeekSnapshot.duration
+    );
+    if (!Number.isFinite(targetMilliseconds)) {
+      return createJumpFailure('invalid-target-timestamp', '時間點資料無效，請再試一次。', request);
+    }
+
+    const typeACapture = captureTypeAPlayer(expected);
+    try {
+      await Promise.resolve(videoPlayer.seek(targetMilliseconds));
+    } catch (error) {
+      return createJumpFailure('seek-failed', undefined, request);
+    }
+
+    const startedAt = Date.now();
+    const maxPostSeekChecks = Math.max(1, Math.ceil(JUMP_POST_CHECK_TIMEOUT_MS / JUMP_POST_CHECK_INTERVAL_MS));
+    let postSeekChecks = 0;
+    while (true) {
+      postSeekChecks += 1;
+      const afterSeekSnapshot = subtitleInterceptor.getActivePlaybackSnapshot({ preferFreshApi: true });
+      const afterSeekIdentityError = validateJumpSnapshot(afterSeekSnapshot, expected, request);
+      if (afterSeekIdentityError) return createJumpFailure('post-identity-mismatch', undefined, request);
+      const postApi = getNetflixPlayerAPI();
+      const postPlayer = postApi?.videoPlayer?.getVideoPlayerBySessionId?.(expected.sessionId) || null;
+      const postTime = typeof postPlayer?.getCurrentTime === 'function' ? postPlayer.getCurrentTime() : afterSeekSnapshot.currentTime;
+      if (Number.isFinite(postTime) && Math.abs(postTime - targetMilliseconds) <= 1000) {
+        const playerUiRestore = await restorePlayerUiAfterVerifiedJump(expected, request, typeACapture);
+        const verifiedSnapshot = {
+          videoId: afterSeekSnapshot.playerApiVideoId,
+          sessionId: afterSeekSnapshot.selectedSessionId,
+          currentTime: postTime,
+          duration: afterSeekSnapshot.duration
+        };
+        const isVerifiedSeekWithUnavailableRestore = playerUiRestore.status === 'unavailable' &&
+          playerUiRestore.reason === 'player-ui-restore-control-missing' &&
+          playerUiRestore.activated === false;
+        if (!playerUiRestore.success && !isVerifiedSeekWithUnavailableRestore) {
+          return {
+            ...createJumpFailure(playerUiRestore.reason, '已跳轉至字幕時間點，但無法安全還原播放器介面，請使用 Netflix 原生控制。', request),
+            status: 'partial',
+            partial: true,
+            targetMilliseconds,
+            snapshot: verifiedSnapshot,
+            playerUiRestore
+          };
+        }
+        return {
+          success: true,
+          status: 'success',
+          action: 'jump-to-timecode',
+          reason: 'seeked',
+          requestId: request.requestId,
+          controlId: request.controlId,
+          issuedAt: request.issuedAt,
+          expected,
+          targetTimestamp: expected.targetTimestamp,
+          targetMilliseconds,
+          snapshot: verifiedSnapshot,
+          playerUiRestore
+        };
+      }
+      if (postSeekChecks >= maxPostSeekChecks || Date.now() - startedAt >= JUMP_POST_CHECK_TIMEOUT_MS) {
+        return createJumpFailure('post-seek-mismatch', undefined, request);
+      }
+      await new Promise(resolve => setTimeout(resolve, JUMP_POST_CHECK_INTERVAL_MS));
+    }
+  }
+
   /**
    * 消息處理器
    */
   function handleMessage(event) {
-    if (event.data.source !== 'subpal-content-script' ||
+    if (!event?.data || event.source !== window ||
+        event.data.source !== 'subpal-content-script' ||
         event.data.target !== 'subpal-page-script') {
       return;
     }
@@ -1670,6 +2143,19 @@
           response.success = true;
           response.available = checkAPIAvailability();
           break;
+
+        case 'JUMP_TO_TIMECODE':
+          if (event.data.intent !== 'jump-to-timecode') {
+            response = { ...response, ...createJumpFailure('invalid-command-intent', '不支援的跳轉命令。') };
+            break;
+          }
+          handleJumpToTimecode(event.data).then(result => {
+            window.postMessage({ ...response, ...result }, '*');
+          }).catch(error => {
+            debugLog('跳轉命令處理失敗:', error.message);
+            window.postMessage({ ...response, ...createJumpFailure('command-failed', error.message) }, '*');
+          });
+          return;
 
         case 'CHECK_PLAYER_READY':
           response.success = true;
@@ -1902,8 +2388,7 @@
 
   // 導出到全局範圍（用於調試）
   window.subpalPageScript = {
-    playerHelper,
-    subtitleInterceptor,
+    ready: true,
     checkAPIAvailability,
     getDebugSnapshot: () => subtitleInterceptor.getDebugSnapshot(),
     debugMode: () => debugMode,

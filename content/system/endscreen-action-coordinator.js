@@ -1,15 +1,18 @@
 const RESOLUTION_CONTEXT_KEYS = ['action', 'slotKey', 'targetType', 'taskID', 'timestamp'];
+const JUMP_EXPECTED_KEYS = ['epoch', 'sessionId', 'targetTimestamp', 'videoId'];
 
 class EndscreenActionCoordinator {
-  constructor({ Dialog, translationBridge, voteBridge, actionConfig, configManager, getPanel, getRouteGeneration, isCurrentLifecycle }) {
+  constructor({ Dialog, translationBridge, voteBridge, actionConfig, configManager, getPanel, getContext, getRouteGeneration, isCurrentLifecycle, sendPageMessage }) {
     this.Dialog = Dialog;
     this.translationBridge = translationBridge;
     this.voteBridge = voteBridge;
     this.actionConfig = actionConfig;
     this.configManager = configManager;
     this.getPanel = getPanel;
+    this.getContext = getContext;
     this.getRouteGeneration = getRouteGeneration;
     this.isCurrentLifecycle = isCurrentLifecycle;
+    this.sendPageMessage = sendPageMessage;
     this.submissionDialog = null;
     this.pendingSubmission = null;
   }
@@ -17,6 +20,9 @@ class EndscreenActionCoordinator {
   async handlePanelAction(panel, lifecycle, payload) {
     if (!this.isCurrentLifecycle(lifecycle) || this.getPanel() !== panel) {
       return { status: 'error', error: '任務已失效，請稍後再試。' };
+    }
+    if (payload?.intent === 'jump-to-timecode') {
+      return this.jumpToTimecode(panel, lifecycle, payload);
     }
     const actionData = this.getActionData(payload);
     if (!actionData) return { status: 'error', error: '任務資料無效，請稍後再試。' };
@@ -30,6 +36,99 @@ class EndscreenActionCoordinator {
       return this.openSubmission(panel, lifecycle, payload, actionData);
     }
     return { status: 'error', error: '不支援的任務操作。' };
+  }
+
+  async jumpToTimecode(panel, lifecycle, payload) {
+    const expected = payload?.expected;
+    const request = {
+      controlId: payload?.controlId,
+      requestId: payload?.requestId,
+      issuedAt: payload?.issuedAt
+    };
+    if (!expected || typeof expected !== 'object' || Object.keys(expected).sort().join('|') !== JUMP_EXPECTED_KEYS.join('|')) {
+      return { status: 'error', error: '跳轉資料無效，請再試一次。', reason: 'invalid-expected-context' };
+    }
+    if (!Number.isInteger(expected.epoch) || expected.epoch < 0 ||
+        typeof expected.videoId !== 'string' || !expected.videoId ||
+        typeof expected.sessionId !== 'string' || !expected.sessionId) {
+      return { status: 'error', error: '跳轉資料無效，請再試一次。', reason: 'invalid-expected-context' };
+    }
+    if (!Number.isFinite(expected.targetTimestamp) || expected.targetTimestamp < 0) {
+      return { status: 'error', error: '時間點資料無效，請再試一次。', reason: 'invalid-target-timestamp' };
+    }
+    if (typeof request.controlId !== 'string' || !request.controlId || typeof request.requestId !== 'string' || !request.requestId || !Number.isFinite(request.issuedAt)) {
+      return { status: 'error', error: '請由字幕時間點按鈕重新操作。', reason: 'trusted-click-required' };
+    }
+
+    const currentContext = this.getContext?.();
+    if (!currentContext || currentContext.state !== 'ready') {
+      return { status: 'error', error: '目前影片狀態已失效，請再試一次。', reason: 'stale-context' };
+    }
+    if (expected.videoId !== currentContext.videoId || expected.sessionId !== currentContext.sessionId || expected.epoch !== currentContext.epoch) {
+      return { status: 'error', error: '影片已切換，請再試一次。', reason: 'content-context-mismatch' };
+    }
+
+    const lifecycleState = { panel, lifecycle, routeGeneration: this.getRouteGeneration() };
+    if (!this.isActionCurrent(lifecycleState)) {
+      return { status: 'error', error: '任務已失效，請稍後再試。', reason: 'stale-lifecycle' };
+    }
+    const dispatchContext = this.getContext?.();
+    if (!dispatchContext || dispatchContext.state !== 'ready' || dispatchContext.videoId !== expected.videoId ||
+        dispatchContext.sessionId !== expected.sessionId || dispatchContext.epoch !== expected.epoch) {
+      return { status: 'error', error: '影片狀態已變更，請再試一次。', reason: 'stale-context' };
+    }
+
+    try {
+      const result = await this.sendPageMessage({
+        type: 'JUMP_TO_TIMECODE',
+        intent: 'jump-to-timecode',
+        expected,
+        ...request
+      });
+      if (!this.isActionCurrent(lifecycleState)) {
+        return { status: 'error', error: '任務已失效，請稍後再試。', reason: 'stale-lifecycle' };
+      }
+      const postContext = this.getContext?.();
+      if (!postContext || postContext.state !== 'ready' || postContext.videoId !== expected.videoId ||
+          postContext.sessionId !== expected.sessionId || postContext.epoch !== expected.epoch) {
+        return { status: 'error', error: '影片狀態已變更，請再試一次。', reason: 'post-context-mismatch' };
+      }
+      const responseMatchesRequest = result?.action === 'jump-to-timecode' && result.requestId === request.requestId &&
+        result.controlId === request.controlId && result.issuedAt === request.issuedAt &&
+        result.targetTimestamp === expected.targetTimestamp && result.expected?.videoId === expected.videoId &&
+        result.expected?.sessionId === expected.sessionId && result.expected?.epoch === expected.epoch;
+      if (!responseMatchesRequest) {
+        return { status: 'error', error: '跳轉回應資料無效，請再試一次。', reason: 'invalid-page-response' };
+      }
+      if (result.status === 'error') {
+        return { status: 'error', error: '無法跳轉至字幕時間點，請稍後再試。', reason: result.reason || 'page-command-failed' };
+      }
+      if (result.status === 'partial' && result.partial === true && typeof result.error === 'string' && result.error &&
+          result.snapshot?.videoId === expected.videoId && result.snapshot?.sessionId === expected.sessionId &&
+          Number.isFinite(result.snapshot.currentTime) && Number.isFinite(result.targetMilliseconds) &&
+          Math.abs(result.snapshot.currentTime - result.targetMilliseconds) <= 1000) {
+        return result;
+      }
+      if (result.success === true && result.status === 'success' && result.snapshot?.videoId === expected.videoId &&
+          result.snapshot?.sessionId === expected.sessionId && Number.isFinite(result.snapshot.currentTime) &&
+          Number.isFinite(result.targetMilliseconds)) {
+        if (Math.abs(result.snapshot.currentTime - result.targetMilliseconds) > 1000) {
+          return { status: 'error', error: '跳轉時間點驗證失敗，請再試一次。', reason: 'post-time-mismatch' };
+        }
+        return { status: 'success', ...result };
+      }
+      return {
+        status: 'error',
+        error: '無法跳轉至字幕時間點，請稍後再試。',
+        reason: 'page-command-failed'
+      };
+    } catch {
+      return {
+        status: 'error',
+        error: '目前無法跳轉至字幕時間點，請繼續觀看。',
+        reason: 'page-transport-failed'
+      };
+    }
   }
 
   getActionData(payload) {

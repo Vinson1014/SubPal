@@ -12,6 +12,7 @@ class EndscreenTaskActionController {
     this.state = 'idle';
     this.error = null;
     this.successfulVoteState = null;
+    this.successfulIntent = null;
     this.generation = 0;
   }
 
@@ -20,6 +21,7 @@ class EndscreenTaskActionController {
     this.state = 'idle';
     this.error = null;
     this.successfulVoteState = null;
+    this.successfulIntent = null;
   }
 
   setState(state) {
@@ -31,14 +33,16 @@ class EndscreenTaskActionController {
   }
 
   isBlocked() {
-    return BLOCKING_STATES.has(this.state);
+    return this.state === 'success'
+      ? this.successfulIntent !== 'jump-to-timecode'
+      : BLOCKING_STATES.has(this.state);
   }
 
   selectedVote(task) {
     return this.successfulVoteState ?? task?.userState?.voteState;
   }
 
-  handle(intent, task, context, callback) {
+  handle(intent, task, context, callback, metadata = {}) {
     if (this.isBlocked()) return undefined;
     if (!task || typeof task !== 'object') {
       this.fail('任務資料無效，請稍後再試。');
@@ -48,10 +52,14 @@ class EndscreenTaskActionController {
       this.fail('無法處理此任務，請再試一次。');
       return undefined;
     }
+    if (intent === 'jump-to-timecode' && (!Number.isFinite(task.timestamp) || task.timestamp < 0)) {
+      this.fail('時間點資料無效，請再試一次。');
+      return undefined;
+    }
 
     let result;
     try {
-      result = callback(this.buildPayload(intent, task, context));
+      result = callback(this.buildPayload(intent, task, context, metadata));
     } catch (error) {
       this.fail(error instanceof Error ? error.message : actionText(error));
       return undefined;
@@ -80,7 +88,7 @@ class EndscreenTaskActionController {
     );
   }
 
-  buildPayload(intent, task, context) {
+  buildPayload(intent, task, context, metadata = {}) {
     const resolutionContext = typeof task.constructor === 'function' ? new task.constructor() : {};
     resolutionContext.taskID = task.taskID;
     resolutionContext.targetType = task.targetType;
@@ -89,7 +97,19 @@ class EndscreenTaskActionController {
     resolutionContext.timestamp = task.timestamp;
 
     const payload = { intent, task, context, resolutionContext };
-    if (intent === 'vote-like' || intent === 'vote-dislike') {
+    if (intent === 'jump-to-timecode') {
+      payload.controlId = metadata.controlId;
+      payload.requestId = metadata.requestId;
+      payload.issuedAt = metadata.issuedAt;
+    }
+    if (intent === 'jump-to-timecode') {
+      payload.expected = {
+        videoId: context?.videoId,
+        sessionId: context?.sessionId,
+        epoch: context?.epoch,
+        targetTimestamp: task.timestamp
+      };
+    } else if (intent === 'vote-like' || intent === 'vote-dislike') {
       payload.translationID = task.translationID;
     } else if (intent === 'submit-better-candidate') {
       payload.sourceTranslationID = task.translationID;
@@ -101,6 +121,7 @@ class EndscreenTaskActionController {
     if (result?.status === 'success') {
       this.state = 'success';
       this.error = null;
+      this.successfulIntent = intent;
       if (intent === 'vote-like') this.successfulVoteState = 'like';
       if (intent === 'vote-dislike') this.successfulVoteState = 'dislike';
     } else if (result?.status === 'error' || notifyIdle) {

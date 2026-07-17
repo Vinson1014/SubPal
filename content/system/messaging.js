@@ -444,12 +444,6 @@ export function sendMessageToPageScript(message) {
   debugLog('發送消息到 page script:', message);
   
   return new Promise((resolve, reject) => {
-    // 檢查是否有 page script 可用
-    if (!window.subpalPageScript) {
-      reject(new Error('Page script 不可用'));
-      return;
-    }
-
     // 生成唯一的訊息 ID
     const messageId = `page_msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     const timeoutMs = getTimeoutForMessageType(message.type);
@@ -465,14 +459,7 @@ export function sendMessageToPageScript(message) {
         cleanupPageScriptListener(messageId);
         debugLog('收到 page script 回應:', messageId, event.data);
 
-        // 處理響應
-        if (event.data.error) {
-          const error = new Error(event.data.error);
-          console.error('page script 消息失敗:', messageId, message.type, error);
-          reject(error);
-        } else {
-          resolve(event.data);
-        }
+        resolve(event.data);
       }
     };
 
