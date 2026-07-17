@@ -15,6 +15,8 @@ class PlaybackContextManager {
     this.maxDebugEvents = 50;
     this.pollInterval = null;
     this.pollIntervalMs = 3000;
+    this.videoChangedDisposer = null;
+    this.videoChangeTimeout = null;
   }
 
   createInitialContext() {
@@ -39,16 +41,28 @@ class PlaybackContextManager {
     }
 
     this.setupEventHandlers();
-    await this.refreshContext('initialize');
-    this.startPolling();
-    this.isInitialized = true;
-    return true;
+    try {
+      await this.refreshContext('initialize');
+      this.startPolling();
+      this.isInitialized = true;
+      return true;
+    } catch (error) {
+      this.disposeEventHandlers();
+      throw error;
+    }
   }
 
   setupEventHandlers() {
-    registerInternalEventHandler('VIDEO_ID_CHANGED', (event) => {
+    if (this.videoChangedDisposer) return;
+    this.videoChangedDisposer = registerInternalEventHandler('VIDEO_ID_CHANGED', (event) => {
       this.handleVideoChanged(event);
     });
+  }
+
+  disposeEventHandlers() {
+    const dispose = this.videoChangedDisposer;
+    this.videoChangedDisposer = null;
+    dispose?.();
   }
 
   startPolling() {
@@ -88,7 +102,12 @@ class PlaybackContextManager {
     this.dispatchContextChanged('VIDEO_ID_CHANGED');
 
     // Netflix SPA 切換時 player session 可能稍晚才 ready，延遲刷新一次。
-    setTimeout(() => {
+    if (this.videoChangeTimeout) {
+      clearTimeout(this.videoChangeTimeout);
+    }
+    const timeoutId = setTimeout(() => {
+      if (this.videoChangeTimeout !== timeoutId || !this.isInitialized) return;
+      this.videoChangeTimeout = null;
       this.refreshContext('video-change-delay').catch(error => {
         this.recordDebugEvent('REFRESH_FAILED', {
           reason: 'video-change-delay',
@@ -96,6 +115,7 @@ class PlaybackContextManager {
         });
       });
     }, 1000);
+    this.videoChangeTimeout = timeoutId;
   }
 
   async refreshContext(reason = 'manual') {
@@ -241,11 +261,17 @@ class PlaybackContextManager {
   }
 
   cleanup() {
+    if (this.videoChangeTimeout) {
+      clearTimeout(this.videoChangeTimeout);
+      this.videoChangeTimeout = null;
+    }
+
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
     }
 
+    this.disposeEventHandlers();
     this.isInitialized = false;
   }
 }

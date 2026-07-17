@@ -130,7 +130,7 @@ export async function initMessaging() {
     debugLog('收到來自 content.js 的消息', message, sender);
 
     // 處理內部事件消息
-    const internalEventTypes = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED'];
+    const internalEventTypes = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED', 'VIDEO_ID_CHANGED'];
     if (internalEventTypes.includes(message.type)) {
       debugLog(`收到 ${message.type} 消息，分發給內部事件處理器`);
       dispatchInternalEvent(message);

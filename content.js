@@ -131,8 +131,11 @@
   }
 
   async function initializeIsolatedEndscreenTasks() {
+    const { initMessaging } = await import(chrome.runtime.getURL('content/system/messaging.js'));
+    await initMessaging();
     const { startIsolatedEndscreenTasks } = await import(chrome.runtime.getURL('content/system/isolated-endscreen-tasks.js'));
-    await startIsolatedEndscreenTasks(configManager);
+    const { playbackContextManager } = await import(chrome.runtime.getURL('content/core/playback-context-manager.js'));
+    await startIsolatedEndscreenTasks(configManager, playbackContextManager);
   }
 
   // 處理配置相關訊息
@@ -496,7 +499,7 @@
     }
 
     // 檢查是否為內部消息（不需要發送到 background）
-    const internalMessages = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED'];
+    const internalMessages = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED', 'VIDEO_ID_CHANGED'];
 
     if (internalMessages.includes(message.type)) {
       debugLog('處理內部消息:', message.type);
@@ -576,6 +579,39 @@
     }
   }
 
+  function waitForNetflixPageScriptReady(timeoutMs = 5000, retryIntervalMs = 50) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const startedAt = Date.now();
+
+      const finish = (ready) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('subpal-page-script-ready', handleReady);
+        resolve(ready);
+      };
+      const handleReady = () => finish(true);
+      const requestReadiness = () => {
+        if (settled) return;
+        window.dispatchEvent(new CustomEvent('subpal-request-page-script-ready'));
+        if (Date.now() - startedAt >= timeoutMs) {
+          finish(false);
+          return;
+        }
+        setTimeout(requestReadiness, retryIntervalMs);
+      };
+
+      window.addEventListener('subpal-page-script-ready', handleReady);
+      requestReadiness();
+    });
+  }
+
+  function injectNetflixPageScriptAndWait() {
+    const readiness = waitForNetflixPageScriptReady();
+    injectNetflixPageScript();
+    return readiness;
+  }
+
   // 建立初始連接
   connectToBackground();
 
@@ -599,15 +635,17 @@
 
       debugLog('All managers initialized.');
 
+      const pageScriptReady = injectNetflixPageScriptAndWait();
+      injectPageContextScript();
+      if (!await pageScriptReady) {
+        console.warn('[Content Script] Netflix page script readiness timeout; skipping isolated endscreen tasks.');
+        return;
+      }
       try {
         await initializeIsolatedEndscreenTasks();
       } catch (error) {
         console.warn('[Content Script] 片尾任務模組初始化失敗:', error);
       }
-
-      // ConfigManager 初始化完成後，立即注入 page context script
-      injectPageContextScript();
-
     } catch (error) {
       console.error('[Content Script] Managers 初始化過程中發生錯誤:', error);
       // 發生錯誤時仍嘗試注入腳本

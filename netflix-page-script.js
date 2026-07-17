@@ -13,6 +13,43 @@
 (function() {
   'use strict';
 
+  const PAGE_SCRIPT_READY_EVENT = 'subpal-page-script-ready';
+  const PAGE_SCRIPT_READY_REQUEST_EVENT = 'subpal-request-page-script-ready';
+  const HISTORY_VIDEO_ID_CHANGE_WRAPPED = '__subpalVideoIdChangeWrapped';
+
+  if (history[HISTORY_VIDEO_ID_CHANGE_WRAPPED] !== true) {
+    for (const method of ['pushState', 'replaceState']) {
+      const original = history[method];
+      history[method] = function(...args) {
+        const oldVideoId = location.href.match(/\/watch\/(\d+)/)?.[1] || null;
+        const result = original.apply(this, args);
+        const newVideoId = location.href.match(/\/watch\/(\d+)/)?.[1] || null;
+
+        if (oldVideoId !== newVideoId) {
+          window.dispatchEvent(new CustomEvent('messageToContentScript', {
+            detail: {
+              messageId: `video-route-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`,
+              message: {
+                type: 'VIDEO_ID_CHANGED',
+                oldVideoId,
+                newVideoId,
+                source: 'netflix-page-script'
+              }
+            }
+          }));
+        }
+
+        return result;
+      };
+    }
+    Object.defineProperty(history, HISTORY_VIDEO_ID_CHANGE_WRAPPED, { value: true });
+  }
+
+  if (window.subpalPageScript?.ready === true) {
+    window.dispatchEvent(new CustomEvent(PAGE_SCRIPT_READY_EVENT));
+    return;
+  }
+
   // 調試模式
   let debugMode = true;
 
@@ -1779,6 +1816,9 @@
 
   // 監聽消息
   window.addEventListener('message', handleMessage);
+  const announcePageScriptReady = () => window.dispatchEvent(new CustomEvent(PAGE_SCRIPT_READY_EVENT));
+  window.addEventListener(PAGE_SCRIPT_READY_REQUEST_EVENT, announcePageScriptReady);
+  announcePageScriptReady();
 
   // 監聽內部事件 - 檢測影片切換並重新初始化播放器助手
   window.addEventListener('messageToContentScript', (event) => {

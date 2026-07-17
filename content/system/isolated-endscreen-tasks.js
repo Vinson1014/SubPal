@@ -8,12 +8,16 @@ import { configBridge } from './config/config-bridge.js';
 import { toAPILanguageCode } from '../utils/language-code.js';
 import { requestCrowdsourcingTasks } from './crowdsourcing-task-client.js';
 import { EndscreenActionCoordinator } from './endscreen-action-coordinator.js';
+import { registerInternalEventHandler, sendMessageToPageScript } from './messaging.js';
+import { playbackContextManager } from '../core/playback-context-manager.js';
 
 class IsolatedEndscreenTasks {
   constructor({
-    document, Observer, location, configManager, schedule, cancel, clock, sendMessage, routeTarget,
+    document, Observer, location, configManager, schedule, cancel, clock, sendMessage, sendPageMessage = sendMessageToPageScript, routeTarget,
     Adapter = EndscreenSignalAdapter, Controller = EndscreenTaskController, Panel = EndscreenTaskPanel,
-    Dialog = SubmissionDialog, translation = translationBridge, vote = voteBridge, config = configBridge
+    Dialog = SubmissionDialog, translation = translationBridge, vote = voteBridge, config = configBridge,
+    playbackContextManager: contextManager = playbackContextManager, ownsPlaybackContextManager = false,
+    registerInternalEventHandler: registerEventHandler = registerInternalEventHandler
   }) {
     this.document = document;
     this.Observer = Observer;
@@ -23,6 +27,11 @@ class IsolatedEndscreenTasks {
     this.cancel = cancel;
     this.clock = clock;
     this.sendMessage = sendMessage;
+    this.playbackContextManager = contextManager;
+    this.ownsPlaybackContextManager = ownsPlaybackContextManager;
+    this.playbackContextOwnership = null;
+    this.registerInternalEventHandler = registerEventHandler;
+    this.videoIdChangedDisposer = null;
     this.routeTarget = routeTarget ?? document?.defaultView ?? null;
     this.Adapter = Adapter;
     this.Controller = Controller;
@@ -30,6 +39,7 @@ class IsolatedEndscreenTasks {
     this.Dialog = Dialog;
     this.routeGeneration = 0;
     this.routeVideoId = null;
+    this.lastTrustedWatchContext = null;
     this.started = false;
     this.startPromise = null;
     this.lifecycleGeneration = 0;
@@ -45,8 +55,10 @@ class IsolatedEndscreenTasks {
       actionConfig: config,
       configManager,
       getPanel: () => this.panel,
+      getContext: () => this.getContext(),
       getRouteGeneration: () => this.routeGeneration,
-      isCurrentLifecycle: (lifecycle) => this.isCurrentLifecycle(lifecycle)
+      isCurrentLifecycle: (lifecycle) => this.isCurrentLifecycle(lifecycle),
+      sendPageMessage
     });
   }
 
@@ -87,6 +99,11 @@ class IsolatedEndscreenTasks {
 
       const languageCode = toAPILanguageCode(this.configManager.get('subtitle.primaryLanguage'));
       if (!languageCode || !this.isCurrentLifecycle(lifecycle)) return;
+
+      if (this.ownsPlaybackContextManager) {
+        await this.initializeOwnedPlaybackContextManager();
+        if (!this.isCurrentLifecycle(lifecycle)) return;
+      }
 
       panel = new this.Panel({ document: this.document, schedule: this.schedule, cancel: this.cancel, configSource: this.configManager });
       this.panel = panel;
@@ -219,12 +236,48 @@ class IsolatedEndscreenTasks {
     panel.setActionState('error');
   }
 
+  async initializeOwnedPlaybackContextManager() {
+    if (!this.ownsPlaybackContextManager) return;
+    if (this.playbackContextOwnership) {
+      await this.playbackContextOwnership.promise;
+      return;
+    }
+
+    const ownership = { pending: true, cleanupRequested: false, cleaned: false, promise: null };
+    this.playbackContextOwnership = ownership;
+    ownership.promise = (async () => {
+      try {
+        await this.playbackContextManager.initialize();
+      } catch (error) {
+        ownership.cleanupRequested = true;
+        throw error;
+      } finally {
+        ownership.pending = false;
+        if (ownership.cleanupRequested) this.cleanupOwnedPlaybackContextManager(ownership);
+      }
+    })();
+    await ownership.promise;
+  }
+
+  cleanupOwnedPlaybackContextManager(ownership = this.playbackContextOwnership) {
+    if (!this.ownsPlaybackContextManager || !ownership || ownership.cleaned) return;
+    ownership.cleanupRequested = true;
+    if (ownership.pending) return;
+
+    ownership.cleaned = true;
+    if (this.playbackContextOwnership === ownership) this.playbackContextOwnership = null;
+    this.playbackContextManager.cleanup();
+  }
+
   cleanup() {
     const wasStarted = this.started;
     this.lifecycleGeneration += 1;
     this.routeGeneration += 1;
     this.started = false;
     this.teardownRouteListeners();
+    const disposeVideoIdChanged = this.videoIdChangedDisposer;
+    this.videoIdChangedDisposer = null;
+    disposeVideoIdChanged?.();
     this.closePendingSubmission('任務已失效，請稍後再試。');
 
     const adapter = this.adapter;
@@ -232,8 +285,10 @@ class IsolatedEndscreenTasks {
     this.adapter = null;
     this.controller = null;
     this.panel = null;
+    this.lastTrustedWatchContext = null;
     this.stopAdapter(adapter);
     this.cleanupPanel(panel);
+    this.cleanupOwnedPlaybackContextManager();
     if (wasStarted || !this.startPromise) this.startPromise = null;
     this.actionCoordinator.cleanup('任務已失效，請稍後再試。');
   }
@@ -260,6 +315,13 @@ class IsolatedEndscreenTasks {
   }
 
   bindRouteListeners(lifecycle) {
+    if (!this.videoIdChangedDisposer) {
+      this.videoIdChangedDisposer = this.registerInternalEventHandler('VIDEO_ID_CHANGED', (event) => {
+        if (!this.isCurrentLifecycle(lifecycle)) return;
+        const overrideVideoId = this.toRouteVideoId(event?.newVideoId) ?? this.toRouteVideoId(event?.videoId);
+        this.refreshRoute(overrideVideoId);
+      });
+    }
     if (!this.routeTarget?.addEventListener) return;
     const refresh = () => {
       if (this.isCurrentLifecycle(lifecycle)) this.refreshRoute();
@@ -288,18 +350,39 @@ class IsolatedEndscreenTasks {
     return match ? match[1] : null;
   }
 
-  getContext() {
-    this.refreshRoute();
-    if (!this.routeVideoId) return null;
-    return { videoId: this.routeVideoId, sessionId: `watch-${this.routeVideoId}`, epoch: this.routeGeneration, state: 'ready' };
+  toRouteVideoId(videoId) {
+    return typeof videoId === 'string' && /^\d+$/.test(videoId) ? videoId : null;
   }
 
-  refreshRoute() {
-    const videoId = this.getVideoId();
-    if (videoId === this.routeVideoId) return;
-    this.routeVideoId = videoId;
+  getContext() {
+    const context = this.playbackContextManager?.getCurrentContext?.();
+    const routeVideoId = this.getVideoId();
+    if (this.lastTrustedWatchContext?.videoId !== routeVideoId) {
+      this.lastTrustedWatchContext = null;
+    }
+    const isAuthoritativeWatchContext = context?.state === 'ready' &&
+      typeof context.videoId === 'string' &&
+      typeof context.sessionId === 'string' && context.sessionId.startsWith('watch-') &&
+      Number.isInteger(context.epoch) && context.epoch >= 0;
+    if (isAuthoritativeWatchContext &&
+      (context.videoId !== routeVideoId ||
+        (this.lastTrustedWatchContext && context.videoId !== this.lastTrustedWatchContext.videoId))) {
+      this.lastTrustedWatchContext = null;
+      return null;
+    }
+    if (isAuthoritativeWatchContext) {
+      this.lastTrustedWatchContext = { ...context };
+    }
+    return this.lastTrustedWatchContext ? { ...this.lastTrustedWatchContext } : null;
+  }
+
+  refreshRoute(videoId = null) {
+    const nextVideoId = this.toRouteVideoId(videoId) ?? this.getVideoId();
+    if (nextVideoId === this.routeVideoId) return;
+    this.lastTrustedWatchContext = null;
+    this.routeVideoId = nextVideoId;
     this.routeGeneration += 1;
-    this.controller?.handleInternalEvent({ type: 'VIDEO_ID_CHANGED', newVideoId: videoId });
+    this.controller?.handleInternalEvent({ type: 'VIDEO_ID_CHANGED', newVideoId: nextVideoId });
     this.closePendingSubmission('影片已切換，請再試一次。');
     this.panel?.hide();
   }
@@ -310,15 +393,20 @@ class IsolatedEndscreenTasks {
     const generation = this.routeGeneration;
     if (!videoID || !this.isCurrentLifecycle(lifecycle)) return { tasks: [] };
     if (this.configManager.get('crowdsourcing.endscreenTasksEnabled') !== true) return { tasks: [] };
+    const requestContext = this.getContext();
+    if (!requestContext || requestContext.videoId !== videoID) return { tasks: [] };
     const response = await this.sendMessage({ type: 'GET_CROWDSOURCING_TASKS', videoID, languageCode, limit: 5 });
-    if (!this.isCurrentLifecycle(lifecycle) || generation !== this.routeGeneration || videoID !== this.getVideoId()) {
+    const currentContext = this.getContext();
+    if (!this.isCurrentLifecycle(lifecycle) || generation !== this.routeGeneration || videoID !== this.getVideoId() ||
+      currentContext?.videoId !== requestContext.videoId || currentContext?.sessionId !== requestContext.sessionId ||
+      currentContext?.epoch !== requestContext.epoch) {
       return { tasks: [] };
     }
     return response;
   }
 }
 
-async function startIsolatedEndscreenTasks(configManager) {
+async function startIsolatedEndscreenTasks(configManager, contextManager = playbackContextManager) {
   const system = new IsolatedEndscreenTasks({
     document,
     Observer: MutationObserver,
@@ -328,7 +416,9 @@ async function startIsolatedEndscreenTasks(configManager) {
     schedule: (...args) => window.setTimeout(...args),
     cancel: (timerId) => window.clearTimeout(timerId),
     clock: Date.now,
-    sendMessage: requestCrowdsourcingTasks
+    sendMessage: requestCrowdsourcingTasks,
+    playbackContextManager: contextManager,
+    ownsPlaybackContextManager: true
   });
   await system.start();
   return system;
