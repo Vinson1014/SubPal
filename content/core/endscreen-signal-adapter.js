@@ -108,15 +108,15 @@ class EndscreenSignalAdapter {
     if (media.ended) return null;
     const watchCreditsCta = this.onlyLive(this.document.querySelectorAll('[data-uia="watch-credits-seamless-button"]'));
     const nextEpisodeCta = this.onlyLive(this.document.querySelectorAll('[data-uia="next-episode-seamless-button"]'));
-    const state2Root = !media.paused && watchCreditsCta && nextEpisodeCta && this.sharedPlayerOwner(media, [watchCreditsCta, nextEpisodeCta]);
-    if (state2Root) {
+    const typeANextEpisodeRoot = !media.paused && watchCreditsCta && nextEpisodeCta && this.sharedPlayerOwner(media, [watchCreditsCta, nextEpisodeCta]);
+    if (typeANextEpisodeRoot) {
       return {
-        root: state2Root,
+        root: typeANextEpisodeRoot,
         actionMarker: nextEpisodeCta,
         observation: {
           context,
           snapshot: { currentTime: media.currentTime, duration: media.duration, state: 'playing' },
-          variant: 'state-2-credits',
+          variant: 'type-a-next-episode',
           evidence: { watchCreditsCta: true, nextEpisodeCta: true }
         }
       };
@@ -131,7 +131,7 @@ class EndscreenSignalAdapter {
       observation: {
         context,
         snapshot: { currentTime: media.currentTime, duration: media.duration, state: media.paused ? 'paused' : 'playing' },
-        variant: 'recommendation-preview',
+        variant: 'type-b',
         evidence: { promotedPreview: true }
       }
     };

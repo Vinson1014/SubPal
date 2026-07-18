@@ -54,7 +54,7 @@ test('Given an active endscreen panel When playback resumes and the candidate di
   assert.deepEqual(inactiveCommands, ['ENDSCREEN_INACTIVE'], '候選消失時應只發出一次 isolated inactive command');
 });
 
-test('Given the recommendation shell remains When media is replaced before inactive confirmation Then inactive is canceled and the replacement is observed', async () => {
+test('Given the type-b recommendation shell remains When media is replaced before inactive confirmation Then inactive is canceled and the replacement is observed', async () => {
   const Adapter = await loadAdapter();
   const harness = createRecommendationHarness();
   const inactiveCommands = [];
@@ -77,7 +77,7 @@ test('Given the recommendation shell remains When media is replaced before inact
   assert.equal(harness.observations[1].snapshot.currentTime, 21);
 });
 
-test('Given the recommendation shell remains When media is replaced after inactive confirmation Then inactive stays suppressed and a later mutation observes the replacement', async () => {
+test('Given the type-b recommendation shell remains When media is replaced after inactive confirmation Then inactive stays suppressed and a later mutation observes the replacement', async () => {
   const Adapter = await loadAdapter();
   const harness = createRecommendationHarness();
   const inactiveCommands = [];
@@ -100,7 +100,7 @@ test('Given the recommendation shell remains When media is replaced after inacti
   assert.equal(harness.observations[1].snapshot.currentTime, 21);
 });
 
-test('Given Netflix briefly replaces the recommendation shell When the shell returns within the inactive debounce Then the visible card is not dismissed', async () => {
+test('Given Netflix briefly replaces the type-b recommendation shell When the shell returns within the inactive debounce Then the visible card is not dismissed', async () => {
   const Adapter = await loadAdapter();
   const context = createContext();
   const harness = createRecommendationHarness();

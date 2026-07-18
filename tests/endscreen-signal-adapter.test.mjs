@@ -26,7 +26,7 @@ test('Given one trusted terminal next-episode CTA and media paused exactly at it
   assert.deepEqual(harness.observations, []);
 });
 
-test('Given one trusted active promoted preview with every empirical marker When it plays Then it observes the hardened recommendation-preview contract', async () => {
+test('Given one trusted active type-b state-b-recommendation-trailer with every empirical marker When it plays Then it observes the hardened type-b contract', async () => {
   const Adapter = await loadAdapter();
   const harness = createHarness({
     media: { currentTime: 20, duration: 1800, ended: false, paused: false },
@@ -41,12 +41,12 @@ test('Given one trusted active promoted preview with every empirical marker When
   assert.deepEqual(JSON.parse(JSON.stringify(harness.observations)), [{
     context: createContext(),
     snapshot: { currentTime: 20, duration: 1800, state: 'playing' },
-    variant: 'recommendation-preview',
+    variant: 'type-b',
     evidence: { promotedPreview: true }
   }]);
 });
 
-test('Given the live Netflix recommendation hierarchy with an opacity-zero video wrapper When the preview plays Then it observes recommendation-preview', async () => {
+test('Given the live Netflix type-b state-b-recommendation-trailer hierarchy with an opacity-zero video wrapper When it plays Then it observes type-b', async () => {
   const Adapter = await loadAdapter();
   const harness = createHarness({
     media: { currentTime: 21, duration: 63, ended: false, paused: false },
@@ -76,10 +76,10 @@ test('Given the live Netflix recommendation hierarchy with an opacity-zero video
   harness.video.dispatch('play');
   harness.scheduler.flush();
 
-  assert.equal(harness.observations[0]?.variant, 'recommendation-preview');
+  assert.equal(harness.observations[0]?.variant, 'type-b');
 });
 
-test('Given the recommendation shell is visible during its countdown pause When the media pauses Then it preserves a paused preview observation', async () => {
+test('Given the type-b recommendation shell is visible during its state-a-recommendation-countdown pause When the media pauses Then it preserves a paused type-b observation', async () => {
   const Adapter = await loadAdapter();
   const harness = createHarness({
     media: { currentTime: 21, duration: 63, ended: false, paused: true },
@@ -95,11 +95,11 @@ test('Given the recommendation shell is visible during its countdown pause When 
   harness.video.dispatch('pause');
   harness.scheduler.flush();
 
-  assert.equal(harness.observations[0]?.variant, 'recommendation-preview');
+  assert.equal(harness.observations[0]?.variant, 'type-b');
   assert.equal(harness.observations[0]?.snapshot?.state, 'paused');
 });
 
-test('Given one trusted live State 2 credits capture with direct player-root children at alternate finite media values When it plays Then it observes the hardened State 2 contract once', async () => {
+test('Given one trusted live type-a-next-episode capture with direct player-root children at alternate finite media values When it plays Then it observes the hardened type-a-next-episode contract once', async () => {
   const Adapter = await loadAdapter();
   const harness = createHarness({
     media: { currentTime: 1111.25, duration: 2222.5, ended: false, paused: false, readyState: 4 },
@@ -114,12 +114,12 @@ test('Given one trusted live State 2 credits capture with direct player-root chi
   assert.deepEqual(JSON.parse(JSON.stringify(harness.observations)), [{
     context: createContext(),
     snapshot: { currentTime: 1111.25, duration: 2222.5, state: 'playing' },
-    variant: 'state-2-credits',
+    variant: 'type-a-next-episode',
     evidence: { watchCreditsCta: true, nextEpisodeCta: true }
   }]);
 });
 
-test('Given one trusted live State 2 credits capture with split hierarchy under exactly one live player root at different finite media values When it plays Then it observes the hardened State 2 contract once', async () => {
+test('Given one trusted live type-a-next-episode capture with split hierarchy under exactly one live player root at different finite media values When it plays Then it observes the hardened type-a-next-episode contract once', async () => {
   const Adapter = await loadAdapter();
   const harness = createHarness({
     media: { currentTime: 987.5, duration: 1975.25, ended: false, paused: false, readyState: 4 },
@@ -141,7 +141,7 @@ test('Given one trusted live State 2 credits capture with split hierarchy under 
   assert.deepEqual(JSON.parse(JSON.stringify(harness.observations)), [{
     context: createContext(),
     snapshot: { currentTime: 987.5, duration: 1975.25, state: 'playing' },
-    variant: 'state-2-credits',
+    variant: 'type-a-next-episode',
     evidence: { watchCreditsCta: true, nextEpisodeCta: true }
   }]);
 });
@@ -211,7 +211,7 @@ test('Given markers hidden by the DOM, opacity, collapsed visibility, or no rend
   }
 });
 
-test('Given live State 2 controls only meet at a direct shared parent without data-uia="player" When checked Then they are not correlated into a candidate', async () => {
+test('Given live type-a-next-episode controls only meet at a direct shared parent without data-uia="player" When checked Then they are not correlated into a candidate', async () => {
   const Adapter = await loadAdapter();
   const harness = createHarness({ media: { currentTime: 987.5, duration: 1975.25, ended: false, paused: false, readyState: 4 }, markers: [{ uia: 'watch-credits-seamless-button' }, { uia: 'next-episode-seamless-button' }] });
   const mediaBranch = harness.roots[0].append(new FakeNode());

@@ -35,7 +35,7 @@ function createPageHarness({
   let activeExpectedPlayer = null;
   let hasSeeked = false;
   const playPauseSelector = playerUi.playPauseSelector || 'control-play-pause';
-  const typeACtasLive = () => playerUi.typeA === true && !hasSeeked && playerUi.typeACtasLiveAfterSeek !== false;
+  const typeANextEpisodeCtasLive = () => playerUi.nextEpisode === true && !hasSeeked && playerUi.typeANextEpisodeCtasLiveAfterSeek !== false;
   const controlsStandardReady = () => playerUi.controlsStandard === true &&
     (!playerUi.controlsStandardAfterPlayerChecks || playerWrapperQueries >= playerUi.controlsStandardAfterPlayerChecks);
   const mediaSettled = () => !playerUi.mediaSettlesAfterPlayerChecks || playerWrapperQueries >= playerUi.mediaSettlesAfterPlayerChecks;
@@ -56,7 +56,7 @@ function createPageHarness({
       if (selector === '[data-uia="controls-standard"]') return controlsStandardReady() ? controlsStandard : null;
       if (selector === '[data-uia="timeline"]') return controlsStandardReady() ? timelineControl : null;
       if (selector === `[data-uia="${playPauseSelector}"]`) return controlsStandardReady() ? playPauseControl : null;
-      if (selector === 'button[data-uia="next-episode-seamless-button"]') return typeACtasLive() ? nextEpisodeButton : null;
+      if (selector === 'button[data-uia="next-episode-seamless-button"]') return typeANextEpisodeCtasLive() ? nextEpisodeButton : null;
       return null;
     },
     querySelectorAll(selector) {
@@ -178,8 +178,8 @@ function createPageHarness({
   const globalNormalControls = { isConnected: true, getClientRects: () => [{}], closest: () => wrongPlayer };
   const nextEpisodeButton = { click() { nextEpisodeClickCount += 1; } };
   Object.defineProperties(nextEpisodeButton, {
-    isConnected: { get: typeACtasLive },
-    getClientRects: { value: () => typeACtasLive() ? [{}] : [] },
+    isConnected: { get: typeANextEpisodeCtasLive },
+    getClientRects: { value: () => typeANextEpisodeCtasLive() ? [{}] : [] },
     closest: { value: () => activeExpectedPlayer }
   });
   const control = {
@@ -198,7 +198,7 @@ function createPageHarness({
       seekCalls.push(milliseconds);
       currentTimeMs = milliseconds;
       hasSeeked = true;
-      if (playerUi.typeA === true && playerUi.typeACtasLiveAfterSeek !== true) {
+      if (playerUi.nextEpisode === true && playerUi.typeANextEpisodeCtasLiveAfterSeek !== true) {
         creditsButton.isConnected = false;
       }
     }
@@ -392,7 +392,7 @@ function createPageHarness({
     get minimizedConnected() { return minimizedElement.isConnected; },
     get normalControlsConnected() { return normalControls.isConnected; },
     get minimizedMarkerConnected() { return minimizedElement.isConnected; },
-    get creditsConnected() { return creditsButton.isConnected && typeACtasLive(); },
+    get creditsConnected() { return creditsButton.isConnected && typeANextEpisodeCtasLive(); },
     get nextEpisodeConnected() { return nextEpisodeButton.isConnected; },
     get controlsStandardConnected() { return controlsStandard.isConnected; },
     get timelineConnected() { return timelineControl.isConnected; },
@@ -763,9 +763,9 @@ test('Given verified seek convergence with exact-player native controls visible 
   assert.equal(harness.normalControlsConnected, true);
 });
 
-test('Given a trusted Type A jump with settling media When owned current controls replace live CTAs Then persistent marker and auto-hidden controls still prove success', async () => {
+test('Given a trusted Type A next-episode jump with settling media When owned current controls replace live CTAs Then persistent marker and auto-hidden controls still prove success', async () => {
   const harness = createPageHarness({ playerUi: {
-    typeA: true,
+    nextEpisode: true,
     minimized: true,
     controlsStandard: true,
     controlsStandardAfterPlayerChecks: 4,
@@ -793,9 +793,9 @@ test('Given a trusted Type A jump with settling media When owned current control
   assert.equal(harness.nextEpisodeClickCount, 0);
 });
 
-test('Given live Type A controls expose control-play-pause-play When the jump converges Then the exact owned play/pause selector proves restoration', async () => {
+test('Given live Type A next-episode controls expose control-play-pause-play When the jump converges Then the exact owned play/pause selector proves restoration', async () => {
   const harness = createPageHarness({ playerUi: {
-    typeA: true,
+    nextEpisode: true,
     minimized: true,
     playPauseSelector: 'control-play-pause-play',
     controlsStandard: true,
@@ -824,10 +824,10 @@ test('Given live Type A controls expose control-play-pause-play When the jump co
   assert.equal(harness.nextEpisodeClickCount, 0);
 });
 
-test('Given hidden or stale Type A credits CTAs When restoration is attempted Then it remains partial without unsafe activation', async () => {
+test('Given hidden or stale Type A next-episode credits CTAs When restoration is attempted Then it remains partial without unsafe activation', async () => {
   for (const playerUi of [
-    { typeA: true, minimized: true, creditsVisible: false },
-    { typeA: true, minimized: true, creditsConnected: false, returnStaleCredits: true }
+    { nextEpisode: true, minimized: true, creditsVisible: false },
+    { nextEpisode: true, minimized: true, creditsConnected: false, returnStaleCredits: true }
   ]) {
     const harness = createPageHarness({ playerUi });
 
@@ -846,11 +846,11 @@ test('Given hidden or stale Type A credits CTAs When restoration is attempted Th
   }
 });
 
-test('Given a persistent Type A CTA When current controls never replace it Then restoration remains partial after one credits activation', async () => {
+test('Given a persistent Type A next-episode CTA When current controls never replace it Then restoration remains partial after one credits activation', async () => {
   const harness = createPageHarness({ playerUi: {
-    typeA: true,
+    nextEpisode: true,
     minimized: true,
-    typeACtasLiveAfterSeek: true,
+    typeANextEpisodeCtasLiveAfterSeek: true,
     restoreOnCreditsClick: false
   } });
 
@@ -861,19 +861,19 @@ test('Given a persistent Type A CTA When current controls never replace it Then 
   assert.equal(response.success, false, JSON.stringify(response));
   assert.equal(response.status, 'partial', JSON.stringify(response));
   assert.equal(response.partial, true, JSON.stringify(response));
-  assert.equal(response.reason, 'player-ui-restore-type-a-cta-live');
-  assert.equal(response.playerUiRestore.reason, 'player-ui-restore-type-a-cta-live');
+  assert.equal(response.reason, 'player-ui-restore-type-a-next-episode-cta-live');
+  assert.equal(response.playerUiRestore.reason, 'player-ui-restore-type-a-next-episode-cta-live');
   assert.equal(response.playerUiRestore.activated, true);
   assert.deepEqual(harness.seekCalls, [12500]);
   assert.equal(harness.creditsClickCount, 1);
   assert.equal(harness.nextEpisodeClickCount, 0);
 });
 
-test('Given Type A credits activation throws When restoration attempts it Then it remains partial without retrying', async () => {
+test('Given Type A next-episode credits activation throws When restoration attempts it Then it remains partial without retrying', async () => {
   const harness = createPageHarness({ playerUi: {
-    typeA: true,
+    nextEpisode: true,
     minimized: true,
-    typeACtasLiveAfterSeek: true,
+    typeANextEpisodeCtasLiveAfterSeek: true,
     creditsClickThrows: true
   } });
 
@@ -892,9 +892,9 @@ test('Given Type A credits activation throws When restoration attempts it Then i
   assert.equal(harness.nextEpisodeClickCount, 0);
 });
 
-test('Given Type A media never settles within the restore deadline When a trusted jump converges Then restoration remains partial without activation', async () => {
+test('Given Type A next-episode media never settles within the restore deadline When a trusted jump converges Then restoration remains partial without activation', async () => {
   const harness = createPageHarness({ playerUi: {
-    typeA: true,
+    nextEpisode: true,
     minimized: true,
     mediaSettlesAfterPlayerChecks: 1000
   } });
@@ -1045,7 +1045,7 @@ test('Given verified seek convergence with normal player UI When handled Then re
 
 test('Given no connected wrapper for the expected video When restoration runs Then unrelated global elements cannot authorize activation', async () => {
   const harness = createPageHarness({ playerUi: {
-    typeA: true,
+    nextEpisode: true,
     minimized: true,
     absentExpectedWrapper: true,
     globalUnrelatedElements: true,
@@ -1066,7 +1066,7 @@ test('Given no connected wrapper for the expected video When restoration runs Th
 });
 
 test('Given multiple connected wrappers with the expected videoId When restoration runs Then ambiguous ownership fails closed without activation', async () => {
-  const harness = createPageHarness({ playerUi: { typeA: true, minimized: true, multipleExpectedWrappers: true } });
+  const harness = createPageHarness({ playerUi: { nextEpisode: true, minimized: true, multipleExpectedWrappers: true } });
 
   trustedJump(harness);
   await settlePageCommand();
@@ -1082,7 +1082,7 @@ test('Given multiple connected wrappers with the expected videoId When restorati
 
 test('Given unrelated global video credits and controls When the expected wrapper lacks its native control Then no global fallback clicks or proves success', async () => {
   const harness = createPageHarness({ playerUi: {
-    typeA: true,
+    nextEpisode: true,
     minimized: true,
     creditsMissing: true,
     mediaMissingWithinExpected: true,
@@ -1234,8 +1234,8 @@ test('Given a minimized player with a missing, disabled, stale, wrong-player, or
     }],
     [{ minimized: true, creditsDisabled: true }, 'partial', 'player-ui-restore-control-unusable'],
     [{ minimized: true, creditsConnected: false, returnStaleCredits: true }, 'partial', 'player-ui-restore-control-unusable'],
-    [{ typeA: true, minimized: true, typeACtasLiveAfterSeek: true, creditsWrongPlayer: true }, 'partial', 'player-ui-restore-control-wrong-player'],
-    [{ typeA: true, minimized: true, mediaEnded: true }, 'partial', 'player-ui-restore-media-unusable']
+    [{ nextEpisode: true, minimized: true, typeANextEpisodeCtasLiveAfterSeek: true, creditsWrongPlayer: true }, 'partial', 'player-ui-restore-control-wrong-player'],
+    [{ nextEpisode: true, minimized: true, mediaEnded: true }, 'partial', 'player-ui-restore-media-unusable']
   ]) {
     const harness = createPageHarness({ playerUi });
 
@@ -1260,7 +1260,7 @@ test('Given a minimized player with a missing, disabled, stale, wrong-player, or
 
 test('Given Netflix identity changes after native credits activation When restoration waits Then it fails closed without a second click or seek', async () => {
   const harness = createPageHarness({
-    playerUi: { typeA: true, minimized: true, typeACtasLiveAfterSeek: true, identityChangeOnCreditsClick: true, restoreOnCreditsClick: false }
+    playerUi: { nextEpisode: true, minimized: true, typeANextEpisodeCtasLiveAfterSeek: true, identityChangeOnCreditsClick: true, restoreOnCreditsClick: false }
   });
 
   trustedJump(harness);
@@ -1312,7 +1312,7 @@ test('Given minimized end-screen controls When restoration runs Then the next-ep
   assert.equal(harness.nextEpisodeClickCount, 0);
 });
 
-test('Given a non-Type-A preview-like DOM When a trusted jump converges Then baseline seek succeeds without activating credits or next episode', async () => {
+test('Given a non-Type A next-episode preview-like DOM When a trusted jump converges Then baseline seek succeeds without activating credits or next episode', async () => {
   const harness = createPageHarness({ playerUi: { previewLike: true } });
   const ordinaryHarness = createPageHarness();
 

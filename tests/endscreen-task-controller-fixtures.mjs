@@ -38,7 +38,7 @@ export function createContext(overrides = {}) {
   };
 }
 
-export function terminalNextEpisodeObservation(context = createContext(), overrides = {}) {
+export function unsupportedTerminalNextEpisodeObservation(context = createContext(), overrides = {}) {
   return {
     context,
     snapshot: { currentTime: 1740, duration: 1800, state: 'ended' },
@@ -48,21 +48,21 @@ export function terminalNextEpisodeObservation(context = createContext(), overri
   };
 }
 
-export function recommendationPreviewObservation(context = createContext(), overrides = {}) {
+export function typeBObservation(context = createContext(), overrides = {}) {
   return {
     context,
     snapshot: { currentTime: 1740, duration: 1800, state: 'playing' },
-    variant: 'recommendation-preview',
+    variant: 'type-b',
     evidence: { promotedPreview: true },
     ...overrides
   };
 }
 
-export function state2CreditsObservation(context = createContext(), overrides = {}) {
+export function typeANextEpisodeObservation(context = createContext(), overrides = {}) {
   return {
     context,
     snapshot: { currentTime: 1378.496948, duration: 1536.159625, state: 'playing' },
-    variant: 'state-2-credits',
+    variant: 'type-a-next-episode',
     evidence: { watchCreditsCta: true, nextEpisodeCta: true },
     ...overrides
   };

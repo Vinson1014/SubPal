@@ -8,7 +8,9 @@
  * 4. 可存取性：提供 aria 標籤與焦點管理
  * 5. 展示性動作：CTA 按鈕僅觸發回調，實際提交/投票由 Phase 5 接管
  *
- * 面板定位於播放器左下角，避開 Netflix 主要「下一集」CTA（通常位於中下或右側）。
+ * 面板只承接上游已判定的 end-screen 類型，不負責辨識影片屬於哪一種狀態。
+ * 目前只針對 `type-a-next-episode` 的 placement 做顯示安排，並刻意避開 Netflix 主要「下一集」CTA。
+ * Type B 的 card rendering/layout 目前維持停用，等待 UX 方案定案。
  *
  * @module endscreen-task-panel
  */
@@ -201,7 +203,7 @@ class EndscreenTaskPanel {
     this.container.setAttribute('aria-label', 'SubPal 字幕任務');
     this.container.className = 'subpal-endscreen-panel';
 
-    // 面板樣式：定位於左下角，避開 Netflix 主要「下一集」CTA
+    // 面板樣式：針對 `type-a-next-episode` 的 placement 定位於左下角，避開 Netflix 主要「下一集」CTA；Type B card rendering/layout 目前停用，待 UX 定案
     Object.assign(this.container.style, {
       position: 'fixed',
       left: '24px',

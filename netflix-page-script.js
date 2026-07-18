@@ -1806,7 +1806,7 @@
     return control?.disabled === true || control?.getAttribute?.('aria-disabled') === 'true' || control?.matches?.(':disabled') === true;
   }
 
-  function captureTypeAPlayer(expected) {
+  function captureTypeANextEpisodePlayer(expected) {
     const players = findExpectedPlayer(expected);
     if (players.length !== 1) return null;
     const expectedPlayer = players[0];
@@ -1818,11 +1818,11 @@
     return { player: expectedPlayer };
   }
 
-  function hasTypeACta(expectedPlayer, selector) {
+  function hasTypeANextEpisodeCta(expectedPlayer, selector) {
     return queryWithin(expectedPlayer, selector).some(control => isConnectedAndVisible(control) && isOwnedConnectedControl(control, expectedPlayer));
   }
 
-  async function restoreTypeAPlayerUi(expected, request, typeACapture) {
+  async function restoreTypeANextEpisodePlayerUi(expected, request, typeANextEpisodeCapture) {
     const creditsSelector = 'button[data-uia="watch-credits-seamless-button"]';
     const nextEpisodeSelector = 'button[data-uia="next-episode-seamless-button"]';
     const controlsStandardSelector = '[data-uia="controls-standard"]';
@@ -1844,8 +1844,8 @@
         pendingReason = players.length === 0 ? 'player-ui-restore-ownership-missing' : 'player-ui-restore-ownership-ambiguous';
       } else {
         const expectedPlayer = players[0];
-        const creditsLive = hasTypeACta(expectedPlayer, creditsSelector);
-        const nextEpisodeLive = hasTypeACta(expectedPlayer, nextEpisodeSelector);
+        const creditsLive = hasTypeANextEpisodeCta(expectedPlayer, creditsSelector);
+        const nextEpisodeLive = hasTypeANextEpisodeCta(expectedPlayer, nextEpisodeSelector);
         if (creditsLive || nextEpisodeLive) {
           if (creditsLive && !activated) {
             const creditsControls = queryWithin(expectedPlayer, creditsSelector)
@@ -1862,7 +1862,7 @@
               pendingReason = 'player-ui-restore-control-unusable';
             }
           } else {
-            pendingReason = 'player-ui-restore-type-a-cta-live';
+            pendingReason = 'player-ui-restore-type-a-next-episode-cta-live';
           }
         } else {
           const media = queryWithin(expectedPlayer, 'video').filter(element => element?.isConnected === true);
@@ -1892,8 +1892,8 @@
     return { success: false, status: 'failed', reason: pendingReason, activated };
   }
 
-  async function restorePlayerUiAfterVerifiedJump(expected, request, typeACapture = null) {
-    if (typeACapture) return restoreTypeAPlayerUi(expected, request, typeACapture);
+  async function restorePlayerUiAfterVerifiedJump(expected, request, typeANextEpisodeCapture = null) {
+    if (typeANextEpisodeCapture) return restoreTypeANextEpisodePlayerUi(expected, request, typeANextEpisodeCapture);
     const minimizedSelector = '[data-uia="watch-video-player-view-minimized"]';
     const creditsSelector = 'button[data-uia="watch-credits-seamless-button"]';
     const findExpectedPlayers = () => findExpectedPlayer(expected);
@@ -2052,7 +2052,7 @@
       return createJumpFailure('invalid-target-timestamp', '時間點資料無效，請再試一次。', request);
     }
 
-    const typeACapture = captureTypeAPlayer(expected);
+    const typeANextEpisodeCapture = captureTypeANextEpisodePlayer(expected);
     try {
       await Promise.resolve(videoPlayer.seek(targetMilliseconds));
     } catch (error) {
@@ -2071,7 +2071,7 @@
       const postPlayer = postApi?.videoPlayer?.getVideoPlayerBySessionId?.(expected.sessionId) || null;
       const postTime = typeof postPlayer?.getCurrentTime === 'function' ? postPlayer.getCurrentTime() : afterSeekSnapshot.currentTime;
       if (Number.isFinite(postTime) && Math.abs(postTime - targetMilliseconds) <= 1000) {
-        const playerUiRestore = await restorePlayerUiAfterVerifiedJump(expected, request, typeACapture);
+        const playerUiRestore = await restorePlayerUiAfterVerifiedJump(expected, request, typeANextEpisodeCapture);
         const verifiedSnapshot = {
           videoId: afterSeekSnapshot.playerApiVideoId,
           sessionId: afterSeekSnapshot.selectedSessionId,

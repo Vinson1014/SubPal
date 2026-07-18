@@ -84,14 +84,14 @@ class EndscreenTaskController {
     );
     if (!this.isTrustedContext(context) || !hasValidSnapshot) return false;
 
-    if (observation.variant === 'recommendation-preview') {
+    if (observation.variant === 'type-b') {
       if (!TYPE_B_ENDSCREEN_TASKS_ENABLED) return false;
       return (
         (snapshot.state === 'playing' || snapshot.state === 'paused') &&
         observation.evidence?.promotedPreview === true
       );
     }
-    if (observation.variant === 'state-2-credits') {
+    if (observation.variant === 'type-a-next-episode') {
       return (
         snapshot.state === 'playing' &&
         observation.evidence?.watchCreditsCta === true &&
