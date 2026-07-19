@@ -43,6 +43,7 @@ class SubtitleDisplay {
       textAlign: 'center',
       borderRadius: '4px',
       textShadow: '1px 1px 1px rgba(0, 0, 0, 0.5)',
+      letterSpacing: '0px',
       border: 'none',
       opacity: '1.0',
       maxWidth: '100%'
@@ -105,8 +106,10 @@ class SubtitleDisplay {
     
     this.log('顯示字幕:', subtitleData);
     
-    // 檢查是否為雙語字幕
-    if (subtitleData.isDualSubtitle && subtitleData.dualSubtitleData) {
+    const shouldShowDualSubtitle = subtitleData.isDualSubtitle &&
+      subtitleData.dualSubtitleData?.isDualModeEnabled;
+
+    if (shouldShowDualSubtitle) {
       this.hideSingleSubtitle();
       this.showDualSubtitle(subtitleData);
     } else {
@@ -421,12 +424,13 @@ class SubtitleDisplay {
       padding: '5px 0px',
       borderRadius: effectiveStyle.borderRadius,
       textShadow: effectiveStyle.textShadow,
+      letterSpacing: effectiveStyle.letterSpacing || '0px',
       border: effectiveStyle.border,
       opacity: effectiveStyle.opacity,
       maxWidth: effectiveStyle.maxWidth,
       margin: '0 auto',
       display: 'inline-block',
-      boxShadow: '0 0 0 2px rgba(0, 0, 0, 0.75)' // 模擬原生字幕效果
+      boxShadow: 'none'
     });
   }
 
@@ -878,6 +882,7 @@ class SubtitleDisplay {
       textAlign: styleConfig.textAlign || 'center',
       borderRadius: styleConfig.borderRadius || '4px',
       textShadow: styleConfig.textShadow || '1px 1px 1px rgba(0, 0, 0, 0.5)',
+      letterSpacing: styleConfig.letterSpacing || '0px',
       border: styleConfig.border || 'none',
       opacity: styleConfig.opacity || '1.0',
       padding: styleConfig.padding || '5px 10px'

@@ -151,6 +151,39 @@
                     <span class="color-hex" id="primaryTextColorHex">#ffffff</span>
                   </div>
                 </div>
+                <div class="style-control">
+                  <div class="control-header">
+                    <span id="primaryOutlineEnabledLabel">文字外框</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="primaryOutlineEnabled" aria-labelledby="primaryOutlineEnabledLabel" aria-describedby="primaryOutlineHelp">
+                    <span class="toggle-slider" aria-hidden="true"></span>
+                  </label>
+                  <span class="control-unit" id="primaryOutlineHelp">外框是文字外框，不是背景框線</span>
+                </div>
+                <div class="style-control">
+                  <div class="control-header">
+                    <label for="primaryOutlineWidth">外框寬度</label>
+                    <span class="control-value" id="primaryOutlineWidthValue">2</span><span class="control-unit">px</span>
+                  </div>
+                  <input type="range" id="primaryOutlineWidth" min="0" max="8" value="2" step="0.5" aria-describedby="primaryOutlineHelp">
+                </div>
+                <div class="style-control color-control">
+                  <div class="control-header">
+                    <label for="primaryOutlineColor">外框顏色</label>
+                  </div>
+                  <div class="color-picker-wrapper">
+                    <input type="color" id="primaryOutlineColor" value="#000000" aria-describedby="primaryOutlineHelp">
+                    <span class="color-hex" id="primaryOutlineColorHex">#000000</span>
+                  </div>
+                </div>
+                <div class="style-control">
+                  <div class="control-header">
+                    <label for="primaryLetterSpacing">字距</label>
+                    <span class="control-value" id="primaryLetterSpacingValue">0</span><span class="control-unit">px</span>
+                  </div>
+                  <input type="range" id="primaryLetterSpacing" min="-2" max="8" value="0" step="0.5">
+                </div>
                 <div class="style-control color-control">
                   <div class="control-header">
                     <span>背景顏色</span>
@@ -195,6 +228,39 @@
                     <input type="color" id="secondaryTextColor" value="#ffff00">
                     <span class="color-hex" id="secondaryTextColorHex">#ffff00</span>
                   </div>
+                </div>
+                <div class="style-control">
+                  <div class="control-header">
+                    <span id="secondaryOutlineEnabledLabel">文字外框</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="secondaryOutlineEnabled" aria-labelledby="secondaryOutlineEnabledLabel" aria-describedby="secondaryOutlineHelp">
+                    <span class="toggle-slider" aria-hidden="true"></span>
+                  </label>
+                  <span class="control-unit" id="secondaryOutlineHelp">外框是文字外框，不是背景框線</span>
+                </div>
+                <div class="style-control">
+                  <div class="control-header">
+                    <label for="secondaryOutlineWidth">外框寬度</label>
+                    <span class="control-value" id="secondaryOutlineWidthValue">2</span><span class="control-unit">px</span>
+                  </div>
+                  <input type="range" id="secondaryOutlineWidth" min="0" max="8" value="2" step="0.5" aria-describedby="secondaryOutlineHelp">
+                </div>
+                <div class="style-control color-control">
+                  <div class="control-header">
+                    <label for="secondaryOutlineColor">外框顏色</label>
+                  </div>
+                  <div class="color-picker-wrapper">
+                    <input type="color" id="secondaryOutlineColor" value="#000000" aria-describedby="secondaryOutlineHelp">
+                    <span class="color-hex" id="secondaryOutlineColorHex">#000000</span>
+                  </div>
+                </div>
+                <div class="style-control">
+                  <div class="control-header">
+                    <label for="secondaryLetterSpacing">字距</label>
+                    <span class="control-value" id="secondaryLetterSpacingValue">0</span><span class="control-unit">px</span>
+                  </div>
+                  <input type="range" id="secondaryLetterSpacing" min="-2" max="8" value="0" step="0.5">
                 </div>
                 <div class="style-control color-control">
                   <div class="control-header">

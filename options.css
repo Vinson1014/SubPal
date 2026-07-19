@@ -433,10 +433,24 @@ body {
 .style-control {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .style-control.is-disabled {
   opacity: 0.45;
+}
+
+.style-control > .toggle-switch {
+  align-self: flex-start;
+  flex-shrink: 0;
+  margin-bottom: var(--spacing-sm);
+}
+
+.style-control > .toggle-switch + .control-unit {
+  display: block;
+  max-width: 100%;
+  line-height: 1.4;
+  overflow-wrap: break-word;
 }
 
 .style-control select {
@@ -499,6 +513,10 @@ input[type="range"] {
   cursor: pointer;
 }
 
+input[type="range"]:focus-visible {
+  box-shadow: 0 0 0 3px var(--color-accent-glow);
+}
+
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 18px;
@@ -536,6 +554,12 @@ input[type="range"]::-moz-range-thumb {
   padding: var(--spacing-sm);
   background: var(--color-bg-tertiary);
   border-radius: var(--radius-md);
+  min-width: 0;
+  transition: box-shadow var(--transition-fast);
+}
+
+.color-picker-wrapper:focus-within {
+  box-shadow: 0 0 0 3px var(--color-accent-glow);
 }
 
 input[type="color"] {
@@ -546,6 +570,10 @@ input[type="color"] {
   cursor: pointer;
   background: none;
   padding: 0;
+}
+
+input[type="color"]:focus-visible {
+  outline: none;
 }
 
 input[type="color"]::-webkit-color-swatch-wrapper {
@@ -562,6 +590,9 @@ input[type="color"]::-webkit-color-swatch {
   font-size: 0.85rem;
   color: var(--color-text-secondary);
   text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ============================================

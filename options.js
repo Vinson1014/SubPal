@@ -243,7 +243,11 @@ async function restoreOptionsUI() {
       fontSize: config['subtitle.style.primary.fontSize'],
       fontWeight: config['subtitle.style.primary.fontWeight'],
       textColor: config['subtitle.style.primary.textColor'],
-      backgroundColor: config['subtitle.style.primary.backgroundColor']
+      backgroundColor: config['subtitle.style.primary.backgroundColor'],
+      outlineEnabled: config['subtitle.style.primary.outlineEnabled'],
+      outlineWidth: config['subtitle.style.primary.outlineWidth'],
+      outlineColor: config['subtitle.style.primary.outlineColor'],
+      letterSpacing: config['subtitle.style.primary.letterSpacing']
     });
 
     // 次要字幕樣式
@@ -251,7 +255,11 @@ async function restoreOptionsUI() {
       fontSize: config['subtitle.style.secondary.fontSize'],
       fontWeight: config['subtitle.style.secondary.fontWeight'],
       textColor: config['subtitle.style.secondary.textColor'],
-      backgroundColor: config['subtitle.style.secondary.backgroundColor']
+      backgroundColor: config['subtitle.style.secondary.backgroundColor'],
+      outlineEnabled: config['subtitle.style.secondary.outlineEnabled'],
+      outlineWidth: config['subtitle.style.secondary.outlineWidth'],
+      outlineColor: config['subtitle.style.secondary.outlineColor'],
+      letterSpacing: config['subtitle.style.secondary.letterSpacing']
     });
 
     // 更新 UI 顯示狀態
@@ -276,6 +284,13 @@ function updateStyleControls(type, styleConfig) {
   const backgroundColorHex = document.getElementById(`${type}BackgroundColorHex`);
   const backgroundOpacitySlider = document.getElementById(`${type}BackgroundOpacity`);
   const backgroundOpacityValue = document.getElementById(`${type}BackgroundOpacityValue`);
+  const outlineEnabledCheckbox = document.getElementById(`${type}OutlineEnabled`);
+  const outlineWidthSlider = document.getElementById(`${type}OutlineWidth`);
+  const outlineWidthValue = document.getElementById(`${type}OutlineWidthValue`);
+  const outlineColorPicker = document.getElementById(`${type}OutlineColor`);
+  const outlineColorHex = document.getElementById(`${type}OutlineColorHex`);
+  const letterSpacingSlider = document.getElementById(`${type}LetterSpacing`);
+  const letterSpacingValue = document.getElementById(`${type}LetterSpacingValue`);
 
   if (fontSizeSlider && fontSizeValue) {
     fontSizeSlider.value = styleConfig.fontSize;
@@ -301,6 +316,27 @@ function updateStyleControls(type, styleConfig) {
     if (backgroundColorHex) {
       backgroundColorHex.textContent = hex;
     }
+  }
+
+  if (outlineEnabledCheckbox) {
+    outlineEnabledCheckbox.checked = styleConfig.outlineEnabled;
+  }
+
+  if (outlineWidthSlider && outlineWidthValue) {
+    outlineWidthSlider.value = styleConfig.outlineWidth;
+    outlineWidthValue.textContent = styleConfig.outlineWidth;
+  }
+
+  if (outlineColorPicker) {
+    outlineColorPicker.value = styleConfig.outlineColor;
+    if (outlineColorHex) {
+      outlineColorHex.textContent = styleConfig.outlineColor;
+    }
+  }
+
+  if (letterSpacingSlider && letterSpacingValue) {
+    letterSpacingSlider.value = styleConfig.letterSpacing;
+    letterSpacingValue.textContent = styleConfig.letterSpacing;
   }
 }
 
@@ -386,10 +422,18 @@ function getPreviewConfigFromControls() {
     'subtitle.style.primary.fontWeight': document.getElementById('primaryFontWeight')?.value || DEFAULT_CONFIG['subtitle.style.primary.fontWeight'],
     'subtitle.style.primary.textColor': document.getElementById('primaryTextColor')?.value || DEFAULT_CONFIG['subtitle.style.primary.textColor'],
     'subtitle.style.primary.backgroundColor': toRgba(primaryBgHex, primaryBgOpacity),
+    'subtitle.style.primary.outlineEnabled': document.getElementById('primaryOutlineEnabled')?.checked ?? DEFAULT_CONFIG['subtitle.style.primary.outlineEnabled'],
+    'subtitle.style.primary.outlineWidth': Number(document.getElementById('primaryOutlineWidth')?.value ?? DEFAULT_CONFIG['subtitle.style.primary.outlineWidth']),
+    'subtitle.style.primary.outlineColor': document.getElementById('primaryOutlineColor')?.value || DEFAULT_CONFIG['subtitle.style.primary.outlineColor'],
+    'subtitle.style.primary.letterSpacing': Number(document.getElementById('primaryLetterSpacing')?.value ?? DEFAULT_CONFIG['subtitle.style.primary.letterSpacing']),
     'subtitle.style.secondary.fontSize': Number(document.getElementById('secondaryFontSize')?.value || DEFAULT_CONFIG['subtitle.style.secondary.fontSize']),
     'subtitle.style.secondary.fontWeight': document.getElementById('secondaryFontWeight')?.value || DEFAULT_CONFIG['subtitle.style.secondary.fontWeight'],
     'subtitle.style.secondary.textColor': document.getElementById('secondaryTextColor')?.value || DEFAULT_CONFIG['subtitle.style.secondary.textColor'],
-    'subtitle.style.secondary.backgroundColor': toRgba(secondaryBgHex, secondaryBgOpacity)
+    'subtitle.style.secondary.backgroundColor': toRgba(secondaryBgHex, secondaryBgOpacity),
+    'subtitle.style.secondary.outlineEnabled': document.getElementById('secondaryOutlineEnabled')?.checked ?? DEFAULT_CONFIG['subtitle.style.secondary.outlineEnabled'],
+    'subtitle.style.secondary.outlineWidth': Number(document.getElementById('secondaryOutlineWidth')?.value ?? DEFAULT_CONFIG['subtitle.style.secondary.outlineWidth']),
+    'subtitle.style.secondary.outlineColor': document.getElementById('secondaryOutlineColor')?.value || DEFAULT_CONFIG['subtitle.style.secondary.outlineColor'],
+    'subtitle.style.secondary.letterSpacing': Number(document.getElementById('secondaryLetterSpacing')?.value ?? DEFAULT_CONFIG['subtitle.style.secondary.letterSpacing'])
   };
 }
 
@@ -638,6 +682,13 @@ function setupStyleControlListeners(type, keyPrefix) {
   const backgroundColorHex = document.getElementById(`${type}BackgroundColorHex`);
   const backgroundOpacitySlider = document.getElementById(`${type}BackgroundOpacity`);
   const backgroundOpacityValue = document.getElementById(`${type}BackgroundOpacityValue`);
+  const outlineEnabledCheckbox = document.getElementById(`${type}OutlineEnabled`);
+  const outlineWidthSlider = document.getElementById(`${type}OutlineWidth`);
+  const outlineWidthValue = document.getElementById(`${type}OutlineWidthValue`);
+  const outlineColorPicker = document.getElementById(`${type}OutlineColor`);
+  const outlineColorHex = document.getElementById(`${type}OutlineColorHex`);
+  const letterSpacingSlider = document.getElementById(`${type}LetterSpacing`);
+  const letterSpacingValue = document.getElementById(`${type}LetterSpacingValue`);
   if (fontSizeSlider && fontSizeValue) {
     fontSizeSlider.addEventListener('input', async (e) => {
       const size = parseInt(e.target.value);
@@ -692,6 +743,43 @@ function setupStyleControlListeners(type, keyPrefix) {
       const opacity = parseFloat(e.target.value);
       backgroundOpacityValue.textContent = opacity.toFixed(2);
       await updateBackgroundColor(true);
+    });
+  }
+
+  if (outlineEnabledCheckbox) {
+    outlineEnabledCheckbox.addEventListener('change', async (e) => {
+      updatePreviewFromControls();
+      await saveConfig(`${keyPrefix}.outlineEnabled`, e.target.checked);
+    });
+  }
+
+  if (outlineWidthSlider && outlineWidthValue) {
+    outlineWidthSlider.addEventListener('input', async (e) => {
+      const width = parseFloat(e.target.value);
+      outlineWidthValue.textContent = width;
+      updatePreviewFromControls();
+      await saveConfig(`${keyPrefix}.outlineWidth`, width);
+    });
+  }
+
+  if (outlineColorPicker) {
+    outlineColorPicker.addEventListener('input', (e) => {
+      updatePreviewFromControls();
+      if (outlineColorHex) {
+        outlineColorHex.textContent = e.target.value;
+      }
+    });
+    outlineColorPicker.addEventListener('change', async (e) => {
+      await saveConfig(`${keyPrefix}.outlineColor`, e.target.value);
+    });
+  }
+
+  if (letterSpacingSlider && letterSpacingValue) {
+    letterSpacingSlider.addEventListener('input', async (e) => {
+      const spacing = parseFloat(e.target.value);
+      letterSpacingValue.textContent = spacing;
+      updatePreviewFromControls();
+      await saveConfig(`${keyPrefix}.letterSpacing`, spacing);
     });
   }
 }
@@ -874,10 +962,18 @@ async function resetStyles() {
     'subtitle.style.primary.fontWeight': DEFAULT_CONFIG['subtitle.style.primary.fontWeight'],
     'subtitle.style.primary.textColor': DEFAULT_CONFIG['subtitle.style.primary.textColor'],
     'subtitle.style.primary.backgroundColor': DEFAULT_CONFIG['subtitle.style.primary.backgroundColor'],
+    'subtitle.style.primary.outlineEnabled': DEFAULT_CONFIG['subtitle.style.primary.outlineEnabled'],
+    'subtitle.style.primary.outlineWidth': DEFAULT_CONFIG['subtitle.style.primary.outlineWidth'],
+    'subtitle.style.primary.outlineColor': DEFAULT_CONFIG['subtitle.style.primary.outlineColor'],
+    'subtitle.style.primary.letterSpacing': DEFAULT_CONFIG['subtitle.style.primary.letterSpacing'],
     'subtitle.style.secondary.fontSize': DEFAULT_CONFIG['subtitle.style.secondary.fontSize'],
     'subtitle.style.secondary.fontWeight': DEFAULT_CONFIG['subtitle.style.secondary.fontWeight'],
     'subtitle.style.secondary.textColor': DEFAULT_CONFIG['subtitle.style.secondary.textColor'],
-    'subtitle.style.secondary.backgroundColor': DEFAULT_CONFIG['subtitle.style.secondary.backgroundColor']
+    'subtitle.style.secondary.backgroundColor': DEFAULT_CONFIG['subtitle.style.secondary.backgroundColor'],
+    'subtitle.style.secondary.outlineEnabled': DEFAULT_CONFIG['subtitle.style.secondary.outlineEnabled'],
+    'subtitle.style.secondary.outlineWidth': DEFAULT_CONFIG['subtitle.style.secondary.outlineWidth'],
+    'subtitle.style.secondary.outlineColor': DEFAULT_CONFIG['subtitle.style.secondary.outlineColor'],
+    'subtitle.style.secondary.letterSpacing': DEFAULT_CONFIG['subtitle.style.secondary.letterSpacing']
   };
 
   await saveConfigMultiple(defaultStyleConfig);

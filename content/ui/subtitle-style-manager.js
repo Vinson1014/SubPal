@@ -11,6 +11,45 @@
 
 import { registerInternalEventHandler } from '../system/messaging.js';
 
+const CUSTOM_BASE_TEXT_SHADOW = '1px 1px 1px rgba(0, 0, 0, 0.5)';
+
+function toFiniteNumber(value, fallback) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : fallback;
+}
+
+function toStringValue(value, fallback) {
+  return typeof value === 'string' && value.trim() ? value : fallback;
+}
+
+function toOutlineEnabled(value) {
+  return value === undefined ? false : value === true;
+}
+
+function createTextOutlineShadow({ enabled, width, color, baseShadow }) {
+  const safeBaseShadow = toStringValue(baseShadow, 'none');
+  const safeWidth = toFiniteNumber(width, 0);
+
+  if (!enabled || safeWidth <= 0) {
+    return safeBaseShadow;
+  }
+
+  const offset = `${safeWidth}px`;
+  const safeColor = toStringValue(color, '#000000');
+  const outlineShadow = [
+    `-${offset} 0 0 ${safeColor}`,
+    `${offset} 0 0 ${safeColor}`,
+    `0 -${offset} 0 ${safeColor}`,
+    `0 ${offset} 0 ${safeColor}`,
+    `-${offset} -${offset} 0 ${safeColor}`,
+    `${offset} -${offset} 0 ${safeColor}`,
+    `-${offset} ${offset} 0 ${safeColor}`,
+    `${offset} ${offset} 0 ${safeColor}`
+  ].join(', ');
+
+  return safeBaseShadow === 'none' ? outlineShadow : `${outlineShadow}, ${safeBaseShadow}`;
+}
+
 class SubtitleStyleManager {
   constructor() {
     this.isInitialized = false;
@@ -25,13 +64,21 @@ class SubtitleStyleManager {
         fontSize: 55,
         fontWeight: '700',
         textColor: '#ffffff',
-        backgroundColor: 'rgba(0, 0, 0, 0.75)'
+        backgroundColor: 'rgba(0, 0, 0, 0.75)',
+        outlineEnabled: false,
+        outlineWidth: 2,
+        outlineColor: '#000000',
+        letterSpacing: 0
       },
       secondary: {
         fontSize: 24,
         fontWeight: '500',
         textColor: '#ffff00',
-        backgroundColor: 'rgba(0, 0, 0, 0.75)'
+        backgroundColor: 'rgba(0, 0, 0, 0.75)',
+        outlineEnabled: false,
+        outlineWidth: 2,
+        outlineColor: '#000000',
+        letterSpacing: 0
       },
       netflixPreset: {
         fontFamily: 'Arial, Helvetica, sans-serif',
@@ -77,10 +124,18 @@ class SubtitleStyleManager {
       this.currentConfig.primary.fontWeight = configBridge.get('subtitle.style.primary.fontWeight');
       this.currentConfig.primary.textColor = configBridge.get('subtitle.style.primary.textColor');
       this.currentConfig.primary.backgroundColor = configBridge.get('subtitle.style.primary.backgroundColor');
+      this.currentConfig.primary.outlineEnabled = toOutlineEnabled(configBridge.get('subtitle.style.primary.outlineEnabled'));
+      this.currentConfig.primary.outlineWidth = toFiniteNumber(configBridge.get('subtitle.style.primary.outlineWidth'), 2);
+      this.currentConfig.primary.outlineColor = toStringValue(configBridge.get('subtitle.style.primary.outlineColor'), '#000000');
+      this.currentConfig.primary.letterSpacing = toFiniteNumber(configBridge.get('subtitle.style.primary.letterSpacing'), 0);
       this.currentConfig.secondary.fontSize = configBridge.get('subtitle.style.secondary.fontSize');
       this.currentConfig.secondary.fontWeight = configBridge.get('subtitle.style.secondary.fontWeight');
       this.currentConfig.secondary.textColor = configBridge.get('subtitle.style.secondary.textColor');
       this.currentConfig.secondary.backgroundColor = configBridge.get('subtitle.style.secondary.backgroundColor');
+      this.currentConfig.secondary.outlineEnabled = toOutlineEnabled(configBridge.get('subtitle.style.secondary.outlineEnabled'));
+      this.currentConfig.secondary.outlineWidth = toFiniteNumber(configBridge.get('subtitle.style.secondary.outlineWidth'), 2);
+      this.currentConfig.secondary.outlineColor = toStringValue(configBridge.get('subtitle.style.secondary.outlineColor'), '#000000');
+      this.currentConfig.secondary.letterSpacing = toFiniteNumber(configBridge.get('subtitle.style.secondary.letterSpacing'), 0);
       this.currentConfig.netflixPreset.fontFamily = configBridge.get('subtitle.style.netflixPreset.fontFamily');
       this.currentConfig.netflixPreset.fontWeight = configBridge.get('subtitle.style.netflixPreset.fontWeight');
       this.currentConfig.netflixPreset.textColor = configBridge.get('subtitle.style.netflixPreset.textColor');
@@ -101,10 +156,18 @@ class SubtitleStyleManager {
         'subtitle.style.primary.fontWeight',
         'subtitle.style.primary.textColor',
         'subtitle.style.primary.backgroundColor',
+        'subtitle.style.primary.outlineEnabled',
+        'subtitle.style.primary.outlineWidth',
+        'subtitle.style.primary.outlineColor',
+        'subtitle.style.primary.letterSpacing',
         'subtitle.style.secondary.fontSize',
         'subtitle.style.secondary.fontWeight',
         'subtitle.style.secondary.textColor',
         'subtitle.style.secondary.backgroundColor',
+        'subtitle.style.secondary.outlineEnabled',
+        'subtitle.style.secondary.outlineWidth',
+        'subtitle.style.secondary.outlineColor',
+        'subtitle.style.secondary.letterSpacing',
         'subtitle.style.netflixPreset.fontFamily',
         'subtitle.style.netflixPreset.fontWeight',
         'subtitle.style.netflixPreset.textColor',
@@ -152,10 +215,18 @@ class SubtitleStyleManager {
       'subtitle.style.primary.fontWeight': ['primary', 'fontWeight'],
       'subtitle.style.primary.textColor': ['primary', 'textColor'],
       'subtitle.style.primary.backgroundColor': ['primary', 'backgroundColor'],
+      'subtitle.style.primary.outlineEnabled': ['primary', 'outlineEnabled'],
+      'subtitle.style.primary.outlineWidth': ['primary', 'outlineWidth'],
+      'subtitle.style.primary.outlineColor': ['primary', 'outlineColor'],
+      'subtitle.style.primary.letterSpacing': ['primary', 'letterSpacing'],
       'subtitle.style.secondary.fontSize': ['secondary', 'fontSize'],
       'subtitle.style.secondary.fontWeight': ['secondary', 'fontWeight'],
       'subtitle.style.secondary.textColor': ['secondary', 'textColor'],
       'subtitle.style.secondary.backgroundColor': ['secondary', 'backgroundColor'],
+      'subtitle.style.secondary.outlineEnabled': ['secondary', 'outlineEnabled'],
+      'subtitle.style.secondary.outlineWidth': ['secondary', 'outlineWidth'],
+      'subtitle.style.secondary.outlineColor': ['secondary', 'outlineColor'],
+      'subtitle.style.secondary.letterSpacing': ['secondary', 'letterSpacing'],
       'subtitle.style.netflixPreset.fontFamily': ['netflixPreset', 'fontFamily'],
       'subtitle.style.netflixPreset.fontWeight': ['netflixPreset', 'fontWeight'],
       'subtitle.style.netflixPreset.textColor': ['netflixPreset', 'textColor'],
@@ -262,6 +333,7 @@ class SubtitleStyleManager {
       backgroundColor: effectiveStyle.backgroundColor,
       fontFamily: effectiveStyle.fontFamily,
       fontWeight: effectiveStyle.fontWeight,
+      letterSpacing: `${effectiveStyle.letterSpacing}px`,
       textAlign: 'center',
       borderRadius: '4px',
       textShadow: effectiveStyle.textShadow,
@@ -275,15 +347,28 @@ class SubtitleStyleManager {
    * SubtitleDisplay 會在渲染當下覆蓋可繼承欄位。
    */
   getEffectiveBaseStyle(styleConfig) {
+    const outlineEnabled = toOutlineEnabled(styleConfig.outlineEnabled);
+    const outlineWidth = toFiniteNumber(styleConfig.outlineWidth, 2);
+    const outlineColor = toStringValue(styleConfig.outlineColor, '#000000');
+    const letterSpacing = toFiniteNumber(styleConfig.letterSpacing, 0);
+
     if (this.currentConfig.styleMode === 'netflixPreset' ||
         this.currentConfig.styleMode === 'nativeInherit') {
+      const baseShadow = this.currentConfig.netflixPreset.textShadow;
+
       return {
         fontSize: styleConfig.fontSize,
         fontFamily: this.currentConfig.netflixPreset.fontFamily,
         fontWeight: this.currentConfig.netflixPreset.fontWeight,
         textColor: styleConfig.textColor,
         backgroundColor: styleConfig.backgroundColor,
-        textShadow: this.currentConfig.netflixPreset.textShadow
+        textShadow: createTextOutlineShadow({
+          enabled: outlineEnabled,
+          width: outlineWidth,
+          color: outlineColor,
+          baseShadow
+        }),
+        letterSpacing
       };
     }
 
@@ -293,7 +378,13 @@ class SubtitleStyleManager {
       fontWeight: styleConfig.fontWeight,
       textColor: styleConfig.textColor,
       backgroundColor: styleConfig.backgroundColor,
-      textShadow: '1px 1px 1px rgba(0, 0, 0, 0.5)'
+      textShadow: createTextOutlineShadow({
+        enabled: outlineEnabled,
+        width: outlineWidth,
+        color: outlineColor,
+        baseShadow: CUSTOM_BASE_TEXT_SHADOW
+      }),
+      letterSpacing
     };
   }
 
