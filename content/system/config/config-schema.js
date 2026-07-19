@@ -288,6 +288,56 @@ export const CONFIG_SCHEMA = {
             return isSubtitleFontWeightSupported(value);
           },
           validationError: '不支持的字幕字重'
+        },
+
+        /**
+         * 主要字幕描邊開關
+         */
+        outlineEnabled: {
+          type: 'boolean',
+          default: false,
+          description: '主要字幕描邊開關',
+          category: 'subtitle-style'
+        },
+
+        /**
+         * 主要字幕描邊寬度（像素）
+         */
+        outlineWidth: {
+          type: 'number',
+          default: 2,
+          min: 0,
+          max: 8,
+          description: '主要字幕描邊寬度（px）',
+          category: 'subtitle-style'
+        },
+
+        /**
+         * 主要字幕描邊顏色
+         * 預設為黑色
+         */
+        outlineColor: {
+          type: 'string',
+          default: '#000000',
+          description: '主要字幕描邊顏色',
+          category: 'subtitle-style',
+          validation: (value) => {
+            if (typeof value !== 'string') return false;
+            return /^#[0-9a-fA-F]{6}$/.test(value);
+          },
+          validationError: '描邊顏色必須為 6 位十六進制格式（如 #000000）'
+        },
+
+        /**
+         * 主要字幕字距（像素）
+         */
+        letterSpacing: {
+          type: 'number',
+          default: 0,
+          min: -2,
+          max: 8,
+          description: '主要字幕字距（px）',
+          category: 'subtitle-style'
         }
       },
 
@@ -353,6 +403,56 @@ export const CONFIG_SCHEMA = {
             return isSubtitleFontWeightSupported(value);
           },
           validationError: '不支持的字幕字重'
+        },
+
+        /**
+         * 次要字幕描邊開關
+         */
+        outlineEnabled: {
+          type: 'boolean',
+          default: false,
+          description: '次要字幕描邊開關',
+          category: 'subtitle-style'
+        },
+
+        /**
+         * 次要字幕描邊寬度（像素）
+         */
+        outlineWidth: {
+          type: 'number',
+          default: 2,
+          min: 0,
+          max: 8,
+          description: '次要字幕描邊寬度（px）',
+          category: 'subtitle-style'
+        },
+
+        /**
+         * 次要字幕描邊顏色
+         * 預設為黑色
+         */
+        outlineColor: {
+          type: 'string',
+          default: '#000000',
+          description: '次要字幕描邊顏色',
+          category: 'subtitle-style',
+          validation: (value) => {
+            if (typeof value !== 'string') return false;
+            return /^#[0-9a-fA-F]{6}$/.test(value);
+          },
+          validationError: '描邊顏色必須為 6 位十六進制格式（如 #000000）'
+        },
+
+        /**
+         * 次要字幕字距（像素）
+         */
+        letterSpacing: {
+          type: 'number',
+          default: 0,
+          min: -2,
+          max: 8,
+          description: '次要字幕字距（px）',
+          category: 'subtitle-style'
         }
       },
 
