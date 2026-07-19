@@ -25,6 +25,58 @@ const PREVIEW_TEXT_BY_LANGUAGE = {
   sv: 'Det här är en förhandsvisning av undertexter'
 };
 
+const CUSTOM_BASE_TEXT_SHADOW = '1px 1px 1px rgba(0, 0, 0, 0.5)';
+const NETFLIX_BASE_TEXT_SHADOW = '0 0 2px rgba(0, 0, 0, 0.9)';
+const PREVIEW_BOX_SHADOW = '0 0 0 2px rgba(0, 0, 0, 0.75)';
+
+function toFiniteNumber(value, fallback) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : fallback;
+}
+
+function toStringValue(value, fallback) {
+  return typeof value === 'string' && value.trim() ? value : fallback;
+}
+
+function createTextStyleConfig(flatConfig, namespace, defaults) {
+  const outlineEnabled = flatConfig[`subtitle.style.${namespace}.outlineEnabled`];
+
+  return {
+    fontSize: toFiniteNumber(flatConfig[`subtitle.style.${namespace}.fontSize`], defaults.fontSize),
+    fontWeight: toStringValue(flatConfig[`subtitle.style.${namespace}.fontWeight`], defaults.fontWeight),
+    textColor: toStringValue(flatConfig[`subtitle.style.${namespace}.textColor`], defaults.textColor),
+    backgroundColor: toStringValue(flatConfig[`subtitle.style.${namespace}.backgroundColor`], defaults.backgroundColor),
+    outlineEnabled: outlineEnabled === undefined ? false : outlineEnabled === true,
+    outlineWidth: toFiniteNumber(flatConfig[`subtitle.style.${namespace}.outlineWidth`], 2),
+    outlineColor: toStringValue(flatConfig[`subtitle.style.${namespace}.outlineColor`], '#000000'),
+    letterSpacing: toFiniteNumber(flatConfig[`subtitle.style.${namespace}.letterSpacing`], 0)
+  };
+}
+
+export function createTextOutlineShadow({ enabled, width, color, baseShadow }) {
+  const safeBaseShadow = toStringValue(baseShadow, 'none');
+  const safeWidth = toFiniteNumber(width, 0);
+
+  if (!enabled || safeWidth <= 0) {
+    return safeBaseShadow;
+  }
+
+  const offset = `${safeWidth}px`;
+  const safeColor = toStringValue(color, '#000000');
+  const outlineShadow = [
+    `-${offset} 0 0 ${safeColor}`,
+    `${offset} 0 0 ${safeColor}`,
+    `0 -${offset} 0 ${safeColor}`,
+    `0 ${offset} 0 ${safeColor}`,
+    `-${offset} -${offset} 0 ${safeColor}`,
+    `${offset} -${offset} 0 ${safeColor}`,
+    `-${offset} ${offset} 0 ${safeColor}`,
+    `${offset} ${offset} 0 ${safeColor}`
+  ].join(', ');
+
+  return safeBaseShadow === 'none' ? outlineShadow : `${outlineShadow}, ${safeBaseShadow}`;
+}
+
 export function getPreviewText(languageCode, type, languages = []) {
   if (PREVIEW_TEXT_BY_LANGUAGE[languageCode]) {
     return PREVIEW_TEXT_BY_LANGUAGE[languageCode];
@@ -36,37 +88,38 @@ export function getPreviewText(languageCode, type, languages = []) {
     : `${languageName} 字幕預覽`;
 }
 
-export function createSubtitlePreviewConfig(flatConfig) {
+export function createSubtitlePreviewConfig(flatConfig = {}) {
   return {
     isDualMode: !!flatConfig['subtitle.dualModeEnabled'],
-    styleMode: flatConfig['subtitle.style.mode'],
-    fontFamily: flatConfig['subtitle.style.fontFamily'],
-    primaryLanguage: flatConfig['subtitle.primaryLanguage'],
-    secondaryLanguage: flatConfig['subtitle.secondaryLanguage'],
-    primary: {
-      fontSize: Number(flatConfig['subtitle.style.primary.fontSize']),
-      fontWeight: flatConfig['subtitle.style.primary.fontWeight'],
-      textColor: flatConfig['subtitle.style.primary.textColor'],
-      backgroundColor: flatConfig['subtitle.style.primary.backgroundColor']
-    },
-    secondary: {
-      fontSize: Number(flatConfig['subtitle.style.secondary.fontSize']),
-      fontWeight: flatConfig['subtitle.style.secondary.fontWeight'],
-      textColor: flatConfig['subtitle.style.secondary.textColor'],
-      backgroundColor: flatConfig['subtitle.style.secondary.backgroundColor']
-    },
+    styleMode: toStringValue(flatConfig['subtitle.style.mode'], 'custom'),
+    fontFamily: toStringValue(flatConfig['subtitle.style.fontFamily'], 'Arial, Helvetica, "Microsoft JhengHei", "PingFang TC", sans-serif'),
+    primaryLanguage: toStringValue(flatConfig['subtitle.primaryLanguage'], 'zh-Hant'),
+    secondaryLanguage: toStringValue(flatConfig['subtitle.secondaryLanguage'], 'en'),
+    primary: createTextStyleConfig(flatConfig, 'primary', {
+      fontSize: 55,
+      fontWeight: '700',
+      textColor: '#ffffff',
+      backgroundColor: 'rgba(0, 0, 0, 0.6)'
+    }),
+    secondary: createTextStyleConfig(flatConfig, 'secondary', {
+      fontSize: 24,
+      fontWeight: '400',
+      textColor: '#ffff00',
+      backgroundColor: 'rgba(0, 0, 0, 0.6)'
+    }),
     netflixPreset: {
-      fontFamily: flatConfig['subtitle.style.netflixPreset.fontFamily'],
-      fontWeight: flatConfig['subtitle.style.netflixPreset.fontWeight'],
-      textColor: flatConfig['subtitle.style.netflixPreset.textColor'],
-      backgroundColor: flatConfig['subtitle.style.netflixPreset.backgroundColor'],
-      textShadow: flatConfig['subtitle.style.netflixPreset.textShadow']
+      fontFamily: toStringValue(flatConfig['subtitle.style.netflixPreset.fontFamily'], 'Arial, Helvetica, sans-serif'),
+      fontWeight: toStringValue(flatConfig['subtitle.style.netflixPreset.fontWeight'], '700'),
+      textColor: toStringValue(flatConfig['subtitle.style.netflixPreset.textColor'], '#ffffff'),
+      backgroundColor: toStringValue(flatConfig['subtitle.style.netflixPreset.backgroundColor'], 'rgba(0, 0, 0, 0.6)'),
+      textShadow: toStringValue(flatConfig['subtitle.style.netflixPreset.textShadow'], NETFLIX_BASE_TEXT_SHADOW)
     }
   };
 }
 
 export function getEffectivePreviewStyle(previewConfig, type) {
   const styleConfig = previewConfig[type];
+  const hasOutline = styleConfig.outlineEnabled && styleConfig.outlineWidth > 0;
 
   if (previewConfig.styleMode === 'netflixPreset' || previewConfig.styleMode === 'nativeInherit') {
     return {
@@ -75,7 +128,14 @@ export function getEffectivePreviewStyle(previewConfig, type) {
       fontWeight: previewConfig.netflixPreset.fontWeight,
       textColor: styleConfig.textColor,
       backgroundColor: styleConfig.backgroundColor,
-      textShadow: previewConfig.netflixPreset.textShadow
+      textShadow: createTextOutlineShadow({
+        enabled: styleConfig.outlineEnabled,
+        width: styleConfig.outlineWidth,
+        color: styleConfig.outlineColor,
+        baseShadow: previewConfig.netflixPreset.textShadow
+      }),
+      letterSpacing: styleConfig.letterSpacing,
+      hasOutline
     };
   }
 
@@ -85,7 +145,14 @@ export function getEffectivePreviewStyle(previewConfig, type) {
     fontWeight: styleConfig.fontWeight,
     textColor: styleConfig.textColor,
     backgroundColor: styleConfig.backgroundColor,
-    textShadow: '1px 1px 1px rgba(0, 0, 0, 0.5)'
+    textShadow: createTextOutlineShadow({
+      enabled: styleConfig.outlineEnabled,
+      width: styleConfig.outlineWidth,
+      color: styleConfig.outlineColor,
+      baseShadow: CUSTOM_BASE_TEXT_SHADOW
+    }),
+    letterSpacing: styleConfig.letterSpacing,
+    hasOutline
   };
 }
 
@@ -93,7 +160,7 @@ export function applySubtitlePreviewStyle(element, previewConfig, type, options 
   if (!element || !previewConfig) return;
 
   const effectiveStyle = getEffectivePreviewStyle(previewConfig, type);
-  const scale = options.scale || 1;
+  const scale = toFiniteNumber(options.scale, 1) || 1;
   const fontSize = Math.max(10, Math.round(effectiveStyle.fontSize * scale));
   const shouldNoWrap = !!options.noWrap;
 
@@ -107,6 +174,7 @@ export function applySubtitlePreviewStyle(element, previewConfig, type, options 
     fontWeight: effectiveStyle.fontWeight,
     fontStyle: 'normal',
     lineHeight: '1.2',
+    letterSpacing: `${effectiveStyle.letterSpacing}px`,
     color: effectiveStyle.textColor,
     backgroundColor: effectiveStyle.backgroundColor,
     textAlign: 'center',
@@ -116,7 +184,7 @@ export function applySubtitlePreviewStyle(element, previewConfig, type, options 
     overflowWrap: shouldNoWrap ? 'normal' : 'anywhere',
     border: 'none',
     opacity: '1',
-    boxShadow: '0 0 0 2px rgba(0, 0, 0, 0.75)',
+    boxShadow: effectiveStyle.hasOutline ? 'none' : PREVIEW_BOX_SHADOW,
     transition: 'color 0.15s ease, background-color 0.15s ease, font-size 0.15s ease'
   });
 }
