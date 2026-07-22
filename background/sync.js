@@ -373,6 +373,22 @@ async function syncPendingTranslations() {
           continue;
         }
 
+        if (apiModule.isPermanentError(error)) {
+          const errorMetadata = {
+            code: error.code || null,
+            status: error.status || null,
+            message: error.message || 'Unknown error',
+            isPermanent: true,
+            retryExhausted: false,
+            terminal: true,
+            failedAt: Date.now()
+          };
+          await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'failed', error.message);
+          await updateQueueItem(TRANSLATION_QUEUE_KEY, item.id, { errorMetadata });
+          console.error(`[Sync] Translation ${item.id} failed permanently: ${error.message}`);
+          continue;
+        }
+
         const retryCount = item.retryCount || 0;
 
         if (retryCount < MAX_RETRIES) {
@@ -380,7 +396,17 @@ async function syncPendingTranslations() {
           await updateQueueItemRetryCount(TRANSLATION_QUEUE_KEY, item.id, retryCount + 1);
           console.warn(`[Sync] Translation ${item.id} retry ${retryCount + 1}/${MAX_RETRIES}: ${error.message}`);
         } else {
+          const errorMetadata = {
+            code: error.code || null,
+            status: error.status || null,
+            message: error.message || 'Unknown error',
+            isPermanent: false,
+            retryExhausted: true,
+            terminal: true,
+            failedAt: Date.now()
+          };
           await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'failed', error.message);
+          await updateQueueItem(TRANSLATION_QUEUE_KEY, item.id, { errorMetadata });
           console.error(`[Sync] Translation ${item.id} failed after ${MAX_RETRIES} retries: ${error.message}`);
         }
       }
