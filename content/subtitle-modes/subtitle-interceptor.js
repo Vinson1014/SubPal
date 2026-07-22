@@ -41,6 +41,8 @@ class SubtitleInterceptor {
     this.currentTimestamp = 0;
     this.lastRenderedSubtitle = null;
     this.renderInterval = null;
+    this._renderGeneration = 0;
+    this._internalEventDisposers = [];
     this.contextReloadTimer = null;
     this.isLoadingInterceptedSubtitles = false;
     this.pendingLoadInterceptedSubtitles = false;
@@ -182,6 +184,8 @@ class SubtitleInterceptor {
       console.error('字幕攔截模式未初始化，無法啟動');
       return;
     }
+
+    this.setupEventHandlers();
     
     this.log('啟動字幕攔截模式...');
     this.isActive = true;
@@ -201,6 +205,8 @@ class SubtitleInterceptor {
   }
 
   stop() {
+    this.disposeInternalEventHandlers();
+
     if (!this.isActive) {
       this.log('字幕攔截已經停止，跳過');
       return;
@@ -3909,14 +3915,16 @@ class SubtitleInterceptor {
 
   // 設置事件處理器
   setupEventHandlers() {
+    this.disposeInternalEventHandlers();
+
     // 監聽 raw TTML 攔截事件
-    registerInternalEventHandler('RAW_TTML_INTERCEPTED', (event) => {
+    this._internalEventDisposers.push(registerInternalEventHandler('RAW_TTML_INTERCEPTED', (event) => {
       this.handleRawTTMLIntercepted(event);
       this.resolveAcquisitionWaiters(event);
-    });
+    }));
 
     // 監聽影片 ID 變化事件
-    registerInternalEventHandler('VIDEO_ID_CHANGED', async (event) => {
+    this._internalEventDisposers.push(registerInternalEventHandler('VIDEO_ID_CHANGED', async (event) => {
       const newVideoId = event.newVideoId || event.videoId;
       const oldVideoId = event.oldVideoId;
 
@@ -3941,11 +3949,11 @@ class SubtitleInterceptor {
           this.tryStartPrimaryDiscovery('video-id-changed');
         }
       }
-    });
+    }));
 
     // PlaybackContext 可能在 TTML 回來後才從 transitioning 變成 ready。
     // ready 後重新掃 page script raw TTML cache，避免已攔到的字幕被早期 gate 永久錯過。
-    registerInternalEventHandler('PLAYBACK_CONTEXT_CHANGED', (event) => {
+    this._internalEventDisposers.push(registerInternalEventHandler('PLAYBACK_CONTEXT_CHANGED', (event) => {
       const context = event.context;
       if (!this.isActive || context?.state !== 'ready' || !context.videoId) {
         return;
@@ -3955,7 +3963,32 @@ class SubtitleInterceptor {
       this.tryStartPrimaryDiscovery('early-context-ready');
 
       this.scheduleReloadAfterContextReady(event.reason, context);
-    });
+    }));
+
+    this._internalEventDisposers.push(registerInternalEventHandler('PLAYER_STATE_CHANGED', (event) => {
+      const currentVideoId = getVideoId();
+      if (!this.isActive || event.state !== 'seeked' || event.videoId !== currentVideoId) {
+        return;
+      }
+
+      this._renderGeneration += 1;
+      dispatchInternalEvent({
+        type: 'SUBTITLE_RENDER_RESET',
+        renderGeneration: this._renderGeneration,
+        videoId: currentVideoId,
+        targetTimestamp: event.timestamp,
+        reason: 'seeked'
+      });
+      this.lastRenderedSubtitle = null;
+      this.updateSubtitleDisplay();
+    }));
+  }
+
+  disposeInternalEventHandlers() {
+    for (const dispose of this._internalEventDisposers) {
+      dispose();
+    }
+    this._internalEventDisposers = [];
   }
 
   log(message, ...args) {
