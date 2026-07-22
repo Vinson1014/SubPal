@@ -14,7 +14,7 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-async function loadManager() {
+async function loadManager({ pageWorld = false } = {}) {
   const handlers = new Map();
   const events = [];
   const lifecycle = {
@@ -26,11 +26,10 @@ async function loadManager() {
     timeouts: []
   };
 
-  const context = vm.createContext({
+  const contextValues = {
     console,
     Date,
     document: { getElementById: () => null },
-    chrome: { storage: { local: { get: (...args) => context.storageGet(...args) } } },
     setInterval: () => 1,
     clearInterval,
     clearTimeout,
@@ -38,10 +37,19 @@ async function loadManager() {
       lifecycle.timeouts.push(callback);
       return lifecycle.timeouts.length;
     }
-  });
+  };
+  if (!pageWorld) {
+    contextValues.chrome = { storage: { local: { get: (...args) => context.storageGet(...args) } } };
+  }
+  const context = vm.createContext(contextValues);
   context.storageGet = async () => ({});
   const source = await readFile(new URL('../content/ui/ui-manager-new.js', import.meta.url), 'utf8');
-  const module = new vm.SourceTextModule(source, { context, identifier: 'content/ui/ui-manager-new.js' });
+  const legacySource = process.env.UI_MANAGER_LEGACY_STORAGE === '1'
+    ? source
+      .replace("const { authority, hasPendingVote } = await sendMessage({\n            type: 'VOTE_GET_AUTHORITY',\n            payload: { translationID: processedSubtitle.translationID }\n          });", "const { voteStateByTranslation, voteQueue } = await chrome.storage.local.get(['voteStateByTranslation', 'voteQueue']);\n          const authority = voteStateByTranslation?.[processedSubtitle.translationID];\n          const hasPendingVote = voteQueue?.some(item => item.translationID === processedSubtitle.translationID && (item.status === 'pending' || item.status === 'syncing'));")
+      .replace("const { permanentFailure: failedItem } = await sendMessage({\n        type: 'VOTE_GET_AUTHORITY',\n        payload: { translationID: this.currentSubtitle.translationID }\n      });", "const { voteQueue } = await chrome.storage.local.get('voteQueue');\n      const failedItem = voteQueue?.find(item => item.translationID === this.currentSubtitle.translationID && item.status === 'failed' && item.errorMetadata?.isPermanent && item.previousVoteState !== undefined && item.previousCounts !== undefined);")
+    : source;
+  const module = new vm.SourceTextModule(legacySource, { context, identifier: 'content/ui/ui-manager-new.js' });
   const componentModule = (name, body = '') => new vm.SourceTextModule(`
     export class ${name} {
       async initialize() {
@@ -57,6 +65,7 @@ async function loadManager() {
   `, { context });
   context.lifecycle = lifecycle;
   context.blockNextInitialization = false;
+  context.sendMessage = async () => ({});
   const dependencies = new Map([
     ['./subtitle-display.js', componentModule('SubtitleDisplay', 'show(value) { globalThis.lifecycle.renders.push(value); }')],
     ['./interaction-panel.js', componentModule('InteractionPanel', 'onSubmitClick() {} onLikeClick() {} onDislikeClick() {} updateVoteDisplay() {} updatePosition(value) { globalThis.lifecycle.avoidanceUpdates.push({ panel: this, value }); }')],
@@ -67,7 +76,7 @@ async function loadManager() {
     ['./netflix-player-adapter.js', new vm.SourceTextModule('export const getPlayerAdapter = () => ({});', { context })],
     ['../core/subtitle-replacer.js', new vm.SourceTextModule('export class SubtitleReplacer {}', { context })],
     ['../system/messaging.js', new vm.SourceTextModule(`
-      export const sendMessage = async () => ({});
+      export const sendMessage = message => globalThis.sendMessage(message);
       export const registerInternalEventHandler = (type, handler) => {
         globalThis.handlers.set(type, handler);
         return () => { globalThis.lifecycle.disposerCalls += 1; globalThis.handlers.delete(type); };
@@ -102,6 +111,7 @@ async function loadManager() {
     blockInitialization() { context.blockNextInitialization = true; },
     releaseInitialization() { context.releaseInitialization(); },
     setStorageGet(handler) { context.storageGet = handler; },
+    setSendMessage(handler) { context.sendMessage = handler; },
     runTimers() {
       const callbacks = lifecycle.timeouts.splice(0);
       callbacks.forEach(callback => callback());
@@ -235,7 +245,7 @@ test('Given replacement rejects after a video switch When the subtitle resumes T
 test('Given storage authority resolves after a video switch When the subtitle resumes Then stale authority data cannot update the new generation', async () => {
   const fixture = await loadManager();
   const storage = deferred();
-  fixture.setStorageGet(() => storage.promise);
+  fixture.setSendMessage(() => storage.promise);
   const showPromise = fixture.manager.showSubtitle({ text: 'old video', timestamp: 1, mode: 'dom', translationID: 'translation-1' });
   await flush();
 
@@ -251,7 +261,7 @@ test('Given storage authority resolves after a video switch When the subtitle re
 test('Given storage authority rejects after a video switch When the subtitle resumes Then stale error recovery cannot update the new generation', async () => {
   const fixture = await loadManager();
   const storage = deferred();
-  fixture.setStorageGet(() => storage.promise);
+  fixture.setSendMessage(() => storage.promise);
   const showPromise = fixture.manager.showSubtitle({ text: 'old video', timestamp: 1, mode: 'dom', translationID: 'translation-1' });
   await flush();
 
@@ -279,4 +289,47 @@ test('Given avoidance is delayed When the manager tears down Then the old callba
   fixture.manager.handleUIAvoidanceChange(true, 15);
   fixture.manager.cleanup();
   assert.doesNotThrow(() => fixture.runTimers());
+});
+
+test('Given page-world reconciliation When local sync records are read Then queue and history come from the translation bridge without chrome.storage', async () => {
+  const fixture = await loadManager({ pageWorld: true });
+  const queueItem = { id: 'pending-item', status: 'syncing' };
+  const historyItem = { id: 'completed-item', status: 'completed', syncedAt: 123 };
+  const messages = [];
+  fixture.setSendMessage(async (message) => {
+    messages.push(message);
+    return { translationQueue: [queueItem], translationHistory: [historyItem] };
+  });
+
+  const snapshot = await fixture.manager.readTranslationSyncSnapshot([queueItem.id, historyItem.id]);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    type: 'TRANSLATION_GET_RECONCILIATION',
+    payload: { itemIds: [queueItem.id, historyItem.id] }
+  }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), { queue: [queueItem], history: [historyItem] });
+});
+
+test('Given page-world vote authority and a permanent failure When UIManager reads both paths Then scoped bridge data updates and rolls back without chrome.storage', async () => {
+  const fixture = await loadManager({ pageWorld: true });
+  const messages = [];
+  let rollback;
+  fixture.manager.revertOptimisticVote = (state, counts) => { rollback = { state, counts }; };
+  fixture.setSendMessage(async (message) => {
+    messages.push(message);
+    return {
+      authority: { myVote: 'like', upvotes: 3, downvotes: 1 },
+      hasPendingVote: false,
+      permanentFailure: messages.length === 2 ? { previousVoteState: 'none', previousCounts: { like: 1, dislike: 2 } } : null
+    };
+  });
+
+  await fixture.manager.showSubtitle({ text: 'vote', timestamp: 1, mode: 'dom', translationID: 'translation-1' });
+  await fixture.manager.checkAndRevertPermanentFailures();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
+    { type: 'VOTE_GET_AUTHORITY', payload: { translationID: 'translation-1' } },
+    { type: 'VOTE_GET_AUTHORITY', payload: { translationID: 'translation-1' } }
+  ]);
+  assert.deepEqual(rollback, { state: 'none', counts: { like: 1, dislike: 2 } });
 });

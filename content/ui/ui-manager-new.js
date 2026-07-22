@@ -36,6 +36,9 @@ class UIManager {
     
     // 當前狀態
     this.currentSubtitle = null;
+    this.currentSourceSubtitle = null;
+    this.currentSubtitleGeneration = null;
+    this._renderGeneration = 0;
     this.currentMode = null;
     this.nativeSubtitleHidden = false;
     this.nativeHideReason = 'not-hidden';
@@ -72,6 +75,7 @@ class UIManager {
     this.subtitleReplacer = null;
     this.translationBridge = null;
     this.voteBridge = null;
+    this._isTranslationReconciliationRunning = false;
   }
 
   async initialize() {
@@ -127,9 +131,9 @@ class UIManager {
       this.isInitialized = true;
       this.log('UI 管理器初始化完成');
 
-      // 定期檢查永久同步失敗並還原 UI
       this._permanentFailureCheckInterval = setInterval(() => {
         this.checkAndRevertPermanentFailures();
+        this.checkAndReconcileTranslationSubmissions();
       }, 5000);
 
       // 觸發 UI 就緒回調
@@ -143,7 +147,7 @@ class UIManager {
   }
 
   // 統一的字幕顯示接口
-  async showSubtitle(subtitleData) {
+  async showSubtitle(subtitleData, forceRefresh = false) {
     if (this._componentReinitializationPromise || !this.isInitialized) {
       if (this._componentReinitializationPromise) {
         return;
@@ -152,29 +156,40 @@ class UIManager {
       return;
     }
     const componentGeneration = this._componentGeneration;
+    const renderGeneration = subtitleData.renderGeneration ?? this._renderGeneration;
+    if (renderGeneration !== this._renderGeneration) {
+      return;
+    }
 
     this.syncNativeSubtitleVisibilityForSubtitle(subtitleData, 'show-subtitle');
     
     // 檢查是否需要更新（避免重複處理相同字幕）
-    if (this.shouldUpdateSubtitle(subtitleData)) {
+    if (forceRefresh || this.shouldUpdateSubtitle(subtitleData)) {
       this.log('顯示字幕', subtitleData);
+      const sourceSubtitle = JSON.parse(JSON.stringify(subtitleData));
       
       // 處理字幕替換（如果啟用）
       let processedSubtitle = subtitleData;
       if (this.subtitleReplacer && this.subtitleReplacer.isInitialized) {
+        const replacementRenderGeneration = this._renderGeneration;
         try {
           const replacedSubtitle = await this.subtitleReplacer.processSubtitle(
-            subtitleData, 
-            subtitleData.videoId || 'unknown', 
-            subtitleData.timestamp ?? Date.now() / MS_PER_SECOND
+            sourceSubtitle,
+            sourceSubtitle.videoId || 'unknown',
+            sourceSubtitle.timestamp ?? Date.now() / MS_PER_SECOND
           );
 
-          if (componentGeneration !== this._componentGeneration || !this.isInitialized) {
+          if (componentGeneration !== this._componentGeneration ||
+              replacementRenderGeneration !== this._renderGeneration ||
+              renderGeneration !== this._renderGeneration ||
+              !this.isInitialized) {
             return;
           }
           
           // 防禦性檢查：如果已顯示更新的字幕，跳過這次過時的更新
-          if (this.currentSubtitle && this.currentSubtitle.timestamp > subtitleData.timestamp) {
+          if (this.currentSubtitle &&
+              this.currentSubtitleGeneration === renderGeneration &&
+              this.currentSubtitle.timestamp > sourceSubtitle.timestamp) {
             this.log('跳過過時字幕更新，已有更新的字幕顯示');
             return;
           }
@@ -182,20 +197,25 @@ class UIManager {
           if (replacedSubtitle) {
             processedSubtitle = replacedSubtitle;
             this.log('字幕已替換:', {
-              original: subtitleData.text,
+              original: sourceSubtitle.text,
               replaced: replacedSubtitle.text
             });
           }
         } catch (error) {
-          console.error('字幕替換處理失敗:', error);
-          if (componentGeneration !== this._componentGeneration || !this.isInitialized) {
+          if (componentGeneration !== this._componentGeneration ||
+              replacementRenderGeneration !== this._renderGeneration ||
+              renderGeneration !== this._renderGeneration ||
+              !this.isInitialized) {
             return;
           }
+          console.error('字幕替換處理失敗:', error);
         }
       }
       
       // 再次檢查：非阻塞流程下可能已有更新的字幕被顯示
-      if (this.currentSubtitle && this.currentSubtitle.timestamp > subtitleData.timestamp) {
+      if (this.currentSubtitle &&
+          this.currentSubtitleGeneration === renderGeneration &&
+          this.currentSubtitle.timestamp > sourceSubtitle.timestamp) {
         this.log('跳過過時字幕更新（二次檢查），已有更新的字幕顯示');
         return;
       }
@@ -211,6 +231,8 @@ class UIManager {
         this.log('DOM監聽模式：使用原生字幕位置:', processedSubtitle.position);
       }
       
+      this.currentSourceSubtitle = sourceSubtitle;
+      this.currentSubtitleGeneration = renderGeneration;
       this.currentSubtitle = processedSubtitle;
 
       // 顯示字幕
@@ -219,35 +241,44 @@ class UIManager {
       // 檢查是否有權威投票數據，若有則更新當前字幕
       // 但若有正在進行的 pending 投票，則跳過權威覆蓋，避免樂觀 UI 被舊數據覆蓋
       if (processedSubtitle.translationID) {
+        const authorityRenderGeneration = this._renderGeneration;
         try {
-          const { voteStateByTranslation, voteQueue } = await chrome.storage.local.get([
-            'voteStateByTranslation', 'voteQueue'
-          ]);
-          if (componentGeneration !== this._componentGeneration || !this.isInitialized) {
+          const { authority, hasPendingVote } = await sendMessage({
+            type: 'VOTE_GET_AUTHORITY',
+            payload: { translationID: processedSubtitle.translationID }
+          });
+          if (componentGeneration !== this._componentGeneration ||
+              authorityRenderGeneration !== this._renderGeneration ||
+              renderGeneration !== this._renderGeneration ||
+              !this.isInitialized) {
             return;
           }
-          const authoritative = voteStateByTranslation?.[processedSubtitle.translationID];
-          const hasPendingVote = voteQueue?.some(item =>
-            item.translationID === processedSubtitle.translationID &&
-            (item.status === 'pending' || item.status === 'syncing')
-          );
-          if (authoritative && !authoritative.pending && !hasPendingVote) {
+          if (this.currentSubtitle &&
+              this.currentSubtitleGeneration === renderGeneration &&
+              this.currentSubtitle.timestamp > sourceSubtitle.timestamp) {
+            this.log('跳過過時字幕投票更新，已有更新的字幕顯示');
+            return;
+          }
+          if (authority && !authority.pending && !hasPendingVote) {
             processedSubtitle = {
               ...processedSubtitle,
-              myVote: authoritative.myVote,
-              upvotes: authoritative.upvotes,
-              downvotes: authoritative.downvotes
+              myVote: authority.myVote,
+              upvotes: authority.upvotes,
+              downvotes: authority.downvotes
             };
             this.currentSubtitle = processedSubtitle;
-            this.log('已應用權威投票數據:', authoritative);
+            this.log('已應用權威投票數據:', authority);
           } else if (hasPendingVote) {
             this.log('跳過權威投票數據覆蓋，因為有正在進行的投票:', processedSubtitle.translationID);
           }
         } catch (e) {
-          console.warn('讀取權威投票數據失敗:', e);
-          if (componentGeneration !== this._componentGeneration || !this.isInitialized) {
+          if (componentGeneration !== this._componentGeneration ||
+              authorityRenderGeneration !== this._renderGeneration ||
+              renderGeneration !== this._renderGeneration ||
+              !this.isInitialized) {
             return;
           }
+          console.warn('讀取權威投票數據失敗:', e);
         }
       }
 
@@ -275,6 +306,8 @@ class UIManager {
 
     this.log('隱藏字幕');
     this.currentSubtitle = null;
+    this.currentSourceSubtitle = null;
+    this.currentSubtitleGeneration = null;
     
     // 隱藏字幕和交互面板
     this.subtitleDisplay.hide();
@@ -282,6 +315,30 @@ class UIManager {
     
     // 清理懸停事件
     this.clearSubtitleHoverEvents();
+  }
+
+  handleSubtitleRenderReset(event) {
+    if (!(event.renderGeneration > this._renderGeneration)) {
+      return;
+    }
+
+    this._renderGeneration = event.renderGeneration;
+    this.hideSubtitle();
+    this.currentSubtitle = null;
+    this.currentSourceSubtitle = null;
+    this.currentSubtitleGeneration = null;
+  }
+
+  async refreshCurrentSourceSubtitle(expectedSlotKey, expectedGeneration) {
+    if (expectedGeneration !== this._renderGeneration ||
+        this.currentSubtitleGeneration !== expectedGeneration ||
+        this.currentSourceSubtitle?.slotKey !== expectedSlotKey) {
+      return;
+    }
+
+    const sourceSubtitle = JSON.parse(JSON.stringify(this.currentSourceSubtitle));
+    sourceSubtitle.renderGeneration = expectedGeneration;
+    return this.showSubtitle(sourceSubtitle, true);
   }
 
   // 檢查是否需要更新字幕（避免重複處理）
@@ -468,6 +525,10 @@ class UIManager {
     this.internalEventDisposers.push(registerInternalEventHandler('SUBTITLE_READINESS_CHANGED', (event) => {
       this.syncNativeSubtitleVisibility(event.readiness?.renderReadiness, event.reason || 'subtitle-readiness-changed');
       this.handleFallbackNotification(event);
+    }));
+
+    this.internalEventDisposers.push(registerInternalEventHandler('SUBTITLE_RENDER_RESET', (event) => {
+      this.handleSubtitleRenderReset(event);
     }));
 
     // 監聽 primary discovery DOM sample 檢測事件
@@ -896,23 +957,14 @@ class UIManager {
     if (!this.currentSubtitle || !this.currentSubtitle.translationID) return;
 
     try {
-      const { voteQueue } = await chrome.storage.local.get('voteQueue');
-      if (!voteQueue || !Array.isArray(voteQueue)) return;
-
-      const failedItem = voteQueue.find(item =>
-        item.translationID === this.currentSubtitle.translationID &&
-        item.status === 'failed' &&
-        item.errorMetadata?.isPermanent &&
-        item.previousVoteState !== undefined &&
-        item.previousCounts !== undefined
-      );
+      const { permanentFailure: failedItem } = await sendMessage({
+        type: 'VOTE_GET_AUTHORITY',
+        payload: { translationID: this.currentSubtitle.translationID }
+      });
 
       if (failedItem) {
         this.log('檢測到永久同步失敗，還原樂觀 UI:', failedItem);
         this.revertOptimisticVote(failedItem.previousVoteState, failedItem.previousCounts);
-        // 標記為已還原，避免重複觸發
-        failedItem.status = 'failed-reverted';
-        await chrome.storage.local.set({ voteQueue });
         this.showToast('投票同步永久失敗，已還原狀態', 'error');
       }
     } catch (error) {
@@ -920,15 +972,153 @@ class UIManager {
     }
   }
 
+  async readTranslationSyncSnapshot(itemIds) {
+    const { translationQueue, translationHistory } = await sendMessage({
+      type: 'TRANSLATION_GET_RECONCILIATION',
+      payload: { itemIds }
+    });
+
+    return {
+      queue: Array.isArray(translationQueue) ? translationQueue : [],
+      history: Array.isArray(translationHistory) ? translationHistory : []
+    };
+  }
+
+  async checkAndReconcileTranslationSubmissions() {
+    if (this._isTranslationReconciliationRunning || !this.subtitleReplacer) {
+      return;
+    }
+
+    this._isTranslationReconciliationRunning = true;
+    const subtitleReplacer = this.subtitleReplacer;
+    const componentGeneration = this._componentGeneration;
+
+    try {
+      const localSnapshots = subtitleReplacer.listLocalReplacements();
+      const { queue, history } = await this.readTranslationSyncSnapshot(localSnapshots.map(item => item.itemId));
+      if (componentGeneration !== this._componentGeneration ||
+          subtitleReplacer !== this.subtitleReplacer ||
+          !this.isInitialized) {
+        return;
+      }
+
+      const queueByItemId = new Map(queue.map(item => [item.id, item]));
+      const historyByItemId = new Map(history.map(item => [item.id, item]));
+      const now = Date.now();
+
+      for (const localSnapshot of localSnapshots) {
+        if (componentGeneration !== this._componentGeneration ||
+            subtitleReplacer !== this.subtitleReplacer ||
+            !this.isInitialized) {
+          return;
+        }
+
+        const queueItem = queueByItemId.get(localSnapshot.itemId);
+        const historyItem = historyByItemId.get(localSnapshot.itemId);
+        const terminalFailure = queueItem?.status === 'failed' &&
+          queueItem.errorMetadata?.terminal === true;
+
+        if (terminalFailure) {
+          const expectedGeneration = this._renderGeneration;
+          const removedRecord = subtitleReplacer.removeLocalReplacement(localSnapshot.itemId);
+          if (!removedRecord) {
+            continue;
+          }
+
+          subtitleReplacer.invalidateIntervalAt(removedRecord.timestamp);
+          await this.refreshCurrentSourceSubtitle(removedRecord.slotKey, expectedGeneration);
+          if (componentGeneration !== this._componentGeneration ||
+              subtitleReplacer !== this.subtitleReplacer ||
+              !this.isInitialized) {
+            return;
+          }
+          this.showToast('翻譯同步失敗，已還原字幕', 'error');
+          continue;
+        }
+
+        let localRecord = localSnapshot;
+        const syncRecord = historyItem?.status === 'completed' ? historyItem : queueItem;
+        if ((syncRecord?.status === 'pending' || syncRecord?.status === 'syncing') &&
+            (localRecord.status === 'pending' || localRecord.status === 'syncing')) {
+          localRecord = subtitleReplacer.setLocalReplacementStatus(
+            localRecord.itemId,
+            syncRecord.status
+          );
+          continue;
+        }
+
+        if (syncRecord?.status === 'completed' &&
+            (localRecord.status === 'pending' || localRecord.status === 'syncing')) {
+          const completedAt = Number.isFinite(syncRecord.syncedAt)
+            ? syncRecord.syncedAt
+            : now;
+          localRecord = subtitleReplacer.setLocalReplacementStatus(
+            localRecord.itemId,
+            'completed-awaiting-authority',
+            { completedAt }
+          );
+        }
+
+        if (!localRecord || localRecord.status !== 'completed-awaiting-authority' ||
+            !subtitleReplacer.isLocalReplacementReconciliationDue(localRecord.itemId, now)) {
+          continue;
+        }
+
+        const expectedGeneration = this._renderGeneration;
+        const reconciledRecord = await subtitleReplacer.reconcileCompletedLocalReplacement(
+          localRecord.itemId,
+          now
+        );
+        if (componentGeneration !== this._componentGeneration ||
+            subtitleReplacer !== this.subtitleReplacer ||
+            !this.isInitialized) {
+          return;
+        }
+        if (reconciledRecord === null) {
+          await this.refreshCurrentSourceSubtitle(localRecord.slotKey, expectedGeneration);
+        }
+      }
+    } catch (error) {
+      console.error('對齊翻譯同步狀態時出錯:', error);
+    } finally {
+      this._isTranslationReconciliationRunning = false;
+    }
+  }
+
   // 處理提交完成
   async handleSubmissionComplete(submissionData) {
     this.log('處理提交完成', submissionData);
+
+    const sourceSubtitle = this.currentSourceSubtitle
+      ? JSON.parse(JSON.stringify(this.currentSourceSubtitle))
+      : null;
+    const sourceSlotKey = sourceSubtitle?.slotKey || null;
+    const sourceVideoId = sourceSubtitle?.videoId || null;
+    const sourceGeneration = this._renderGeneration;
 
     try {
       // 使用翻譯橋接器
       const result = await this.translationBridge.enqueue(submissionData);
 
       if (result && result.itemId) {
+        this.subtitleReplacer.upsertLocalReplacement({
+          itemId: result.itemId,
+          slotKey: sourceSlotKey,
+          videoId: sourceVideoId,
+          originalSubtitle: sourceSubtitle?.original || sourceSubtitle?.text,
+          suggestedSubtitle: submissionData.translation,
+          languageCode: sourceSubtitle?.languageCode,
+          timestamp: sourceSubtitle?.timestamp,
+          status: 'pending'
+        });
+
+        if (sourceSlotKey &&
+            this._renderGeneration === sourceGeneration &&
+            this.currentSubtitleGeneration === sourceGeneration &&
+            this.currentSourceSubtitle?.slotKey === sourceSlotKey) {
+          await this.refreshCurrentSourceSubtitle(sourceSlotKey, sourceGeneration);
+        }
+
         this.showToast('翻譯已加入隊列', 'success');
         this.log('翻譯已加入隊列:', result);
         return { ...result, status: 'success' };
@@ -1428,8 +1618,11 @@ class UIManager {
     this._pendingVideoChangeEvent = null;
     this.isInitialized = false;
     this.currentSubtitle = null;
+    this.currentSourceSubtitle = null;
+    this.currentSubtitleGeneration = null;
     this.currentMode = null;
     this.acquisitionToastKeys.clear();
+    this._isTranslationReconciliationRunning = false;
     this.eventCallbacks = {};
 
     this.log('UI 管理器資源清理完成');
@@ -1468,6 +1661,8 @@ class UIManager {
       this.toastManager = null;
     }
     this.currentSubtitle = null;
+    this.currentSourceSubtitle = null;
+    this.currentSubtitleGeneration = null;
     this.currentMode = null;
   }
 

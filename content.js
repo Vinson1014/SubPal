@@ -25,8 +25,8 @@
 
   // 隊列消息類型常數
   const QUEUE_MESSAGE_TYPES = [
-    'VOTE_ENQUEUE', 'VOTE_GET_HISTORY', 'VOTE_GET_STATUS', 'VOTE_RETRY',
-    'TRANSLATION_ENQUEUE', 'TRANSLATION_GET_HISTORY', 'TRANSLATION_RETRY',
+    'VOTE_ENQUEUE', 'VOTE_GET_HISTORY', 'VOTE_GET_STATUS', 'VOTE_GET_AUTHORITY', 'VOTE_RETRY',
+    'TRANSLATION_ENQUEUE', 'TRANSLATION_GET_HISTORY', 'TRANSLATION_GET_RECONCILIATION', 'TRANSLATION_RETRY',
     'GET_ALL_PENDING', 'GET_QUEUE_STATS', 'REPLACEMENT_EVENT_ENQUEUE', 
     'REPLACEMENT_EVENT_GET_HISTORY', 'REPLACEMENT_EVENT_RETRY'
   ];
@@ -363,6 +363,10 @@
           result = await submissionQueueManager.getVoteStatus(payload.itemId);
           break;
 
+        case 'VOTE_GET_AUTHORITY':
+          result = await submissionQueueManager.getVoteAuthority(payload.translationID);
+          break;
+
         case 'VOTE_RETRY':
           result = await submissionQueueManager.retryVote(payload.itemId);
           result = { success: result };
@@ -376,6 +380,10 @@
         case 'TRANSLATION_GET_HISTORY':
           result = await submissionQueueManager.getTranslationHistory(payload?.limit);
           result = { history: result };
+          break;
+
+        case 'TRANSLATION_GET_RECONCILIATION':
+          result = await submissionQueueManager.getTranslationReconciliation(payload.itemIds);
           break;
 
         case 'TRANSLATION_RETRY':

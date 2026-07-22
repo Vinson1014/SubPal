@@ -236,6 +236,32 @@ export class SubmissionQueueManager {
     throw new Error(`找不到投票項目: ${itemId}`);
   }
 
+  async getVoteAuthority(translationID) {
+    const [voteStateData, voteQueue] = await Promise.all([
+      this.storage.get('voteStateByTranslation'),
+      this.storage.getQueue('vote')
+    ]);
+    const permanentFailure = voteQueue.find(item =>
+      item.translationID === translationID &&
+      item.status === 'failed' &&
+      item.errorMetadata?.isPermanent &&
+      item.previousVoteState !== undefined &&
+      item.previousCounts !== undefined
+    );
+    if (permanentFailure) {
+      await this.storage.updateQueueItem('vote', permanentFailure.id, { status: 'failed-reverted' });
+    }
+    return {
+      authority: voteStateData.voteStateByTranslation?.[translationID] ?? null,
+      hasPendingVote: voteQueue.some(item => item.translationID === translationID &&
+        (item.status === 'pending' || item.status === 'syncing')),
+      permanentFailure: permanentFailure ? {
+        previousVoteState: permanentFailure.previousVoteState,
+        previousCounts: permanentFailure.previousCounts
+      } : null
+    };
+  }
+
   /**
    * 重試失敗的投票
    *
@@ -488,6 +514,18 @@ export class SubmissionQueueManager {
       votes: pendingVotes,
       translations: pendingTranslations,
       replacementEvents: pendingReplacementEvents
+    };
+  }
+
+  async getTranslationReconciliation(itemIds) {
+    const ids = new Set(itemIds);
+    const [translationQueue, translationHistory] = await Promise.all([
+      this.storage.getQueue('translation'),
+      this.storage.getHistory('translation', Number.MAX_SAFE_INTEGER)
+    ]);
+    return {
+      translationQueue: translationQueue.filter(item => ids.has(item.id)),
+      translationHistory: translationHistory.filter(item => ids.has(item.id))
     };
   }
 
