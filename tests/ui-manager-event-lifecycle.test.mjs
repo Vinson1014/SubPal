@@ -60,7 +60,7 @@ async function loadManager() {
   const dependencies = new Map([
     ['./subtitle-display.js', componentModule('SubtitleDisplay', 'show(value) { globalThis.lifecycle.renders.push(value); }')],
     ['./interaction-panel.js', componentModule('InteractionPanel', 'onSubmitClick() {} onLikeClick() {} onDislikeClick() {} updateVoteDisplay() {} updatePosition(value) { globalThis.lifecycle.avoidanceUpdates.push({ panel: this, value }); }')],
-    ['./submission-dialog.js', componentModule('SubmissionDialog', 'onSubmit() {} onCancel() {} onClose() {}')],
+    ['./submission-dialog.js', componentModule('SubmissionDialog', 'onSubmit(callback) { globalThis.lifecycle.submissionCallback = callback; } onCancel() {} onClose() {}')],
     ['./fullscreen-handler.js', componentModule('FullscreenHandler', 'registerUIComponent() {} onFullscreenChange() {}')],
     ['./ui-avoidance-handler.js', componentModule('UIAvoidanceHandler')],
     ['./toast-manager.js', componentModule('ToastManager')],
@@ -198,6 +198,22 @@ test('Given components were recreated When the coordinator renders Then the new 
   await fixture.manager.showSubtitle({ text: 'new video', timestamp: 2, mode: 'dom' });
 
   assert.equal(fixture.lifecycle.renders.at(-1).text, 'new video');
+});
+
+test('Given translation enqueue succeeds When the dialog submit callback settles Then it returns success instead of a false failure', async () => {
+  const fixture = await loadManager();
+  fixture.manager.translationBridge = {
+    enqueue: async () => ({ itemId: 'translation-1', message: '翻譯已加入同步隊列' })
+  };
+  fixture.manager.showToast = () => {};
+
+  const result = await fixture.lifecycle.submissionCallback({ translation: '修正翻譯' });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    status: 'success',
+    itemId: 'translation-1',
+    message: '翻譯已加入同步隊列'
+  });
 });
 
 test('Given replacement rejects after a video switch When the subtitle resumes Then stale replacement work cannot render into new components', async () => {

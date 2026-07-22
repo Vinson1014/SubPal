@@ -626,7 +626,7 @@ class UIManager {
     
     // 提交對話框事件處理
     this.submissionDialog.onSubmit((submissionData) => {
-      this.handleSubmissionComplete(submissionData);
+      return this.handleSubmissionComplete(submissionData);
     });
     
     this.submissionDialog.onCancel(() => {
@@ -931,12 +931,15 @@ class UIManager {
       if (result && result.itemId) {
         this.showToast('翻譯已加入隊列', 'success');
         this.log('翻譯已加入隊列:', result);
+        return { ...result, status: 'success' };
       } else {
         this.showToast('翻譯提交失敗', 'error');
+        return { status: 'error', error: '翻譯提交失敗，請再試一次。' };
       }
     } catch (error) {
       console.error('提交翻譯時出錯:', error);
       this.showToast(`翻譯提交失敗：${error.message}`, 'error');
+      return { status: 'error', error: error.message };
     }
   }
 
