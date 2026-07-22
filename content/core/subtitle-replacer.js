@@ -10,19 +10,28 @@
  */
 
 import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
+import { buildSlotKey } from '../utils/slot-key.js';
+
+const LOCAL_REPLACEMENT_STATUSES = new Set([
+  'pending',
+  'syncing',
+  'completed-awaiting-authority',
+  'accepted-local'
+]);
+const AUTHORITY_ATTEMPT_DELAYS_MS = [0, 5_000, 15_000];
 
 class SubtitleReplacer {
   constructor() {
     this.isInitialized = false;
     this.isEnabled = true;
     this.currentVideoId = null;
-    this.subtitleCache = new Map(); // 替換字幕緩存
+    this.subtitleCache = new Map(); // 權威字幕緩存，以 slotKey 為鍵
+    this.localReplacements = new Map(); // 本地樂觀字幕，以 slotKey 為鍵
     this.requestedIntervals = []; // 已請求的時間區間
     
     // 配置參數（從舊版移植並優化）
     this.FETCH_DURATION_SECONDS = 180; // 每次獲取3分鐘字幕
     this.PREFETCH_THRESHOLD_SECONDS = 60; // 預加載閾值
-    this.TIMESTAMP_TOLERANCE_SECONDS = 2; // 時間戳容差
     this.MAX_CACHE_SIZE = 500; // 最大緩存條目
     
     // 測試模式狀態
@@ -126,16 +135,20 @@ class SubtitleReplacer {
         }
       }
       
-      // 2. 緩存中查找替換
-      const cachedReplacement = this.findReplacementInCache(subtitleData.text, timestamp);
-      if (cachedReplacement) {
+      // 2. 依 exact slot 解析本地樂觀字幕，再查詢權威緩存
+      const slotKey = typeof subtitleData.slotKey === 'string' ? subtitleData.slotKey : null;
+      const localReplacement = slotKey ? this.localReplacements.get(slotKey) : null;
+      const authoritativeReplacement = slotKey ? this.subtitleCache.get(slotKey) : null;
+      const replacement = localReplacement || authoritativeReplacement;
+
+      if (replacement) {
         this.stats.cacheHits++;
-        this.log('緩存命中:', cachedReplacement.suggestedSubtitle);
+        this.log(localReplacement ? '本地字幕命中:' : '權威緩存命中:', replacement.suggestedSubtitle);
         
         // 檢查預加載需求
         this.checkAndTriggerPrefetch(timestamp);
         
-        return this.createReplacedSubtitle(subtitleData, cachedReplacement);
+        return this.createReplacedSubtitle(subtitleData, replacement);
       }
       
       this.stats.cacheMisses++;
@@ -178,8 +191,255 @@ class SubtitleReplacer {
    */
   clearVideoData() {
     this.subtitleCache.clear();
+    this.localReplacements.clear();
     this.requestedIntervals = [];
     this.log('已清理視頻數據');
+  }
+
+  /**
+   * 新增或更新 exact-slot 本地字幕。
+   * @param {Object} record - 本地字幕資料
+   * @returns {Object|null} 完整的本地字幕記錄
+   */
+  upsertLocalReplacement(record) {
+    const itemId = typeof record?.itemId === 'string' ? record.itemId.trim() : '';
+    const videoId = typeof record?.videoId === 'string' ? record.videoId.trim() : '';
+    const originalSubtitle = String(record?.originalSubtitle || '').trim();
+    const suggestedSubtitle = String(record?.suggestedSubtitle || '');
+    const languageCode = typeof record?.languageCode === 'string' ? record.languageCode.trim() : '';
+    const timestamp = Number(record?.timestamp);
+    const canonicalSlotKey = buildSlotKey({
+      videoID: videoId,
+      originalSubtitle,
+      languageCode,
+      timestamp
+    });
+    const suppliedSlotKey = typeof record?.slotKey === 'string' ? record.slotKey.trim() : '';
+    const status = record?.status || 'pending';
+
+    if (!itemId || !canonicalSlotKey || suppliedSlotKey !== canonicalSlotKey || !LOCAL_REPLACEMENT_STATUSES.has(status)) {
+      return null;
+    }
+
+    const createdAt = Number.isFinite(Number(record.createdAt))
+      ? Number(record.createdAt)
+      : Date.now();
+    let completedAt = record.completedAt !== null && record.completedAt !== undefined && Number.isFinite(Number(record.completedAt))
+      ? Number(record.completedAt)
+      : null;
+    const authorityAttemptIndex = Number.isInteger(record.authorityAttemptIndex) && record.authorityAttemptIndex >= 0
+      ? record.authorityAttemptIndex
+      : 0;
+    let nextAuthorityAttemptAt = record.nextAuthorityAttemptAt !== null && record.nextAuthorityAttemptAt !== undefined && Number.isFinite(Number(record.nextAuthorityAttemptAt))
+      ? Number(record.nextAuthorityAttemptAt)
+      : null;
+
+    if (status === 'completed-awaiting-authority') {
+      completedAt ??= Date.now();
+      if (authorityAttemptIndex < AUTHORITY_ATTEMPT_DELAYS_MS.length && nextAuthorityAttemptAt === null) {
+        nextAuthorityAttemptAt = completedAt + AUTHORITY_ATTEMPT_DELAYS_MS[authorityAttemptIndex];
+      }
+    } else if (status === 'accepted-local') {
+      nextAuthorityAttemptAt = null;
+    }
+
+    this.removeLocalReplacement(itemId);
+
+    const localRecord = {
+      itemId,
+      slotKey: canonicalSlotKey,
+      videoId,
+      originalSubtitle,
+      suggestedSubtitle,
+      languageCode,
+      timestamp,
+      status,
+      createdAt,
+      completedAt,
+      authorityAttemptIndex,
+      nextAuthorityAttemptAt
+    };
+    this.localReplacements.set(canonicalSlotKey, localRecord);
+
+    return { ...localRecord };
+  }
+
+  /**
+   * 更新本地字幕同步狀態。
+   * @param {string} itemId - 隊列項目 ID
+   * @param {string} status - 本地字幕狀態
+   * @param {Object} metadata - 完成與權威重試資料
+   * @returns {Object|null} 更新後的本地字幕記錄
+   */
+  setLocalReplacementStatus(itemId, status, metadata = {}) {
+    if (!LOCAL_REPLACEMENT_STATUSES.has(status)) {
+      return null;
+    }
+
+    const entry = this.findLocalReplacementEntry(itemId);
+    if (!entry) {
+      return null;
+    }
+
+    const updatedRecord = {
+      ...entry.record,
+      status
+    };
+
+    if (metadata.completedAt !== undefined) {
+      updatedRecord.completedAt = Number.isFinite(Number(metadata.completedAt))
+        ? Number(metadata.completedAt)
+        : null;
+    }
+    if (Number.isInteger(metadata.authorityAttemptIndex) && metadata.authorityAttemptIndex >= 0) {
+      updatedRecord.authorityAttemptIndex = metadata.authorityAttemptIndex;
+    }
+    const hasNextAuthorityAttemptAt = metadata.nextAuthorityAttemptAt !== undefined;
+    if (hasNextAuthorityAttemptAt) {
+      updatedRecord.nextAuthorityAttemptAt = metadata.nextAuthorityAttemptAt !== null && Number.isFinite(Number(metadata.nextAuthorityAttemptAt))
+        ? Number(metadata.nextAuthorityAttemptAt)
+        : null;
+    }
+
+    if (status === 'completed-awaiting-authority') {
+      updatedRecord.completedAt ??= Date.now();
+      if (!hasNextAuthorityAttemptAt && updatedRecord.authorityAttemptIndex < AUTHORITY_ATTEMPT_DELAYS_MS.length) {
+        updatedRecord.nextAuthorityAttemptAt ??= updatedRecord.completedAt + AUTHORITY_ATTEMPT_DELAYS_MS[updatedRecord.authorityAttemptIndex];
+      }
+    } else if (status === 'accepted-local') {
+      updatedRecord.nextAuthorityAttemptAt = null;
+    }
+
+    this.localReplacements.set(entry.slotKey, updatedRecord);
+    return { ...updatedRecord };
+  }
+
+  /**
+   * 移除指定隊列項目的本地字幕。
+   * @param {string} itemId - 隊列項目 ID
+   * @returns {Object|null} 被移除的本地字幕記錄
+   */
+  removeLocalReplacement(itemId) {
+    const entry = this.findLocalReplacementEntry(itemId);
+    if (!entry) {
+      return null;
+    }
+
+    this.localReplacements.delete(entry.slotKey);
+    return { ...entry.record };
+  }
+
+  /**
+   * 列出本影片 session 的本地字幕。
+   * @returns {Array<Object>} 本地字幕記錄副本
+   */
+  listLocalReplacements() {
+    return Array.from(this.localReplacements.values(), record => ({ ...record }));
+  }
+
+  /**
+   * 使包含指定時間點的請求區間失效，允許精準重新獲取。
+   * @param {number} timestamp - 字幕時間戳
+   * @returns {number} 移除的區間數
+   */
+  invalidateIntervalAt(timestamp) {
+    const numericTimestamp = Number(timestamp);
+    if (!Number.isFinite(numericTimestamp)) {
+      return 0;
+    }
+
+    const previousCount = this.requestedIntervals.length;
+    this.requestedIntervals = this.requestedIntervals.filter(interval =>
+      numericTimestamp < interval.start || numericTimestamp >= interval.end
+    );
+    return previousCount - this.requestedIntervals.length;
+  }
+
+  isLocalReplacementReconciliationDue(itemId, now) {
+    const entry = this.findLocalReplacementEntry(itemId);
+    const currentTime = Number(now);
+
+    if (!entry || entry.record.status !== 'completed-awaiting-authority' ||
+        entry.record.completedAt === null || !Number.isFinite(currentTime) ||
+        entry.record.authorityAttemptIndex >= AUTHORITY_ATTEMPT_DELAYS_MS.length) {
+      return false;
+    }
+
+    const dueAt = entry.record.completedAt +
+      AUTHORITY_ATTEMPT_DELAYS_MS[entry.record.authorityAttemptIndex];
+    return currentTime >= dueAt;
+  }
+
+  /**
+   * 依 0/5/15 秒上限向權威來源重新查詢完成的本地字幕。
+   * @param {string} itemId - 隊列項目 ID
+   * @param {number} now - 當前時間
+   * @returns {Promise<Object|null>} 仍存在的本地字幕記錄
+   */
+  async reconcileCompletedLocalReplacement(itemId, now) {
+    const entry = this.findLocalReplacementEntry(itemId);
+    const currentTime = Number(now);
+
+    if (!entry || entry.record.status !== 'completed-awaiting-authority' || !Number.isFinite(currentTime)) {
+      return entry ? { ...entry.record } : null;
+    }
+
+    const { record } = entry;
+    if (record.completedAt === null) {
+      return this.setLocalReplacementStatus(itemId, 'accepted-local', {
+        authorityAttemptIndex: AUTHORITY_ATTEMPT_DELAYS_MS.length,
+        nextAuthorityAttemptAt: null
+      });
+    }
+    if (record.authorityAttemptIndex >= AUTHORITY_ATTEMPT_DELAYS_MS.length) {
+      return { ...record };
+    }
+
+    if (!this.isLocalReplacementReconciliationDue(itemId, currentTime)) {
+      return { ...record };
+    }
+
+    const nextAttemptIndex = record.authorityAttemptIndex + 1;
+    const nextAuthorityAttemptAt = nextAttemptIndex < AUTHORITY_ATTEMPT_DELAYS_MS.length
+      ? record.completedAt + AUTHORITY_ATTEMPT_DELAYS_MS[nextAttemptIndex]
+      : null;
+    this.setLocalReplacementStatus(itemId, 'completed-awaiting-authority', {
+      authorityAttemptIndex: nextAttemptIndex,
+      nextAuthorityAttemptAt
+    });
+    this.invalidateIntervalAt(record.timestamp);
+
+    await this.fetchSubtitleBatch(record.videoId, record.timestamp, {
+      force: true,
+      requestStartedAt: Date.now(),
+      reconciliationItemId: itemId
+    });
+
+    const currentEntry = this.findLocalReplacementEntry(itemId);
+    if (!currentEntry) {
+      return null;
+    }
+    if (currentEntry.record.status !== 'completed-awaiting-authority') {
+      return { ...currentEntry.record };
+    }
+    if (nextAttemptIndex >= AUTHORITY_ATTEMPT_DELAYS_MS.length) {
+      return this.setLocalReplacementStatus(itemId, 'accepted-local', {
+        authorityAttemptIndex: nextAttemptIndex,
+        nextAuthorityAttemptAt: null
+      });
+    }
+
+    return { ...currentEntry.record };
+  }
+
+  findLocalReplacementEntry(itemId) {
+    for (const [slotKey, record] of this.localReplacements.entries()) {
+      if (record.itemId === itemId) {
+        return { slotKey, record };
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -214,40 +474,6 @@ class SubtitleReplacer {
     }
     
     return null;
-  }
-
-  /**
-   * 在緩存中查找替換字幕
-   * @param {string} text - 字幕文本
-   * @param {number} timestamp - 時間戳
-   * @returns {Object|null} 緩存的替換數據
-   */
-  findReplacementInCache(text, timestamp) {
-    // 使用文本作為主鍵進行快速查找
-    const cacheKey = this.generateCacheKey(text, timestamp);
-    
-    // 精確匹配
-    if (this.subtitleCache.has(cacheKey)) {
-      return this.subtitleCache.get(cacheKey);
-    }
-    
-    // 模糊匹配（時間戳容差範圍內）
-    for (const [key, value] of this.subtitleCache.entries()) {
-      if (value.originalSubtitle === text && 
-          Math.abs(value.timestamp - timestamp) <= this.TIMESTAMP_TOLERANCE_SECONDS) {
-        return value;
-      }
-    }
-    
-    return null;
-  }
-
-  /**
-   * 生成緩存鍵
-   */
-  generateCacheKey(text, timestamp) {
-    // 使用文本和時間戳的組合作為鍵
-    return `${text}_${Math.floor(timestamp / this.TIMESTAMP_TOLERANCE_SECONDS)}`;
   }
 
   /**
@@ -295,6 +521,9 @@ class SubtitleReplacer {
    * @param {number} startTimestamp - 開始時間戳
    * @param {Object} options - 選項
    * @param {number} options.timeout - 超時時間（毫秒），預設不設限
+   * @param {boolean} options.force - 是否略過已請求區間檢查
+   * @param {number} options.requestStartedAt - 請求開始時間
+   * @param {string} options.reconciliationItemId - 對應的本地字幕項目 ID
    */
   async fetchSubtitleBatch(videoId, startTimestamp, options = {}) {
     if (!videoId) {
@@ -307,7 +536,7 @@ class SubtitleReplacer {
     
     // 檢查是否已經請求過這個區間
     const alreadyRequested = this.isIntervalRequested(start, end);
-    if (alreadyRequested) {
+    if (alreadyRequested && !options.force) {
       this.log(`區間 ${start}-${end} 已請求過，跳過`);
       return;
     }
@@ -322,6 +551,9 @@ class SubtitleReplacer {
     
     this.log(`開始獲取字幕批次: ${start} ~ ${end}`);
     this.stats.apiRequests++;
+    const requestStartedAt = Number.isFinite(options.requestStartedAt)
+      ? options.requestStartedAt
+      : Date.now();
     
     try {
       const sendPromise = sendMessage({
@@ -341,7 +573,10 @@ class SubtitleReplacer {
         : await sendPromise;
       
       if (response && response.success && Array.isArray(response.subtitles)) {
-        await this.processSubtitleBatch(response.subtitles, start);
+        await this.processSubtitleBatch(response.subtitles, {
+          requestStartedAt,
+          reconciliationItemId: options.reconciliationItemId || null
+        });
         this.markIntervalComplete(start);
         this.log(`成功處理 ${response.subtitles.length} 條字幕`);
       } else {
@@ -362,25 +597,63 @@ class SubtitleReplacer {
   /**
    * 處理字幕批次數據
    * @param {Array} subtitles - 字幕數組
-   * @param {number} requestStart - 請求開始時間
+   * @param {Object} batchContext - 請求批次資訊
+   * @param {number} batchContext.requestStartedAt - 請求開始時間
+   * @param {string|null} batchContext.reconciliationItemId - 本地字幕項目 ID
    */
-  async processSubtitleBatch(subtitles, requestStart) {
+  async processSubtitleBatch(subtitles, batchContext = {}) {
     let newCount = 0;
+    const requestStartedAt = Number.isFinite(batchContext.requestStartedAt)
+      ? batchContext.requestStartedAt
+      : null;
+    const reconciliationItemId = typeof batchContext.reconciliationItemId === 'string'
+      ? batchContext.reconciliationItemId
+      : null;
     
     for (const subtitle of subtitles) {
       if (!subtitle.originalSubtitle || !subtitle.suggestedSubtitle) {
         continue; // 跳過無效數據
       }
-      
-      const cacheKey = this.generateCacheKey(subtitle.originalSubtitle, subtitle.timestamp);
-      
-      // 避免重複緩存
-      if (!this.subtitleCache.has(cacheKey)) {
-        this.subtitleCache.set(cacheKey, {
-          ...subtitle,
-          cacheTime: Date.now()
-        });
+
+      const suppliedSlotKey = typeof subtitle.slotKey === 'string' ? subtitle.slotKey.trim() : '';
+      const slotKey = suppliedSlotKey || buildSlotKey({
+        videoID: subtitle.videoID,
+        originalSubtitle: subtitle.originalSubtitle,
+        languageCode: subtitle.languageCode,
+        timestamp: subtitle.timestamp
+      });
+
+      if (!slotKey) {
+        continue;
+      }
+
+      if (!this.subtitleCache.has(slotKey)) {
         newCount++;
+      }
+
+      this.subtitleCache.set(slotKey, {
+        ...subtitle,
+        slotKey,
+        cacheTime: Date.now()
+      });
+
+      const localRecord = this.localReplacements.get(slotKey);
+      if (!localRecord) {
+        continue;
+      }
+
+      const isPostCompletionAuthority = localRecord.status === 'completed-awaiting-authority' &&
+        localRecord.completedAt !== null &&
+        requestStartedAt !== null &&
+        requestStartedAt >= localRecord.completedAt;
+      const isLaterNormalAuthority = localRecord.status === 'accepted-local' &&
+        localRecord.completedAt !== null &&
+        requestStartedAt !== null &&
+        requestStartedAt >= localRecord.completedAt &&
+        reconciliationItemId === null;
+
+      if (isPostCompletionAuthority || isLaterNormalAuthority) {
+        this.localReplacements.delete(slotKey);
       }
     }
     
