@@ -195,7 +195,7 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
       const handledCoreMessageTypes = [
-        'CONTENT_SCRIPT_LOADED', 'CONTENT_SCRIPT_READY', 'TOGGLE_EXTENSION', 'TOGGLE_DEBUG_MODE', 'VIDEO_ID_CHANGED', 'UPDATE_STATS'
+        'CONTENT_SCRIPT_LOADED', 'CONTENT_SCRIPT_READY', 'TOGGLE_DEBUG_MODE', 'VIDEO_ID_CHANGED', 'UPDATE_STATS'
       ];
       if (handledCoreMessageTypes.includes(message.type)) {
         handleCoreMessagePort(messageId, message, port);
@@ -268,7 +268,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   // 定義需要背景腳本處理的核心訊息類型清單 (來自 popup)
   const handledPopupMessageTypes = [
-    'TOGGLE_EXTENSION', // Popup 可以切換擴充功能狀態
     // 'TOGGLE_DEBUG_MODE', // Popup 可以切換調試模式
     // 'GET_SETTINGS', // Popup 獲取設置
     'POPUP_API_REQUEST' // 新增：來自 Popup 的 API 請求
@@ -302,7 +301,6 @@ function handlePopupMessage(request, sender, sendResponse) {
     // 定義訊息類型到模組的映射 (僅限 popup 相關)
     const moduleMapping = {
         // 'GET_SETTINGS': 'storage',
-        'TOGGLE_EXTENSION': 'core', // 核心處理
         'TOGGLE_DEBUG_MODE': 'core', // 核心處理
         'POPUP_API_REQUEST': 'api_proxy' // 新增：路由到 API 代理處理
         // 'DEBUG_MODE_CHANGED': 'core', // 來自選項頁面的調試模式變更 - 現在通過 port 處理
@@ -320,14 +318,6 @@ function handlePopupMessage(request, sender, sendResponse) {
     } else if (moduleName === 'core') {
         // 處理核心消息 (與 handleCoreMessage 類似，但使用 sendResponse)
         switch (request.type) {
-            case 'TOGGLE_EXTENSION':
-                console.log(`[Background] Toggling extension (from popup): ${request.isEnabled}`);
-                // 轉發消息到所有相關的 content scripts (通過 port)
-                contentScriptPorts.forEach(port => {
-                    port.postMessage({ type: 'TOGGLE_EXTENSION', isEnabled: request.isEnabled });
-                });
-                sendResponse({ success: true }); // 回應 popup
-                break;
             case 'TOGGLE_DEBUG_MODE':
                 console.warn('[Background] TOGGLE_DEBUG_MODE is deprecated. Use ConfigManager instead.');
                 // 為了向後兼容，將配置寫入 chrome.storage
@@ -392,12 +382,6 @@ async function handlePopupApiRequest(request, sendResponse) {
  */
 function handleCoreMessagePort(messageId, request, port) {
   switch (request.type) {
-    case 'TOGGLE_EXTENSION':
-      // 來自 content script 的 TOGGLE_EXTENSION 消息，通常不需要再轉發回 content script
-      console.log(`[Background] Received TOGGLE_EXTENSION from content script (port): ${request.isEnabled}`);
-      // 如果需要，可以更新狀態或通知其他地方
-      port.postMessage({ messageId, response: { success: true } }); // 發送響應
-      break;
     case 'UPDATE_STATS':
       console.log('[Background] Received UPDATE_STATS message (port)');
       // 將統計數據轉發到 popup
