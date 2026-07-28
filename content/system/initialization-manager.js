@@ -5,7 +5,7 @@
  * 解決 Page Script 注入、Netflix API 可用性、模式選擇等問題
  */
 
-import { requestPageScriptInjection, sendMessage, waitForPageScript } from './messaging.js';
+import { sendMessage, waitForPageScript } from './messaging.js';
 import { getVideoId } from '../core/video-info.js';
 
 class InitializationManager {
@@ -297,24 +297,20 @@ class InitializationManager {
   }
 
   /**
-   * 步驟3: 注入和初始化 Page Script
+   * 步驟3: 等待 Page Script 就緒
    */
   async initializePageScript() {
-    this.log('注入和初始化 Page Script...');
+    this.log('等待 Page Script 就緒...');
     
     try {
-      // 請求注入 Page Script
-      await requestPageScriptInjection();
-      
       // 等待 Page Script 可用
       await waitForPageScript(5000);
       
-      // 檢查 Page Script 是否正確注入
       if (!window.subpalPageScript) {
-        throw new Error('Page Script 注入失敗');
+        throw new Error('Page Script 未就緒');
       }
       
-      this.log('Page Script 注入成功');
+      this.log('Page Script 已就緒');
       this.state.pageScriptInjected = true;
       return true;
       

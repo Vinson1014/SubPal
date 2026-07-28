@@ -5,7 +5,7 @@ import vm from 'node:vm';
 
 test('Given MAIN initialization When its module graph loads Then subtitle startup remains and endscreen task ownership is absent', async () => {
   const source = await readFile(new URL('../content/system/initialization-manager.js', import.meta.url), 'utf8');
-  assert.match(source, /requestPageScriptInjection/);
+  assert.doesNotMatch(source, /requestPageScriptInjection/);
   assert.match(source, /waitForPageScript\(5000\)/);
   assert.match(source, /window\.subpalPageScript/);
   assert.match(source, /initializeSubtitleCoordinatorSafely/);
@@ -16,8 +16,7 @@ test('Given initialized components When final integration starts Then initializa
   const sent = [];
   const context = vm.createContext({ console, Date, setTimeout, clearTimeout });
   const source = await readFile(new URL('../content/system/initialization-manager.js', import.meta.url), 'utf8');
-  const messaging = new vm.SyntheticModule(['requestPageScriptInjection', 'waitForPageScript', 'sendMessage'], function () {
-    this.setExport('requestPageScriptInjection', async () => {});
+  const messaging = new vm.SyntheticModule(['waitForPageScript', 'sendMessage'], function () {
     this.setExport('waitForPageScript', async () => {});
     this.setExport('sendMessage', async (message) => { sent.push(message); return {}; });
   }, { context });

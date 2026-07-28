@@ -8,7 +8,7 @@
  * 4. 健壯性：多重檢查確保模式選擇的可靠性
  */
 
-import { sendMessageToPageScript, requestPageScriptInjection, sendMessage, registerInternalEventHandler } from '../system/messaging.js';
+import { sendMessageToPageScript, sendMessage, registerInternalEventHandler } from '../system/messaging.js';
 
 class ModeDetector {
   constructor() {
@@ -154,39 +154,19 @@ class ModeDetector {
   }
 
   /**
-   * 確保頁面腳本已注入
+   * 以 PING 確認頁面腳本就緒
    */
   async ensurePageScriptInjected() {
-    this.log('確保頁面腳本已注入...');
+    this.log('確認頁面腳本是否就緒...');
     
-    try {
-      // 先檢查是否已經注入
-      const testResult = await this.sendToPageScript({ type: 'PING' }, 1000);
-      if (testResult && testResult.success) {
-        this.log('頁面腳本已存在');
-        return true;
-      }
-      
-      // 需要注入頁面腳本
-      this.log('注入頁面腳本...');
-      await requestPageScriptInjection();
-      
-      // 等待注入完成並驗證
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const verifyResult = await this.sendToPageScript({ type: 'PING' }, 2000);
-      if (verifyResult && verifyResult.success) {
-        this.log('頁面腳本注入成功');
-        return true;
-      }
-      
-      this.log('頁面腳本注入後驗證失敗');
-      return false;
-      
-    } catch (error) {
-      console.error('頁面腳本注入過程出錯:', error);
-      return false;
+    const result = await this.sendToPageScript({ type: 'PING' }, 1000);
+    if (result && result.success) {
+      this.log('頁面腳本已就緒');
+      return true;
     }
+
+    this.log('頁面腳本尚未就緒');
+    return false;
   }
 
   /**

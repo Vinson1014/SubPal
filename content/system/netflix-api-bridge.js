@@ -8,7 +8,7 @@
  * 4. 處理錯誤和重試機制
  */
 
-import { sendMessage, registerInternalEventHandler, sendMessageToPageScript, requestPageScriptInjection } from './messaging.js';
+import { sendMessage, registerInternalEventHandler, sendMessageToPageScript, waitForPageScript } from './messaging.js';
 
 // 調試模式
 let debugMode = false;
@@ -58,8 +58,7 @@ class NetflixAPIBridge {
 
       this.configBridge = configBridge;
 
-      // 注入page script
-      await this.injectPageScript();
+      await this.waitForPageScriptReadiness();
 
       // 檢測Netflix API可用性
       this.isAPIAvailable = await this.checkAPIAvailability();
@@ -85,11 +84,11 @@ class NetflixAPIBridge {
   }
 
   /**
-   * 注入page script到頁面context
+   * 等待 content.js 注入的 page script 就緒
    */
-  async injectPageScript() {
+  async waitForPageScriptReadiness() {
     if (this.pageScriptInjected) {
-      debugLog('Page script已注入，跳過');
+      debugLog('Page script已就緒，跳過等待');
       return;
     }
 
@@ -99,14 +98,13 @@ class NetflixAPIBridge {
         throw new Error('不在Netflix頁面上');
       }
 
-      // 使用 messaging.js 的統一接口請求注入 page script
-      debugLog('使用messaging.js請求注入page script...');
-      await requestPageScriptInjection();
+      debugLog('等待 content.js 的 page script 就緒握手...');
+      await waitForPageScript(5000);
       
       this.pageScriptInjected = true;
-      debugLog('Page script注入成功');
+      debugLog('Page script已就緒');
     } catch (error) {
-      console.error('Page script注入失敗:', error);
+      console.error('等待 Page script 就緒失敗:', error);
       throw error;
     }
   }
