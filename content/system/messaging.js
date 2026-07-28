@@ -10,6 +10,7 @@ const internalEventHandlers = new Map();
 
 // 調試模式開關 (由 content.js 控制)
 let debugMode = false;
+let messagingInitializationPromise = null;
 
 // 存儲所有活動的監聽器和超時計時器
 const activeListeners = new Map(); // messageId => { listener, timeoutId, resolve, reject }
@@ -100,7 +101,14 @@ function debugLog(...args) {
 }
 
 // 導出初始化函式，由外部調用
-export async function initMessaging() {
+export function initMessaging() {
+  if (!messagingInitializationPromise) {
+    messagingInitializationPromise = initializeMessaging();
+  }
+  return messagingInitializationPromise;
+}
+
+async function initializeMessaging() {
   // 初始化 ConfigBridge 並讀取 debugMode
   try {
     const { configBridge } = await import('./config/config-bridge.js');
@@ -537,36 +545,5 @@ export function waitForPageScript(timeout = 10000) {
         reject(new Error('Page script 載入超時'));
       }
     }, 500);
-  });
-}
-
-/**
- * 請求注入 page script
- * @returns {Promise<void>}
- */
-export function requestPageScriptInjection() {
-  debugLog('請求注入 page script');
-
-  return new Promise((resolve, reject) => {
-    // 檢查是否已經存在
-    if (isPageScriptAvailable()) {
-      debugLog('Page script 已存在');
-      resolve();
-      return;
-    }
-
-    // 觸發注入事件
-    const event = new CustomEvent('subpal-inject-page-script', {
-      detail: { timestamp: Date.now() }
-    });
-    window.dispatchEvent(event);
-
-    // 等待注入完成
-    waitForPageScript(10000)
-      .then(() => {
-        debugLog('Page script 注入成功');
-        resolve();
-      })
-      .catch(reject);
   });
 }
