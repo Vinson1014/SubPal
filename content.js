@@ -22,6 +22,23 @@
   let backgroundPort = null; // 長連接 port
   let configManager = null; // ConfigManager 實例
   let submissionQueueManager = null; // SubmissionQueueManager 實例
+  let pageScriptReadinessPromise = null;
+  let pageContextStartAttempted = false;
+  let isolatedEndscreenStartPromise = null;
+
+  const PAGE_SCRIPT_READY_EVENT = 'subpal-page-script-ready';
+  const PAGE_SCRIPT_READY_REQUEST_EVENT = 'subpal-request-page-script-ready';
+  const PAGE_SCRIPT_MARKER_SELECTOR = 'script[data-subpal-page-script-state]';
+  const PAGE_SCRIPT_READY_TIMEOUT_MS = 5000;
+  const PAGE_SCRIPT_POLL_INTERVAL_MS = 50;
+  const PAGE_SCRIPT_RETRY_DELAY_MS = 500;
+  const PAGE_SCRIPT_ATTRIBUTES = {
+    state: 'data-subpal-page-script-state',
+    attempt: 'data-subpal-page-script-attempt',
+    attemptId: 'data-subpal-page-script-attempt-id',
+    deadline: 'data-subpal-page-script-deadline',
+    retryNotBefore: 'data-subpal-page-script-retry-not-before'
+  };
 
   // 隊列消息類型常數
   const QUEUE_MESSAGE_TYPES = [
@@ -119,12 +136,25 @@
     }
   }
 
+  function startPageContextOnce() {
+    if (pageContextStartAttempted) return;
+    pageContextStartAttempted = true;
+    injectPageContextScript();
+  }
+
   async function initializeIsolatedEndscreenTasks() {
     const { initMessaging } = await import(chrome.runtime.getURL('content/system/messaging.js'));
     await initMessaging();
     const { startIsolatedEndscreenTasks } = await import(chrome.runtime.getURL('content/system/isolated-endscreen-tasks.js'));
     const { playbackContextManager } = await import(chrome.runtime.getURL('content/core/playback-context-manager.js'));
     await startIsolatedEndscreenTasks(configManager, playbackContextManager);
+  }
+
+  function startIsolatedEndscreenTasksOnce() {
+    if (!isolatedEndscreenStartPromise) {
+      isolatedEndscreenStartPromise = initializeIsolatedEndscreenTasks();
+    }
+    return isolatedEndscreenStartPromise;
   }
 
   // 處理配置相關訊息
@@ -507,74 +537,228 @@
     return `content_msg_${Date.now()}_${messageCounter}_${messageType}`;
   }
 
-  // 監聽page script注入請求
-  window.addEventListener('subpal-inject-page-script', (event) => {
-    debugLog('收到page script注入請求');
-    injectNetflixPageScript();
-  });
-
-  // 監聽來自page context的page script注入請求
-  window.addEventListener('subpal-request-page-script-injection', (event) => {
-    debugLog('收到來自page context的page script注入請求:', event.detail);
-    injectNetflixPageScript();
-  });
-
-  // 注入Netflix page script
-  function injectNetflixPageScript() {
-    try {
-      // 檢查是否已經注入
-      if (window.subpalPageScript) {
-        debugLog('Netflix page script已存在，跳過注入');
-        return;
-      }
-
-      const script = document.createElement('script');
-      script.src = chrome.runtime.getURL('netflix-page-script.js');
-      script.onload = () => {
-        debugLog('Netflix page script加載成功');
-      };
-      script.onerror = (error) => {
-        console.error('Netflix page script加載失敗:', error);
-      };
-      
-      (document.head || document.documentElement).appendChild(script);
-      debugLog('Netflix page script注入完成');
-    } catch (error) {
-      console.error('注入Netflix page script時出錯:', error);
-    }
+  function getPageScriptMarker() {
+    return document.querySelector(PAGE_SCRIPT_MARKER_SELECTOR);
   }
 
-  function waitForNetflixPageScriptReady(timeoutMs = 5000, retryIntervalMs = 50) {
-    return new Promise((resolve) => {
+  function readPageScriptRecord(marker = getPageScriptMarker()) {
+    if (!marker) return null;
+    return {
+      marker,
+      state: marker.getAttribute(PAGE_SCRIPT_ATTRIBUTES.state),
+      attempt: Number(marker.getAttribute(PAGE_SCRIPT_ATTRIBUTES.attempt)),
+      attemptId: marker.getAttribute(PAGE_SCRIPT_ATTRIBUTES.attemptId),
+      deadline: Number(marker.getAttribute(PAGE_SCRIPT_ATTRIBUTES.deadline)),
+      retryNotBefore: Number(marker.getAttribute(PAGE_SCRIPT_ATTRIBUTES.retryNotBefore))
+    };
+  }
+
+  function markerMatches(marker, attemptId, state) {
+    const current = getPageScriptMarker();
+    return current === marker &&
+      current.getAttribute(PAGE_SCRIPT_ATTRIBUTES.attemptId) === attemptId &&
+      current.getAttribute(PAGE_SCRIPT_ATTRIBUTES.state) === state;
+  }
+
+  function transitionPageScriptState(marker, attemptId, expectedState, nextState) {
+    if (!markerMatches(marker, attemptId, expectedState)) return false;
+    marker.setAttribute(PAGE_SCRIPT_ATTRIBUTES.state, nextState);
+    return true;
+  }
+
+  function createPageScriptAttempt(attempt, now) {
+    const attemptId = crypto.randomUUID();
+    const script = document.createElement('script');
+    script.src = chrome.runtime.getURL('netflix-page-script.js');
+    script.setAttribute(PAGE_SCRIPT_ATTRIBUTES.state, 'loading');
+    script.setAttribute(PAGE_SCRIPT_ATTRIBUTES.attempt, String(attempt));
+    script.setAttribute(PAGE_SCRIPT_ATTRIBUTES.attemptId, attemptId);
+    script.setAttribute(PAGE_SCRIPT_ATTRIBUTES.deadline, String(now + PAGE_SCRIPT_READY_TIMEOUT_MS));
+    script.setAttribute(PAGE_SCRIPT_ATTRIBUTES.retryNotBefore, '');
+    script.onload = () => {
+      if (transitionPageScriptState(script, attemptId, 'loading', 'loaded')) {
+        debugLog(`Netflix page script 第 ${attempt} 次載入完成，等待 readiness 回應。`);
+      }
+    };
+    script.onerror = (error) => {
+      const nextState = attempt === 1 ? 'error' : 'failed-terminal';
+      if (transitionPageScriptState(script, attemptId, 'loading', nextState)) {
+        console.error(`Netflix page script 第 ${attempt} 次載入失敗:`, error);
+      }
+    };
+    return script;
+  }
+
+  function appendInitialPageScriptAttempt(now) {
+    const existing = getPageScriptMarker();
+    if (existing) return existing;
+
+    const script = createPageScriptAttempt(1, now);
+    if (getPageScriptMarker()) return getPageScriptMarker();
+    (document.head || document.documentElement).appendChild(script);
+    return script;
+  }
+
+  function claimPageScriptRetry(record, now) {
+    if (record.attempt !== 1 || !markerMatches(record.marker, record.attemptId, 'error')) return false;
+    record.marker.setAttribute(PAGE_SCRIPT_ATTRIBUTES.retryNotBefore, String(now + PAGE_SCRIPT_RETRY_DELAY_MS));
+    if (!markerMatches(record.marker, record.attemptId, 'error')) return false;
+    record.marker.setAttribute(PAGE_SCRIPT_ATTRIBUTES.state, 'retry-claimed');
+    return true;
+  }
+
+  function appendRetryPageScriptAttempt(record, now) {
+    if (record.attempt !== 1 || !markerMatches(record.marker, record.attemptId, 'retry-claimed')) return null;
+    const script = createPageScriptAttempt(2, now);
+    if (!markerMatches(record.marker, record.attemptId, 'retry-claimed')) return null;
+    record.marker.replaceWith(script);
+    return script;
+  }
+
+  function failPageScriptAttempt(record) {
+    if (!record || !['loading', 'loaded', 'error'].includes(record.state)) return false;
+    return transitionPageScriptState(record.marker, record.attemptId, record.state, 'failed-terminal');
+  }
+
+  function ensureNetflixPageScriptReady() {
+    if (pageScriptReadinessPromise) return pageScriptReadinessPromise;
+
+    pageScriptReadinessPromise = new Promise((resolve) => {
+      const probeId = crypto.randomUUID();
       let settled = false;
-      const startedAt = Date.now();
+      let localAttemptId = null;
+      let localDeadline = null;
+      let pollTimer = null;
+      let retryWakeTimer = null;
+      let retryWakeAt = null;
 
       const finish = (ready) => {
         if (settled) return;
         settled = true;
-        window.removeEventListener('subpal-page-script-ready', handleReady);
+        if (pollTimer !== null) clearTimeout(pollTimer);
+        if (retryWakeTimer !== null) clearTimeout(retryWakeTimer);
+        window.removeEventListener(PAGE_SCRIPT_READY_EVENT, handleReady);
         resolve(ready);
       };
-      const handleReady = () => finish(true);
-      const requestReadiness = () => {
+
+      const schedulePoll = () => {
+        if (settled || pollTimer !== null) return;
+        pollTimer = setTimeout(() => {
+          pollTimer = null;
+          tick();
+        }, PAGE_SCRIPT_POLL_INTERVAL_MS);
+      };
+
+      const scheduleRetryWake = (wakeAt) => {
+        if (settled || (retryWakeTimer !== null && retryWakeAt === wakeAt)) return;
+        if (retryWakeTimer !== null) clearTimeout(retryWakeTimer);
+        retryWakeAt = wakeAt;
+        retryWakeTimer = setTimeout(() => {
+          retryWakeTimer = null;
+          retryWakeAt = null;
+          tick();
+        }, Math.max(0, wakeAt - Date.now()));
+      };
+
+      const handleReady = (event) => {
         if (settled) return;
-        window.dispatchEvent(new CustomEvent('subpal-request-page-script-ready'));
-        if (Date.now() - startedAt >= timeoutMs) {
+        const detail = event.detail;
+        const now = Date.now();
+        if (!detail || detail.attemptId !== localAttemptId || detail.probeId !== probeId ||
+          detail.deadline !== localDeadline || !Number.isFinite(detail.readyAt) ||
+          detail.readyAt > now || detail.readyAt > localDeadline || now > localDeadline) {
+          return;
+        }
+
+        const record = readPageScriptRecord();
+        if (!record || record.attemptId !== localAttemptId || record.deadline !== localDeadline ||
+          !['loading', 'loaded'].includes(record.state)) return;
+        if (transitionPageScriptState(record.marker, record.attemptId, record.state, 'ready')) finish(true);
+      };
+
+      const tick = () => {
+        if (settled) return;
+        const now = Date.now();
+        let record = readPageScriptRecord();
+        if (!record) {
+          appendInitialPageScriptAttempt(now);
+          record = readPageScriptRecord();
+        }
+        if (!record) {
           finish(false);
           return;
         }
-        setTimeout(requestReadiness, retryIntervalMs);
+
+        if (record.state === 'ready') {
+          finish(true);
+          return;
+        }
+        if (record.state === 'failed-terminal') {
+          finish(false);
+          return;
+        }
+
+        if (record.state === 'error') {
+          if (record.attempt !== 1 || now > record.deadline) {
+            failPageScriptAttempt(record);
+          } else if (claimPageScriptRetry(record, now)) {
+            record = readPageScriptRecord();
+          }
+        }
+
+        if (record?.state === 'retry-claimed') {
+          if (now >= record.retryNotBefore) {
+            appendRetryPageScriptAttempt(record, now);
+          } else {
+            scheduleRetryWake(record.retryNotBefore);
+          }
+          schedulePoll();
+          return;
+        }
+
+        record = readPageScriptRecord();
+        if (!record) {
+          finish(false);
+          return;
+        }
+        if (record.state === 'failed-terminal') {
+          finish(false);
+          return;
+        }
+        if (!['loading', 'loaded'].includes(record.state) || !Number.isFinite(record.deadline)) {
+          schedulePoll();
+          return;
+        }
+
+        localAttemptId = record.attemptId;
+        localDeadline = record.deadline;
+        if (now > localDeadline) {
+          failPageScriptAttempt(record);
+          finish(false);
+          return;
+        }
+
+        window.dispatchEvent(new CustomEvent(PAGE_SCRIPT_READY_REQUEST_EVENT, {
+          detail: { attemptId: localAttemptId, probeId, deadline: localDeadline }
+        }));
+        if (settled) return;
+        record = readPageScriptRecord();
+        if (record?.state === 'ready') {
+          finish(true);
+          return;
+        }
+        if (Date.now() >= localDeadline) {
+          failPageScriptAttempt(record);
+          finish(false);
+          return;
+        }
+        schedulePoll();
       };
 
-      window.addEventListener('subpal-page-script-ready', handleReady);
-      requestReadiness();
+      window.addEventListener(PAGE_SCRIPT_READY_EVENT, handleReady);
+      tick();
     });
-  }
-
-  function injectNetflixPageScriptAndWait() {
-    const readiness = waitForNetflixPageScriptReady();
-    injectNetflixPageScript();
-    return readiness;
+    return pageScriptReadinessPromise;
   }
 
   // 建立初始連接
@@ -582,17 +766,15 @@
 
   // 初始化所有 Managers
   async function initializeAllManagers() {
+    const pageScriptReady = ensureNetflixPageScriptReady();
     try {
-      // 先初始化 ConfigManager
       const configSuccess = await initializeConfigManager();
       if (!configSuccess) {
         console.error('[Content Script] ConfigManager 初始化失敗');
-        // 即使失敗也繼續注入腳本，使用預設 debugMode
-        injectPageContextScript();
+        if (await pageScriptReady) startPageContextOnce();
         return;
       }
 
-      // 再初始化 SubmissionQueueManager
       const queueSuccess = await initializeQueueManagers();
       if (!queueSuccess) {
         console.error('[Content Script] SubmissionQueueManager 初始化失敗');
@@ -600,21 +782,29 @@
 
       debugLog('All managers initialized.');
 
-      const pageScriptReady = injectNetflixPageScriptAndWait();
-      injectPageContextScript();
       if (!await pageScriptReady) {
-        console.warn('[Content Script] Netflix page script readiness timeout; skipping isolated endscreen tasks.');
+        console.warn('[Content Script] Netflix page script failed; skipping MAIN and isolated startup.');
         return;
       }
+      startPageContextOnce();
       try {
-        await initializeIsolatedEndscreenTasks();
+        await startIsolatedEndscreenTasksOnce();
       } catch (error) {
         console.warn('[Content Script] 片尾任務模組初始化失敗:', error);
       }
     } catch (error) {
       console.error('[Content Script] Managers 初始化過程中發生錯誤:', error);
-      // 發生錯誤時仍嘗試注入腳本
-      injectPageContextScript();
+      if (!await pageScriptReady) {
+        console.warn('[Content Script] Netflix page script failed; skipping MAIN and isolated startup.');
+        return;
+      }
+      startPageContextOnce();
+      if (!configManager) return;
+      try {
+        await startIsolatedEndscreenTasksOnce();
+      } catch (isolatedError) {
+        console.warn('[Content Script] 片尾任務模組初始化失敗:', isolatedError);
+      }
     }
   }
 

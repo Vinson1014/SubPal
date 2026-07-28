@@ -46,7 +46,6 @@
   }
 
   if (window.subpalPageScript?.ready === true) {
-    window.dispatchEvent(new CustomEvent(PAGE_SCRIPT_READY_EVENT));
     return;
   }
 
@@ -2302,9 +2301,6 @@
 
   // 監聽消息
   window.addEventListener('message', handleMessage);
-  const announcePageScriptReady = () => window.dispatchEvent(new CustomEvent(PAGE_SCRIPT_READY_EVENT));
-  window.addEventListener(PAGE_SCRIPT_READY_REQUEST_EVENT, announcePageScriptReady);
-  announcePageScriptReady();
 
   // 監聽內部事件 - 檢測影片切換並重新初始化播放器助手
   window.addEventListener('messageToContentScript', (event) => {
@@ -2397,6 +2393,14 @@
       debugLog('調試模式已', enabled ? '啟用' : '停用');
     }
   };
+
+  window.addEventListener(PAGE_SCRIPT_READY_REQUEST_EVENT, (event) => {
+    const { attemptId, probeId, deadline } = event.detail || {};
+    if (typeof attemptId !== 'string' || typeof probeId !== 'string' || !Number.isFinite(deadline)) return;
+    window.dispatchEvent(new CustomEvent(PAGE_SCRIPT_READY_EVENT, {
+      detail: { attemptId, probeId, deadline, readyAt: Date.now() }
+    }));
+  });
 
   debugLog('Netflix Page Script 初始化完成');
 })();

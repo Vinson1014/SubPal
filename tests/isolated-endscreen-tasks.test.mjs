@@ -366,6 +366,7 @@ test('Given disabled endscreen tasks When the real isolated startup path runs Th
   const h = createWrapperLifecycleHarness({ enabled: false });
 
   const system = await startIsolatedEndscreenTasks(h.configManager, h.contextManager);
+  assert.equal(system.started, false, 'disabled fallback must return an explicitly uninitialized owner');
   system.dispose();
 
   assert.equal(h.initializeCalls, 0);
@@ -376,8 +377,10 @@ test('Given an enabled real isolated startup When panel opt-out succeeds Then it
   installIsolatedRuntime(t);
   const h = createWrapperLifecycleHarness();
   const system = await startIsolatedEndscreenTasks(h.configManager, h.contextManager);
+  assert.equal(system.started, true, 'enabled fallback must return an initialized owner');
 
   await system.panel.eventCallbacks.onOptOut({});
+  assert.equal(system.started, false, 'successful opt-out must leave the owner uninitialized');
   system.cleanup();
   system.dispose();
 
