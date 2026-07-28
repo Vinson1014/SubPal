@@ -23,6 +23,7 @@ async function loadManager({ pageWorld = false } = {}) {
     renders: [],
     voteUpdates: [],
     avoidanceUpdates: [],
+    localReplacementUpserts: [],
     timeouts: []
   };
 
@@ -98,7 +99,7 @@ async function loadManager({ pageWorld = false } = {}) {
   manager.updateVoteDisplay = value => lifecycle.voteUpdates.push(value);
   manager.setupSubtitleHoverEvents = () => {};
   manager.isInitialized = true;
-  manager.subtitleReplacer = { isInitialized: true, processSubtitle: async value => value, cleanup() { lifecycle.replacerCleanups = (lifecycle.replacerCleanups || 0) + 1; } };
+  manager.subtitleReplacer = { isInitialized: true, processSubtitle: async value => value, upsertLocalReplacement(record) { lifecycle.localReplacementUpserts.push(record); return record; }, cleanup() { lifecycle.replacerCleanups = (lifecycle.replacerCleanups || 0) + 1; } };
   manager.setupEventHandlers();
   await manager.initializeComponents();
   manager.setupComponentInteractions();
@@ -223,6 +224,14 @@ test('Given translation enqueue succeeds When the dialog submit callback settles
     status: 'success',
     itemId: 'translation-1',
     message: '翻譯已加入同步隊列'
+  });
+  assert.equal(fixture.lifecycle.localReplacementUpserts.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(fixture.lifecycle.localReplacementUpserts[0])), {
+    itemId: 'translation-1',
+    slotKey: null,
+    videoId: null,
+    suggestedSubtitle: '修正翻譯',
+    status: 'pending'
   });
 });
 
