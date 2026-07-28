@@ -2,18 +2,23 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-export async function loadBackgroundWithApi(apiModule) {
+export async function loadBackgroundWithApi(apiModule, options = {}) {
   return await loadBackground((specifier, context) => {
     if (specifier === './background/api.js') {
       return new vm.SyntheticModule(Object.keys(apiModule), function init() {
         for (const [name, value] of Object.entries(apiModule)) this.setExport(name, value);
       }, { context, identifier: 'api.js' });
     }
+    if (specifier === './background/sync.js' && options.syncModule) {
+      return new vm.SyntheticModule(Object.keys(options.syncModule), function init() {
+        for (const [name, value] of Object.entries(options.syncModule)) this.setExport(name, value);
+      }, { context, identifier: 'sync.js' });
+    }
     return null;
-  });
+  }, undefined, options);
 }
 
-export async function loadBackgroundWithRealApi(fetchImpl) {
+export async function loadBackgroundWithRealApi(fetchImpl, options = {}) {
   return await loadBackground(async (specifier, context) => {
     if (specifier === './background/api.js') {
       const apiSource = await readFile(new URL('../background/api.js', import.meta.url), 'utf8');
@@ -24,21 +29,31 @@ export async function loadBackgroundWithRealApi(fetchImpl) {
       return apiModule;
     }
     return null;
-  }, fetchImpl);
+  }, fetchImpl, options);
 }
 
-async function loadBackground(resolveModule, fetchImpl = fetch) {
+function createConsole(logs) {
+  return Object.fromEntries(['log', 'warn', 'error'].map((level) => [level, (...args) => logs.push({ level, args })]));
+}
+
+async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
   const onConnect = { listener: null };
   const onMessage = { listener: null };
-  const storage = {
+  const onAlarm = { listener: null };
+  const onInstalled = { listener: null };
+  const onStartup = { listener: null };
+  const alarmCalls = { clear: [], create: [] };
+  const storageCalls = [];
+  const logs = options.logs ?? [];
+  const storage = options.storage ?? {
     jwt: 'jwt-token',
     user: { userId: 'user-1' },
     api: { baseUrl: 'https://api.example.test' }
   };
   const context = vm.createContext({
     AbortController,
-    console,
-    crypto,
+    console: createConsole(logs),
+    crypto: options.crypto ?? crypto,
     fetch: fetchImpl,
     URL,
     URLSearchParams,
@@ -46,25 +61,39 @@ async function loadBackground(resolveModule, fetchImpl = fetch) {
     clearTimeout,
     self: { addEventListener() {} },
     chrome: {
-      alarms: { clear() {}, create() {}, onAlarm: { addListener() {} } },
+      alarms: {
+        clear(name) { alarmCalls.clear.push(name); },
+        create(name, alarmInfo) { alarmCalls.create.push({ name, alarmInfo }); },
+        onAlarm: { addListener(listener) { onAlarm.listener = listener; } }
+      },
       runtime: {
         id: 'subpal-extension-id',
         getManifest: () => ({ version: '0.0.0-test' }),
         getURL: (path) => `chrome-extension://test/${path}`,
         onConnect: { addListener(listener) { onConnect.listener = listener; } },
-        onInstalled: { addListener() {} },
+        onInstalled: { addListener(listener) { onInstalled.listener = listener; } },
         onMessage: { addListener(listener) { onMessage.listener = listener; } },
-        onStartup: { addListener() {} },
+        onStartup: { addListener(listener) { onStartup.listener = listener; } },
         sendMessage(_message, callback) { callback?.({ success: true }); }
       },
       storage: {
         local: {
-          async get(keys) {
-            if (Array.isArray(keys)) return Object.fromEntries(keys.map((key) => [key, storage[key]]));
-            return { [keys]: storage[keys] };
+          async get(keys, callback) {
+            const requestedKeys = Array.isArray(keys) ? keys : [keys];
+            const result = Object.fromEntries(requestedKeys.map((key) => [key, storage[key]]));
+            storageCalls.push({ operation: 'get', keys: requestedKeys });
+            callback?.(result);
+            return result;
           },
-          async set(values) { Object.assign(storage, values); },
-          async remove() {}
+          async set(values) {
+            storageCalls.push({ operation: 'set', keys: Object.keys(values) });
+            Object.assign(storage, values);
+          },
+          async remove(keys) {
+            const removedKeys = Array.isArray(keys) ? keys : [keys];
+            storageCalls.push({ operation: 'remove', keys: removedKeys });
+            for (const key of removedKeys) delete storage[key];
+          }
         }
       },
       tabs: { async create() {} }
@@ -88,19 +117,39 @@ async function loadBackground(resolveModule, fetchImpl = fetch) {
   await module.evaluate();
   assert.equal(typeof onConnect.listener, 'function');
   assert.equal(typeof onMessage.listener, 'function');
-  return { connect: onConnect.listener, sendRuntimeMessage: onMessage.listener };
+  return {
+    alarmCalls,
+    connect: onConnect.listener,
+    install: async (details = { reason: 'install' }) => {
+      assert.equal(typeof onInstalled.listener, 'function');
+      await onInstalled.listener(details);
+    },
+    logs,
+    sendRuntimeMessage: onMessage.listener,
+    startup: async () => {
+      assert.equal(typeof onStartup.listener, 'function');
+      await onStartup.listener();
+    },
+    storageCalls,
+    storage,
+    triggerAlarm: async (alarm) => {
+      assert.equal(typeof onAlarm.listener, 'function');
+      await onAlarm.listener(alarm);
+    }
+  };
 }
 
-export async function loadApiModule(fetchImpl) {
-  const storage = {
+export async function loadApiModule(fetchImpl, options = {}) {
+  const logs = options.logs ?? [];
+  const storage = options.storage ?? {
     jwt: 'jwt-token',
     user: { userId: 'user-1' },
     api: { baseUrl: 'https://api.example.test' }
   };
   const context = vm.createContext({
     AbortController,
-    console,
-    crypto,
+    console: createConsole(logs),
+    crypto: options.crypto ?? crypto,
     fetch: fetchImpl,
     URLSearchParams,
     setTimeout,
@@ -203,6 +252,18 @@ export async function loadRealContentTransport(background, sender = netflixSende
   };
   background.connect(connectedPort.port);
   backgroundPortListener = connectedPort.send;
+  const failedTerminalMarker = {
+    getAttribute(name) {
+      const attributes = {
+        'data-subpal-page-script-state': 'failed-terminal',
+        'data-subpal-page-script-attempt': '2',
+        'data-subpal-page-script-attempt-id': '00000000-0000-4000-8000-000000000002',
+        'data-subpal-page-script-deadline': '0',
+        'data-subpal-page-script-retry-not-before': ''
+      };
+      return attributes[name] ?? null;
+    }
+  };
 
   const context = vm.createContext({
     AbortController,
@@ -212,6 +273,9 @@ export async function loadRealContentTransport(background, sender = netflixSende
     CustomEvent: TestCustomEvent,
     document: {
       createElement() { return {}; },
+      querySelector(selector) {
+        return selector === 'script[data-subpal-page-script-state]' ? failedTerminalMarker : null;
+      },
       documentElement: { appendChild() {} },
       head: { appendChild() {} }
     },

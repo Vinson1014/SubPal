@@ -10,19 +10,9 @@ self.addEventListener('unhandledrejection', function(event) {
   }
 });
 
-// Service Worker 實例 ID，用於追踪是否發生重啟
+// Service Worker 實例 ID，僅用於本次執行期的日誌關聯
 const serviceWorkerInstanceId = `sw-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 console.log(`[Background] Service Worker script executing. Current Instance ID: ${serviceWorkerInstanceId}`);
-chrome.storage.local.set({ currentSWInstanceId: serviceWorkerInstanceId });
-
-// 檢查是否發生了重啟 (與上次存儲的 currentSWInstanceId 比較)
-chrome.storage.local.get(['previousSWInstanceIdForRestartCheck'], (result) => {
-  if (result.previousSWSWInstanceIdForRestartCheck && result.previousSWInstanceIdForRestartCheck !== serviceWorkerInstanceId) {
-    console.warn(`[Background] Service Worker appears to have restarted. Previous Instance ID (from storage): ${result.previousSWInstanceIdForRestartCheck}, Current Instance ID: ${serviceWorkerInstanceId}`);
-  }
-  // 更新 previousSWInstanceIdForRestartCheck 供下次腳本執行時比較
-  chrome.storage.local.set({ previousSWInstanceIdForRestartCheck: serviceWorkerInstanceId });
-});
 
 import * as apiModule from './background/api.js';
 import * as syncModule from './background/sync.js';
@@ -30,9 +20,7 @@ import './background/sync-listener.js'; // 載入同步監聽器，自動註冊 
 
 // 擴充功能安裝/更新事件
 chrome.runtime.onInstalled.addListener(async (details) => {
-  const installedInstanceId = serviceWorkerInstanceId; // 捕獲當前腳本執行上下文的實例 ID
-  console.log(`[Background] onInstalled event. Instance ID: ${installedInstanceId}. 字幕助手擴充功能已安裝或更新`);
-  await chrome.storage.local.set({ onInstalledSWInstanceId: installedInstanceId });
+  console.log(`[Background] onInstalled event. Instance ID: ${serviceWorkerInstanceId}. 字幕助手擴充功能已安裝或更新`);
 
   // 先執行配置遷移（舊鍵名 -> 新鍵名）
   await migrateOldConfigKeys();
@@ -71,17 +59,13 @@ async function showTutorialIfNeeded() {
 
 // 擴充功能啟動事件
 chrome.runtime.onStartup.addListener(async () => {
-  const startupInstanceId = serviceWorkerInstanceId; // 捕獲當前腳本執行上下文的實例 ID
-  console.log(`[Background] onStartup event. Instance ID: ${startupInstanceId}. Extension startup, triggering initialization.`);
-  await chrome.storage.local.set({ onStartupSWInstanceId: startupInstanceId });
+  console.log(`[Background] onStartup event. Instance ID: ${serviceWorkerInstanceId}. Extension startup, triggering initialization.`);
 
   // 先執行配置遷移（舊鍵名 -> 新鍵名）
   await migrateOldConfigKeys();
 
   // 執行用戶註冊/JWT獲取邏輯
   await ensureUserRegisteredAndJwtPresent();
-  // 設置 JWT 刷新警報
-  setupJwtRefreshAlarm();
 });
 
 /**
@@ -183,26 +167,6 @@ async function ensureUserRegisteredAndJwtPresent() {
     );
   }
 }
-
-/**
- * 設置 JWT 刷新警報
- */
-function setupJwtRefreshAlarm() {
-  chrome.alarms.clear('jwtRefresh'); // 清除舊的警報
-  // 設置警報，例如每 24 小時檢查一次 (1440 分鐘)
-  chrome.alarms.create('jwtRefresh', { periodInMinutes: 1440 });
-  console.log('[Background] JWT refresh alarm set.');
-}
-
-// 監聽警報事件
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === 'jwtRefresh') {
-    console.log('[Background] JWT refresh alarm triggered, checking JWT validity...');
-    // 在這裡可以添加 JWT 有效期檢查邏輯
-    // 簡單起見，直接嘗試重新註冊/獲取 JWT
-    await ensureUserRegisteredAndJwtPresent();
-  }
-});
 
 // 儲存 content script 的 port，以 tabId 為鍵
 const contentScriptPorts = new Map();
@@ -565,11 +529,6 @@ function routeMessageToModulePort(messageId, request, port) {
   // 定義訊息類型到模組的映射
   const moduleMapping = {
     'CHECK_SUBTITLE': 'api',
-    'SYNC_DATA': 'sync',
-    'GET_SYNC_STATUS': 'sync',
-    'TRIGGER_VOTE_SYNC': 'sync',
-    'TRIGGER_TRANSLATION_SYNC': 'sync',
-    'TRIGGER_REPLACEMENT_EVENT_SYNC': 'sync',
     'RETRY_FAILED_VOTES': 'sync',
     'RETRY_FAILED_TRANSLATIONS': 'sync',
     'RETRY_FAILED_REPLACEMENT_EVENTS': 'sync',

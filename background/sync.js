@@ -593,30 +593,6 @@ export async function triggerTranslationSync() {
  */
 export function handleMessage(request, sender, portSendResponse) {
   switch (request.type) {
-    case 'SYNC_VOTES':
-      syncPendingVotes().then(() => {
-        portSendResponse({ success: true, message: 'Vote sync triggered' });
-      }).catch(error => {
-        portSendResponse({ success: false, error: error.message });
-      });
-      break;
-
-    case 'SYNC_TRANSLATIONS':
-      syncPendingTranslations().then(() => {
-        portSendResponse({ success: true, message: 'Translation sync triggered' });
-      }).catch(error => {
-        portSendResponse({ success: false, error: error.message });
-      });
-      break;
-
-    case 'GET_SYNC_STATUS':
-      getSyncStatus().then(status => {
-        portSendResponse({ success: true, status });
-      }).catch(error => {
-        portSendResponse({ success: false, error: error.message });
-      });
-      break;
-
     case 'RETRY_FAILED_VOTES':
       retryFailedVotes().then(() => {
         portSendResponse({ success: true, message: 'Failed votes retry triggered' });
@@ -633,35 +609,12 @@ export function handleMessage(request, sender, portSendResponse) {
       });
       break;
 
-    case 'TRIGGER_VOTE_SYNC':
-      triggerVoteSync();
-      portSendResponse({ success: true, message: 'Vote sync triggered' });
-      break;
-
-    case 'TRIGGER_TRANSLATION_SYNC':
-      triggerTranslationSync();
-      portSendResponse({ success: true, message: 'Translation sync triggered' });
-      break;
-
-    case 'SYNC_REPLACEMENT_EVENTS':
-      syncPendingReplacementEvents().then(() => {
-        portSendResponse({ success: true, message: 'Replacement event sync triggered' });
-      }).catch(error => {
-        portSendResponse({ success: false, error: error.message });
-      });
-      break;
-
     case 'RETRY_FAILED_REPLACEMENT_EVENTS':
       retryFailedReplacementEvents().then(() => {
         portSendResponse({ success: true, message: 'Failed replacement events retry triggered' });
       }).catch(error => {
         portSendResponse({ success: false, error: error.message });
       });
-      break;
-
-    case 'TRIGGER_REPLACEMENT_EVENT_SYNC':
-      triggerReplacementEventSync();
-      portSendResponse({ success: true, message: 'Replacement event sync triggered' });
       break;
 
     default:
