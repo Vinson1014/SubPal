@@ -169,14 +169,6 @@ export class ConfigBridge {
         throw new Error(result.error || '設置配置失敗');
       }
 
-      // 更新本地緩存（ConfigManager 會發送 CONFIG_CHANGED 通知）
-      // 但為了即時性，這裡也立即更新
-      const oldValue = this.cache.get(key);
-      this.cache.set(key, value);
-
-      // 立即通知本地訂閱者
-      this.notifySubscribers(key, value, oldValue);
-
       this.log(`配置已更新: ${key} = ${JSON.stringify(value)}`);
 
     } catch (error) {
@@ -203,13 +195,6 @@ export class ConfigBridge {
 
       if (!result.success) {
         throw new Error(result.error || '批量設置配置失敗');
-      }
-
-      // 更新本地緩存並通知訂閱者
-      for (const [key, value] of Object.entries(items)) {
-        const oldValue = this.cache.get(key);
-        this.cache.set(key, value);
-        this.notifySubscribers(key, value, oldValue);
       }
 
       this.log(`批量更新 ${Object.keys(items).length} 個配置`);

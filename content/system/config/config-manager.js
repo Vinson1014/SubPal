@@ -240,8 +240,9 @@ export class ConfigManager {
       throw error;
     }
 
-    // 5. 通知訂閱者
-    this.notifySubscribers(key, value, oldValue);
+    if (value === oldValue) {
+      this.notifySubscribers(key, value, oldValue);
+    }
 
     this.log(`配置已更新: ${key} = ${JSON.stringify(value)}`);
   }
@@ -287,9 +288,10 @@ export class ConfigManager {
       throw error;
     }
 
-    // 4. 通知所有相關訂閱者
     for (const [key, { newValue, oldValue }] of Object.entries(validations)) {
-      this.notifySubscribers(key, newValue, oldValue);
+      if (newValue === oldValue) {
+        this.notifySubscribers(key, newValue, oldValue);
+      }
     }
 
     this.log(`批量更新 ${Object.keys(items).length} 個配置`);
@@ -431,22 +433,23 @@ export class ConfigManager {
    */
   processStorageChange(storageKey, oldValue, newValue) {
     const allKeys = getAllConfigKeys();
+    const defaults = getDefaultValues();
 
     // 檢查是否有匹配的配置鍵
     for (const configKey of allKeys) {
       if (configKey === storageKey || configKey.startsWith(storageKey + '.')) {
-        // 更新緩存
-        const currentValue = this.cache.get(configKey);
-
         // 計算正確的 path：
         // - 如果 configKey === storageKey（頂層配置），path 應該是空字符串
         // - 如果 configKey 是嵌套配置（如 'subtitle.primaryLanguage'），path 應該是去掉 'subtitle.' 前綴
         const path = configKey === storageKey ? '' : configKey.replace(storageKey + '.', '');
-        const extractedValue = this.extractNestedValue(newValue, path);
+        const extractedOldValue = this.extractNestedValue(oldValue, path);
+        const extractedNewValue = this.extractNestedValue(newValue, path);
+        const effectiveOldValue = extractedOldValue === undefined ? defaults[configKey] : extractedOldValue;
+        const effectiveNewValue = extractedNewValue === undefined ? defaults[configKey] : extractedNewValue;
 
-        if (extractedValue !== undefined && extractedValue !== currentValue) {
-          this.cache.set(configKey, extractedValue);
-          this.notifySubscribers(configKey, extractedValue, currentValue);
+        this.cache.set(configKey, effectiveNewValue);
+        if (effectiveNewValue !== effectiveOldValue) {
+          this.notifySubscribers(configKey, effectiveNewValue, effectiveOldValue);
         }
       }
     }

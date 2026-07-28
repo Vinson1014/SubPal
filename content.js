@@ -33,65 +33,54 @@
 
   // 初始化 ConfigManager
   async function initializeConfigManager() {
+    // 先直接從 storage 讀取 debugMode，以便早期的 debugLog 能正常工作
     try {
-      // 先直接從 storage 讀取 debugMode，以便早期的 debugLog 能正常工作
-      try {
-        const result = await chrome.storage.local.get('debugMode');
-        if (result.debugMode !== undefined) {
-          debugMode = result.debugMode;
-        }
-      } catch (e) {
-        console.warn('[Content Script] 讀取 debugMode 失敗，使用預設值:', e);
+      const result = await chrome.storage.local.get('debugMode');
+      if (result.debugMode !== undefined) {
+        debugMode = result.debugMode;
       }
+    } catch (error) {
+      console.warn('[Content Script] 讀取 debugMode 失敗，使用預設值:', error);
+    }
 
-      debugLog('開始初始化 ConfigManager...');
+    debugLog('開始初始化 ConfigManager...');
 
-      // 動態導入 ConfigManager 和 getAllConfigKeys
-      const { ConfigManager } = await import(chrome.runtime.getURL('content/system/config/config-manager.js'));
-      const { getAllConfigKeys } = await import(chrome.runtime.getURL('content/system/config/config-schema.js'));
-      // 創建實例
-      configManager = new ConfigManager({ debug: debugMode });
+    const { ConfigManager } = await import(chrome.runtime.getURL('content/system/config/config-manager.js'));
+    const { getAllConfigKeys } = await import(chrome.runtime.getURL('content/system/config/config-schema.js'));
+    configManager = new ConfigManager({ debug: debugMode });
 
-      // 初始化
+    try {
       await configManager.initialize();
-
-      // 訂閱所有配置變更，統一轉發到 page context
-      // 當 Options Page 直接修改 storage 時，ConfigManager 會收到通知
-      // 這裡訂閱所有配置的變更，並轉發為 CONFIG_CHANGED 消息
-      const allConfigKeys = getAllConfigKeys();
-      configManager.subscribe(allConfigKeys, (key, newValue, oldValue) => {
-        debugLog('ConfigManager 配置變更:', key, newValue, oldValue);
-
-        // 轉發 CONFIG_CHANGED 消息到 page context
-        // 利用原本設計好的 messaging system
-        window.dispatchEvent(new CustomEvent('messageFromContentScript', {
-          detail: {
-            message: {
-              type: 'CONFIG_CHANGED',
-              key: key,
-              newValue: newValue,
-              oldValue: oldValue
-            }
-          }
-        }));
-      });
-
-      // 從 ConfigManager 讀取初始 debugMode
-      debugMode = configManager.get('debugMode') || false;
-      debugLog('從 ConfigManager 讀取初始 debugMode:', debugMode);
-
-      // 訂閱 debugMode 變更，保持 content script 的 debugLog 功能同步
-      configManager.subscribe('debugMode', (key, newValue, oldValue) => {
-        debugMode = newValue;
-        debugLog('Content script debugMode 已更新:', oldValue, '->', newValue);
-      });
-
-      debugLog('ConfigManager 初始化完成');
-      return true;
     } catch (error) {
       console.error('[Content Script] ConfigManager 初始化失敗:', error);
       return false;
     }
+
+    const allConfigKeys = getAllConfigKeys();
+    configManager.subscribe(allConfigKeys, (key, newValue, oldValue) => {
+      debugLog('ConfigManager 配置變更:', key, newValue, oldValue);
+      window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+        detail: {
+          message: {
+            type: 'CONFIG_CHANGED',
+            key: key,
+            newValue: newValue,
+            oldValue: oldValue
+          }
+        }
+      }));
+    });
+
+    debugMode = configManager.get('debugMode') || false;
+    debugLog('從 ConfigManager 讀取初始 debugMode:', debugMode);
+
+    configManager.subscribe('debugMode', (key, newValue, oldValue) => {
+      debugMode = newValue;
+      debugLog('Content script debugMode 已更新:', oldValue, '->', newValue);
+    });
+
+    debugLog('ConfigManager 初始化完成');
+    return true;
   }
 
   // 初始化 SubmissionQueueManager
@@ -243,20 +232,7 @@
   // CONFIG_SET 處理
   async function handleConfigSet(messageId, key, value) {
     try {
-      const oldValue = configManager.get(key);
       await configManager.set(key, value);
-
-      // 廣播配置變更到 page context
-      window.dispatchEvent(new CustomEvent('messageFromContentScript', {
-        detail: {
-          message: {
-            type: 'CONFIG_CHANGED',
-            key: key,
-            newValue: value,
-            oldValue: oldValue
-          }
-        }
-      }));
 
       // 回應成功
       window.dispatchEvent(new CustomEvent('responseFromContentScript', {
@@ -284,26 +260,7 @@
   // CONFIG_SET_MULTIPLE 處理
   async function handleConfigSetMultiple(messageId, items) {
     try {
-      const oldValues = {};
-      for (const key of Object.keys(items)) {
-        oldValues[key] = configManager.get(key);
-      }
-
       await configManager.setMultiple(items);
-
-      // 廣播每個配置變更到 page context
-      for (const [key, newValue] of Object.entries(items)) {
-        window.dispatchEvent(new CustomEvent('messageFromContentScript', {
-          detail: {
-            message: {
-              type: 'CONFIG_CHANGED',
-              key: key,
-              newValue: newValue,
-              oldValue: oldValues[key]
-            }
-          }
-        }));
-      }
 
       // 回應成功
       window.dispatchEvent(new CustomEvent('responseFromContentScript', {
