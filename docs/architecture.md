@@ -137,7 +137,9 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 #### Layer 2: Content Script (content.js)
 - **職責**: 橋接擴充功能與頁面
 - **隔離**: 運行在獨立沙箱，無法直接訪問頁面 JavaScript
-- **注入**: 動態注入 Page Context Script
+- **唯一注入所有者**: `content.js` 是 `netflix-page-script.js` 的唯一 physical injector；readiness 成功後才注入 MAIN world 的 `content/index.js`
+- **Page Script readiness marker**: 以 `script[data-subpal-page-script-state]` 保存跨 isolated globals 共用的 physical attempt。成功狀態是 `data-subpal-page-script-state="ready"`，`subpal-page-script-ready` 是相關聯的回應事件；終止重試時狀態為 `failed-terminal`
+- **相關聯握手**: readiness request/response 必須同時匹配 `attemptId`、`probeId`、`deadline` 與 `readyAt`，避免接受前次 attempt、晚到或偽造的 ready 訊號
 
 #### Layer 3: Page Context (content/index.js)
 - **職責**: 核心業務邏輯、UI 管理、字幕處理
@@ -153,6 +155,7 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
   - `confidence: 'medium'` — watch session 具有合理的 playback state（duration > 0, currentTime 合理）
   - `confidence: 'low'` — player-helper-session-fallback 或 first-open-session-fallback
   - `confidence: 'none'` — 無開放播放會話
+  - `selectedSessionReason` current values: `watch-player-api-video-id-match`, `watch-movie-id-match`, `watch-reasonable-playback-state`, `player-helper-session-fallback`, `first-open-session-fallback`, `no-open-playback-session`
 - **診斷快照**: `getDebugSnapshot()` 回傳完整播放狀態（session、track、currentTime、recent events）
 - **trusted watch session**: 僅 sessionId 以 `watch-` 開頭且 confidence ≥ `medium` 且非 fallback 來源才算 trusted
 
@@ -166,12 +169,31 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 
 **職責**: 統一管理所有組件的初始化流程
 
-**初始化順序（8 階段並行優化流程）**:
+**外層 Content Script 啟動閘門**:
+
+```javascript
+1. connectToBackground()
+2. ensureNetflixPageScriptReady()       // 建立共享 readiness Promise 並由 content.js 負責 physical injection
+3. initializeConfigManager()
+4. initializeQueueManagers()            // 失敗只停用離線隊列，不阻斷後續 runtime
+5. await pageScriptReady
+6. startPageContextOnce()                // 注入 MAIN world content/index.js
+7. startIsolatedEndscreenTasksOnce()     // ConfigManager 可用時啟動 isolated owner
+```
+
+啟動失敗矩陣：
+
+- Page Script 進入 `failed-terminal`：MAIN 與 isolated owners 都不啟動，不建立背景重試，保留 Netflix 原生字幕。
+- SubmissionQueueManager 初始化失敗：MAIN 與 isolated owners 仍可啟動。
+- ConfigManager 初始化失敗：Page Script ready 後只啟動 MAIN；沒有可用的 ConfigManager 時不啟動 isolated endscreen owner。
+- 所有啟動入口都以共享 Promise 或 once guard 去重，避免平行建立重複 owner。
+
+**MAIN world InitializationManager 順序（7 階段並行優化流程）**:
 
 ```javascript
 1. initializeMessaging()         // 建立消息通信（必須先完成）
 2. initializeConfigBridge()      // 初始化配置橋接器（必須先完成）
-3. initializePageScript() +      // 注入 Netflix Page Script（與配置並行）
+3. initializePageScript() +      // 只等待既有 Netflix Page Script readiness（與配置並行）
    loadConfiguration()           // 載入配置（與 Page Script 並行）
 4. waitForPlaybackPage()         // 等待用戶進入播放頁面，
                                  // 同時在內部啟動 setupVideoMonitoring()（視頻切換背景監控）
@@ -182,11 +204,12 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 ```
 
 **設計要點**:
-- **階段 3 並行**: Page Script 注入與 Config 載入同時進行，減少等待時間
+- **注入權限集中**: MAIN world 不要求或執行 Page Script 注入；`InitializationManager` 與 `NetflixApiBridge` 只做最多 5 秒的 bounded readiness wait
+- **階段 3 並行**: Page Script readiness wait 與 Config 載入同時進行，減少等待時間
 - **攔截器提前啟動**: 階段 5 中 `checkNetflixAPI()` 立即啟動字幕攔截器，確保 Netflix 預設字幕請求在發生的當下即被攔截
 - **PlaybackContextManager**: 階段 5 中初始化，追蹤播放 session/videoId/track 狀態並作為字幕處理 gate
 - **安全初始化**: SubtitleCoordinator 不依賴語言列表決定生死；Netflix SPA 換片時 player/languages 可能短暫不可讀，由 coordinator 的 soft/hard 分類與背景回升處理
-- **降級模式**: 初始化失敗時嘗試只初始化基本的 DOM 監聽功能
+- **降級模式**: MAIN 元件初始化失敗時可嘗試基本 DOM 監聽；但 Page Script `failed-terminal` 發生在外層閘門，MAIN 不會啟動，因此不建立 DOM fallback
 
 **生命週期管理**:
 - 頁面加載時自動初始化
@@ -220,9 +243,13 @@ messaging.once(type, handler)
 - `QUEUE_*` - 隊列操作（投票、翻譯、事件）
 - `API_*` - API 相關（獲取字幕、提交數據）
 
+`initMessaging()` 以單一 `messagingInitializationPromise` 合併重複呼叫，確保 ConfigBridge 初始化與 window listeners 只建立一次。Messaging System 不提供 Page Script injection API；已移除 `requestPageScriptInjection` 與舊的 `subpal-inject-page-script` / `subpal-request-page-script-injection` 事件。
+
 #### 1.3 Netflix API Bridge (`content/system/netflix-api-bridge.js`)
 
 **職責**: 封裝 Netflix 內部 API 的調用
+
+**Readiness 邊界**: `NetflixApiBridge` 不負責注入 Page Script。它先等待 `content.js` 完成 readiness handshake，再依序檢查 API availability、初始化 player helper 與 subtitle interceptor。
 
 **核心功能**:
 - `getCurrentVideoMetadata()` - 獲取當前影片元數據
@@ -243,6 +270,8 @@ messaging.once(type, handler)
 - **類型安全**: 自動驗證配置值類型
 - **批量操作**: 減少 Storage 訪問次數
 - **扁平化鍵名**: 使用點記法（如 `subtitle.primaryLanguage`）
+- **唯一權威通知**: changed-value write 只由 isolated `ConfigManager` 的 storage change 發布；content script 再轉送單一 `CONFIG_CHANGED` 給 MAIN `ConfigBridge`
+- **Exactly-once 語義**: same-value write 因 Chrome 不產生 storage change，由 `ConfigManager` 明確通知一次；失敗寫入回滾 cache 且不發布通知
 
 ---
 
@@ -294,18 +323,19 @@ const cacheKey = `${text}_${Math.floor(timestamp / 2)}`;
 
 **API 接口**:
 ```javascript
-// 添加項目到隊列
-enqueue(type, data, priority = 'normal')
+// 添加各類項目
+enqueueVote(data)
+enqueueTranslation(data)
+enqueueReplacementEvent(data)
 
-// 獲取隊列狀態
-getQueueStatus(type)
+// 查詢目前所有 pending 項目
+getAllPending()
 
-// 手動觸發同步
-sync()
-
-// 清空隊列
-clear(type)
+// 個別失敗項目的重試由對應 VOTE_RETRY / TRANSLATION_RETRY /
+// REPLACEMENT_EVENT_RETRY message handler 重新排入隊列
 ```
+
+`SubmissionQueueManager` 不提供直接 `sync()`；實際 API 同步由 Background 內部生命週期觸發。
 
 #### 2.3 Bridge Modules（橋接器）
 
@@ -431,6 +461,7 @@ replacementEventBridge.enqueue({
 - FullscreenHandler（全螢幕處理）
 - UIAvoidanceHandler（控制欄閃避）
 - ToastManager（通知）
+- **核心模組**: `UIManager` 會在 `initialize()` 內建立並管理 `SubtitleReplacer`，把字幕替換生命週期收進 UI 協調流程
 
 **原生字幕可見性狀態機**:
 
@@ -474,6 +505,7 @@ UIManager 維護原生 Netflix 字幕的可見性狀態，透過注入/移除 CS
 
 **字幕樣式**:
 - 支援 `fontWeight`（400/700）、`fontPreset`（system/clearSans/serif/code）
+- 支援 glyph text outline 與 `letterSpacing`，分別由 `subtitle.style.primary.*` 與 `subtitle.style.secondary.*` 經由 storage、ConfigBridge、SubtitleStyleManager 傳入 SubtitleDisplay
 - 支援 `styleMode`：`custom`（自訂樣式）、`netflixPreset`（Netflix 原生風格）；另有內部運行時模式 `nativeInherit`（繼承 Netflix 計算樣式，非匯出 schema 值）
 - 支援 `setStyleMode()`、`setDualModeStyles()` 接口
 ```javascript
@@ -579,8 +611,8 @@ ToastManager.info('正在同步數據...');
 **設計要點**:
 - **ConfigBridge 驅動**: 不直接管理配置，只訂閱 ConfigBridge 的樣式配置變更
 - **依賴注入**: `initialize(uiManager)` 接收外部 UIManager 實例
-- **樣式模式**: 支援 `styleMode`（`custom`/`netflixPreset`；`nativeInherit` 為內部運行時模式）、`fontPreset`、`fontWeight`
-- **雙語樣式**: 獨立管理 primary/secondary 兩組樣式配置
+- **樣式模式**: 支援 `styleMode`（`custom`/`netflixPreset`；`nativeInherit` 為內部運行時模式）、`fontPreset`、`fontWeight`、`outlineEnabled`、`outlineWidth`、`outlineColor`、`letterSpacing`
+- **雙語樣式**: 獨立管理 primary/secondary 兩組樣式配置，並把 outline 與 `letterSpacing` 轉成 `SubtitleDisplay` 可直接套用的 legacy style
 - **UI 重建恢復**: 監聽 `UI_COMPONENTS_REINITIALIZED` 事件，在影片切換後重新套用樣式
 
 **樣式應用路徑**:
@@ -589,6 +621,7 @@ ConfigBridge 配置變更 → SubtitleStyleManager.handleStyleChange()
   → applyCurrentStyle()
     → applySingleModeStyle() / applyDualModeStyle()
       → SubtitleDisplay.setSubtitleStyle() / setDualModeStyles()
+        → glyph text outline + `letterSpacing`
 ```
 
 #### 3.9 NetflixPlayerAdapter (`content/ui/netflix-player-adapter.js`)
@@ -676,7 +709,7 @@ ModeDetector.detectInterceptModeStatus()
 **檢測流程**:
 ```javascript
 1. isNetflixPage()                     // 檢查是否在 Netflix 域名
-2. ensurePageScriptInjected()          // 確保 Page Script 已注入
+2. ensurePageScriptInjected()          // 舊方法名；實際只送出最多 1 秒的 PING，不執行注入或 reinjection
 3. checkNetflixAPIAvailability()       // 檢查 Netflix API 可用性
 4. checkPlayerReadiness()              // 檢查播放器準備狀態
 5. checkSubtitleInterceptCapability()  // 檢查字幕攔截功能（語言列表、攔截器活躍度）
@@ -711,7 +744,7 @@ const observer = new MutationObserver((mutations) => {
 **職責**: 攔截 Netflix 的字幕請求，管理 raw TTML 快取、語言獲取與 primary discovery 復原。
 
 **實現原理**:
-1. 注入 Page Script 到 Netflix 頁面
+1. 使用已由 `content.js` 注入且通過 readiness 的 Page Script
 2. 攔截 `XMLHttpRequest` 和 `fetch`
 3. 識別字幕請求（TTML 格式）
 4. 解析字幕數據並通過 postMessage 發送
@@ -887,12 +920,13 @@ const subtitles = SubtitleParser.parse(ttmlString);
 
 **初始化流程**:
 ```javascript
-1. 檢查 Service Worker 是否重啟
-2. 初始化用戶註冊
-3. 設置 JWT 刷新定時器（每 24 小時）
-4. 設置同步定時器（每 5 分鐘）
-5. 監聽消息和連接
-6. 解析 clientVersion（`frontend-{manifest.version}`）供後端 rollout 使用
+1. 建立僅供本次執行期日誌關聯的 Service Worker instance ID（不寫入 storage、不推斷重啟）
+2. 註冊 onInstalled / onStartup、消息、port 與同步 listeners
+3. onInstalled / onStartup 執行舊設定鍵遷移
+4. 檢查 user.userId 與 jwt 是否存在；缺少時才產生 UUID 或呼叫 POST /users
+5. sync module 載入時建立三個每 5 分鐘 alarms，並補跑現存 pending / failed queues
+6. 後續受保護 API 的 401 才觸發 JWT 重新註冊
+7. 解析 clientVersion（`frontend-{manifest.version}`）供後端 rollout 使用
 ```
 
 **生命週期事件**:
@@ -906,23 +940,21 @@ const subtitles = SubtitleParser.parse(ttmlString);
 **核心 API**:
 ```javascript
 // 用戶管理
-registerUser(userId) → { token, user }
-refreshToken(token) → { token }
+registerUser(userId) → POST /users
+fetchUserStats(userId) → GET /users/{id}
 
 // 字幕數據
-fetchSubtitles(videoId, language, startTime, endTime) → [subtitles]
+fetchSubtitles(videoId, language, startTime, endTime) → GET /translations?videoID=...
 
-// 提交數據（可選欄位：slotKey, clientVersion）
+// 提交數據（可選欄位：slotKey, clientVersion, resolutionContext）
 submitVote(voteData) → { success }
   // voteData: { videoID, timestamp, voteType, translationID?,
-  //             originalSubtitle?, slotKey?, clientVersion? }
+  //             originalSubtitle?, slotKey?, resolutionContext?, clientVersion? }
 submitTranslation(translationData) → { success }
   // translationData: { videoId, timestamp, original, translation,
-  //                    languageCode, submissionReason, slotKey?, clientVersion? }
+  //                    languageCode, submissionReason, slotKey?,
+  //                    translationID?, sourceTranslationID?, resolutionContext?, clientVersion? }
 submitReplacementEvents(events) → { success }
-
-// 統計
-fetchUserStats(userId) → { stats }
 ```
 
 **新版 payload 欄位**:
@@ -931,15 +963,19 @@ fetchUserStats(userId) → { stats }
 
 **錯誤處理**:
 ```javascript
-// 401 錯誤自動刷新 Token 並重試
-if (response.status === 401) {
-  await refreshToken();
-  return retryRequest();
+// 每個原始請求最多處理一次 401
+if (response.status === 401 && autoRetryOn401) {
+  if (jwtUsedForRequest === currentStorageJwt) {
+    await refreshJwtTokenOnce(); // concurrent / staggered 401 共用 single-flight Promise
+  }
+  return retryRequestOnce();     // storage 已有較新 JWT 時直接用新值重試
 }
 
 // 請求超時（10 秒）
 const timeout = setTimeout(() => abort(), 10000);
 ```
+
+HTTP error 以 non-enumerable `jwtUsedForRequest` metadata 保存該 request 實際使用的 JWT，避免日誌序列化敏感 Token。`autoRetryOn401=false` 時不刷新也不重試；retry 再次得到 401 時直接失敗，不形成無限循環。
 
 #### 6.3 Sync Module (`background/sync.js`)
 
@@ -956,17 +992,22 @@ const timeout = setTimeout(() => abort(), 10000);
 
 **重試策略**:
 - 最大重試次數: 3 次
-- 重試間隔: 指數退避（1s, 2s, 4s）
+- 失敗項目由 `retryFailedVotes()`、`retryFailedTranslations()`、`retryFailedReplacementEvents()` 重新排程，沒有固定指數退避序列
 - 永久錯誤標記（4xx 錯誤，除了 401）
+
+**觸發邊界**:
+- 一般 port 不再接受 `SYNC_DATA`、`SYNC_VOTES`、`SYNC_TRANSLATIONS`、`SYNC_REPLACEMENT_EVENTS`、`GET_SYNC_STATUS` 或三個 `TRIGGER_*` direct-sync commands。
+- 對外只保留 Options 使用的 `RETRY_FAILED_VOTES`、`RETRY_FAILED_TRANSLATIONS`、`RETRY_FAILED_REPLACEMENT_EVENTS`。
+- `triggerVoteSync()`、`triggerTranslationSync()`、`triggerReplacementEventSync()` 仍是 sync module 的內部 exported triggers，供 module-load、storage listener、alarms 與 startup 路徑使用。
 
 #### 6.4 SyncListener (`background/sync-listener.js`)
 
-**職責**: 監聽來自 Content Script 的同步請求
+**職責**: 監聽 `voteQueue`、`translationQueue`、`replacementEventQueue` 的 storage 變化，並在 500ms 防抖後直接觸發對應同步
 
-**處理的消息**:
-- `QUEUE_SYNC` - 手動觸發同步
-- `QUEUE_STATUS` - 獲取隊列狀態
-- `FORCE_SYNC` - 強制立即同步
+**觸發方式**:
+- `chrome.storage.onChanged` 監聽 local storage
+- 新增待同步項目時以 `debouncedTriggerSync()` 排程 `triggerVoteSync()`、`triggerTranslationSync()` 或 `triggerReplacementEventSync()`
+- Service Worker 啟動時會先檢查現存隊列，再補跑一次同步
 
 ---
 
@@ -1001,8 +1042,16 @@ const timeout = setTimeout(() => abort(), 10000);
 └─────────────────────────────────────────────────────────────────┘
 
 1. 配置數據流：
-   Options Page ──write──► chrome.storage.local ──watch──► ConfigManager
-                                                           └──► 通知所有訂閱者
+   Options / Popup ConfigManager ────────────────┐
+                                                 ▼
+   MAIN ConfigBridge ──CONFIG_SET────────► isolated ConfigManager ──write──► chrome.storage.local
+                                                 ▲                              │
+                                                 └──── storage.onChanged ───────┘
+                                                 │
+                                                 └── single CONFIG_CHANGED ──► MAIN ConfigBridge ──► MAIN subscribers
+
+   changed-value write 由 storage event 發布；same-value write 由 isolated ConfigManager 補發一次，
+   `ConfigBridge.set()` / `setMultiple()` 不做 optimistic cache mutation。
 
 2. 字幕數據流（正常路徑 — 含 PlaybackContext gating）：
    Netflix CDN ──intercept──► Page Script (攔截 + session 檢查)
@@ -1068,10 +1117,14 @@ const event = new CustomEvent('messageToContentScript', {
 document.dispatchEvent(event);
 
 // Content Script → Page Context
-const event = new CustomEvent('messageToPageContext', {
-  detail: { type: 'API_RESPONSE', data: {...} }
-});
-document.dispatchEvent(event);
+window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+  detail: { message: {...} }
+}));
+
+// Content Script → Page Context（回應）
+window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+  detail: { messageId: 'msg-123', response: {...} }
+}));
 ```
 
 #### 2. Content Script ↔ Background
@@ -1080,7 +1133,7 @@ document.dispatchEvent(event);
 
 ```javascript
 // 建立連接
-const port = chrome.runtime.connect({ name: 'subpal-port' });
+const port = chrome.runtime.connect({ name: 'subtitle-assistant-channel' });
 
 // Content Script → Background
 port.postMessage({ type: 'FETCH_SUBTITLES', data: {...} });
@@ -1100,13 +1153,15 @@ port.onMessage.addListener((message) => {
 ```javascript
 // Page Context → Page Script
 window.postMessage({
-  source: 'subpal-page-context',
+  source: 'subpal-content-script',
+  target: 'subpal-page-script',
   type: 'GET_PLAYER_STATE'
 }, '*');
 
 // Page Script → Page Context
 window.postMessage({
   source: 'subpal-page-script',
+  target: 'subpal-content-script',
   type: 'PLAYER_STATE',
   data: {...}
 }, '*');
@@ -1388,29 +1443,37 @@ function renderBilingualSubtitle(primary, secondary, region) {
 ```javascript
 // chrome.storage.local 存儲結構
 {
-  // 隊列數據
-  'queue:vote': [
+  // 隊列與歷史數據
+  voteQueue: [
     {
       id: 'uuid-v4',
-      data: { videoId, timestamp, voteType, ... },
+      data: { videoID, timestamp, voteType, ... },
       status: 'pending',  // pending | syncing | completed | failed
       retryCount: 0,
       createdAt: 1234567890,
       updatedAt: 1234567890
     }
   ],
-  'queue:translation': [...],
-  'queue:replacementEvent': [...],
-  
-  // 配置數據
-  'config:debugMode': false,
-  'config:dualModeEnabled': true,
-  'config:userId': 'user-uuid',
-  
-  // 用戶數據
-  'user:userId': 'user-uuid',
-  'user:jwt': 'eyJhbGciOiJIUzI1NiIs...',
-  'user:lastJwtRefresh': 1234567890
+  voteHistory: [...],
+  translationQueue: [...],
+  translationHistory: [...],
+  replacementEventQueue: [...],
+  replacementEventHistory: [...],
+  voteStateByTranslation: {...},
+
+  // 配置根
+  debugMode: false,
+  isEnabled: true,
+  crowdsourcing: { endscreenTasksEnabled: true },
+  api: { baseUrl: 'https://subnfbackend.zeabur.app' },
+  user: { userId: 'user-uuid' },
+  jwt: 'eyJhbGciOiJIUzI1NiIs...',
+  video: {
+    currentVideoId: '80234304',
+    currentVideoTitle: 'Stranger Things',
+    currentVideoLanguage: 'en'
+  },
+  subtitle: {...}
 }
 ```
 
@@ -1419,19 +1482,18 @@ function renderBilingualSubtitle(primary, secondary, region) {
 #### 4.1 認證流程
 
 ```
-1. 首次安裝
-   └─► 生成 userId (UUID v4)
-   └─► 調用 POST /users 註冊
-   └─► 保存 JWT 到 storage
+1. onInstalled / onStartup credential presence bootstrap
+   └─► 讀取 user.userId 與 jwt
+   └─► 缺少 user.userId：生成 UUID v4 並保存至 user.userId
+   └─► 缺少 jwt：使用現有或新建 userId 呼叫 POST /users，保存 jwt
+   └─► 兩者已存在：不檢查有效期、不主動重新註冊
 
-2. 瀏覽器重啟
-   └─► 讀取 storage 中的 userId
-   └─► 檢查 JWT 是否過期
-   └─► 如果過期，調用 POST /users/refresh 刷新
-
-3. JWT 刷新
-   └─► 每 24 小時自動刷新
-   └─► 401 錯誤時自動刷新並重試
+2. 受保護 API 回傳 401
+   └─► 比較 request 實際使用的 JWT 與目前 storage JWT
+   └─► storage 已有較新 JWT：直接使用新值重試一次
+   └─► JWT 尚未更新：以既有 user.userId 重新呼叫 POST /users
+   └─► concurrent / staggered 401 共用單一 in-flight refresh Promise
+   └─► refresh settle 後清除共享 Promise，讓真正的新 401 可再次刷新
 ```
 
 #### 4.2 JWT 存儲
@@ -1439,22 +1501,166 @@ function renderBilingualSubtitle(primary, secondary, region) {
 ```javascript
 // 存儲結構
 {
-  userId: 'uuid-v4',
-  jwt: 'eyJhbGciOiJIUzI1NiIs...',
-  lastJwtRefresh: 1234567890
+  user: { userId: 'uuid-v4' },
+  jwt: 'eyJhbGciOiJIUzI1NiIs...'
 }
 
-// 刷新邏輯
-async function refreshTokenIfNeeded() {
-  const lastRefresh = await getLastJwtRefresh();
-  const now = Date.now();
-  const oneDay = 24 * 60 * 60 * 1000;
-  
-  if (now - lastRefresh > oneDay) {
-    await refreshToken();
+// 401 刷新去重
+function refreshJwtTokenOnce() {
+  if (!jwtRefreshPromise) {
+    jwtRefreshPromise = refreshJwtToken().finally(() => {
+      jwtRefreshPromise = null;
+    });
+  }
+  return jwtRefreshPromise;
+}
+```
+
+目前沒有 `lastJwtRefresh`、固定 24 小時 alarm 或啟動時 expiry probe。JWT 的有效性由實際 API 401 驅動處理。
+
+---
+
+### 5. 片尾字幕任務眾包
+
+#### 5.1 整體設計
+
+片尾字幕任務眾包功能只在 Netflix 可判定為 eligible end-screen 的畫面出現，針對「剛看完的影片」或其固定片尾狀態詢問使用者是否願意改善被社群標記有問題的官方字幕或候選翻譯。整個功能從後端計算、觸發時機、UI 顯示到動作提交都採用分層隔離設計，避免在正常播放期間干擾觀影。
+
+核心原則：
+
+- **後端即時計算**：沒有新增的持久化任務 collection，任務從既有 `Vote` 與 `AlternativeTranslation` 資料當場算出借以反映最新社群訊號。
+- **官方字幕與候選翻譯語義分明**：官方字幕任務的 `translationID` 為 `null`，定位依賴 `videoID + slotKey/timestamp/originalSubtitle`；候選翻譯任務則帶有 `translationID` 與 `suggestedSubtitle`。
+- **isolated world 專屬所有權**：片尾偵測、任務請求、面板渲染與動作處理全部放在獨立的 isolated execution world，不透過公開 DOM event 暴露 privileged request/response。
+- **Boot readiness 與 runtime messaging 分離**：isolated `content.js` 擁有 Netflix Page Script 的 physical injection 與 correlated readiness handshake；字幕主應用進入 MAIN 後只使用既有 Page Script 的 runtime command/response。Page world 只額外暴露固定的 guarded quick-jump 命令，不自動 seek。
+- **可逆的永久停用**：使用者可從面板或設定頁關閉片尾字幕任務，關閉後 startup、偵測與網路請求全部停止，且可隨時重新啟用。
+
+固定 taxonomy 與 runtime truth：
+
+- `type-a-next-episode`：有下一集的 end-screen。runtime observation 以這個 label 表示，畫面上的片尾任務 card 只在這個狀態啟用。
+- `type-b`：沒有下一集的 shared label。runtime observation 也會使用這個 label，作為推薦流程的共同外層名稱，而不是再使用舊式拆分命名。
+- `state-a-recommendation-countdown`：Type B 的倒數階段，原影片 mini player 仍在，推薦海報與倒數同時可見。
+- `state-b-recommendation-trailer`：Type B 的推薦預告階段，原影片 mini player 已離開，畫面轉為播放推薦預告。
+
+目前 runtime 只觀察 `type-a-next-episode` 與 shared `type-b` label。Type B 的 card acquisition 與 rendering 已刻意停用，因為推薦流程的 UX 仍未定案，現在不把它當成可啟用的產品路徑。
+
+#### 5.2 後端計算任務 API
+
+路由：`GET /crowdsourcing-tasks`
+
+查詢參數：
+
+| 參數 | 說明 |
+|------|------|
+| `videoID` | 必要，Netflix 影片 ID |
+| `languageCode` | 必要，API 語言代碼（如 `zh-TW`） |
+| `limit` | 可選，預設 5，最大 20 |
+
+任務物件模型：
+
+```javascript
+{
+  taskID: 'official:netflix-81234567:zh-TW:slot-000124',
+  targetType: 'official-subtitle',        // 'official-subtitle' | 'candidate-translation'
+  action: 'submit-improvement',           // 'submit-improvement' | 'review-candidate' | 'submit-better-candidate'
+  videoID: 'netflix-81234567',
+  translationID: null,                    // 官方字幕為 null；候選翻譯為 UUID
+  timestamp: 124.5,                       // 字幕開始時間（秒）
+  timecode: '02:04',
+  slotKey: 'slot-000124',
+  languageCode: 'zh-TW',
+  originalSubtitle: '我會在十分鐘後回來。',
+  suggestedSubtitle: null,                // 官方字幕為 null；候選翻譯為建議文字
+  score: 72,
+  rankReasons: ['no-approved-candidate', 'has-slot-key'],
+  resolution: {
+    kind: 'official-slot',                // 'official-slot' | 'candidate-translation'
+    requiresTranslationID: false,
+    voteTargetType: 'official-subtitle'
+  },
+  userState: {
+    hasVoted: false,
+    voteState: 'none',                    // 'like' | 'dislike' | 'none'
+    isOwnContribution: false,
+    excludedReason: null
   }
 }
 ```
+
+官方字幕任務來源：
+
+- 既有 `Vote` 中 `voteTargetType: 'official-subtitle'` 且 `voteType: 'downvote'` 的紀錄。
+- 使用 `slotKey` 定位；對於沒有 `slotKey` 的 legacy 資料則用 `videoID + originalSubtitle + timestamp` 比對。
+- 若同一 slot 已有已核准的候選翻譯，則抑制該官方任務。
+
+候選翻譯任務來源：
+
+- `AlternativeTranslation` 中 `status: 'pending'` 且存在負評或接近拒絕門檻的紀錄。
+- 排除使用者自己的貢獻與已經投過票的項目。
+- 支援 `review-candidate`（需要更多評價）或 `submit-better-candidate`（提交更好的候選翻譯）。
+
+背景腳本在 `chrome.runtime.onMessage` 中承接 `GET_CROWDSOURCING_TASKS` 並執行下列邊界檢查：
+
+- 發送者必須是同一擴充功能實例的 Netflix `https://*.netflix.com` content script。
+- 發送者網址必須符合 `/watch/<videoID>` 且與請求 `videoID` 一致。
+- `limit` 必須等於 `5`。
+- `languageCode` 必須在支援清單內。
+
+一般長連接 port 不處理任務查詢，避免 generic route 被濫用。
+
+#### 5.3 Isolated World 所有權
+
+`content/system/isolated-endscreen-tasks.js` 是片尾任務的單一所有者，負責：
+
+1. **啟動門檻**：讀取 `crowdsourcing.endscreenTasksEnabled`；若為 `false` 則完全不初始化，產生零偵測與零網路請求。
+2. **播放上下文**：可選擇持有獨立的 `PlaybackContextManager` 實例，透過診斷快照取得真實的 `videoId + watch-* sessionId + epoch`。推薦預覽切成 `background-*` session 時，只沿用同一路由、videoId 相符的最後可信 watch context，不把推薦影片歸為原影片任務。
+3. **片尾偵測**：`EndscreenSignalAdapter` 監聽 DOM 與 media 事件。runtime 會把 `type-a-next-episode` 視為 Type A，並把 `type-b` 視為共享推薦流程 label。Type B 只保留結構觀察，不啟動 card acquisition 或 rendering。`state-a-recommendation-countdown` 以同一個 `watch-video` 下可見的 `background-video-container`、`promoted-video`、`postplay-background-play` 與 shared recommendation shell DOM 為結構證據，允許倒數期間的 paused media；`state-b-recommendation-trailer` 則代表預告已接手播放。
+4. **去抖與一次性**：`EndscreenTaskController` 以 `videoId|sessionId|epoch` 為 key 記錄 `lastFinishedContexts`，每次符合條件的片尾只觸發一次任務請求。
+5. **面板與動作**：`EndscreenTaskPanel` 渲染任務卡片；`EndscreenActionCoordinator` 處理投票、提交與 timecode 跳轉。僅 submit、vote 與 better-translation 路徑攜帶 `resolutionContext`（`taskID`、`targetType`、`action`、`slotKey`、`timestamp`）；quick-jump 使用預期的 `videoId`/`sessionId`/`epoch` 加上 trusted-click 請求封包，不帶 `resolutionContext`。
+6. **生命週期清理與可見 ownership**：尚未顯示的 acquisition 仍可因 `ENDSCREEN_INACTIVE` 被取消並拒絕晚到的任務；但同一 `/watch/<videoId>` 與同一 active video 上已可見的卡片，必須保留其 DOM、pending action 與 action controller。一般 inactive 訊號經 500ms 重新確認時，若 shared recommendation shell DOM 仍存在則保留面板；同 route/video 的短暫 inactivity 與 seek aftermath 也不會隱藏或取消已可見卡片。硬 teardown 僅由明確 X 關閉、成功 opt-out、route/video/next-episode 變更、離開 `/watch`、`cleanup()` 或 `dispose()` 觸發。`VIDEO_ID_CHANGED` 會以事件中的純數字 video ID 立即失效舊卡片，不依賴 SPA URL 已先完成更新；稍後 URL 收斂時維持冪等，不重複 teardown。
+
+Isolated world 與 MAIN world 的分工：
+
+| 職責 | Isolated / Content Script | MAIN World |
+|------|----------------|------------|
+| Netflix Page Script physical injection / boot readiness | `content.js` 負責 | 只等待既有 readiness，不注入 |
+| 字幕 runtime command / response | 不負責 | 負責 |
+| 片尾 DOM 偵測、任務請求、面板渲染 | 負責 | 不負責 |
+| 提交 / 投票動作 | 負責 | 不負責 |
+| Netflix player seek | 發出 guarded 命令 | page script 執行並驗證 |
+
+#### 5.4 MAIN/Page World 的 Guarded Quick-Jump
+
+Timecode 跳轉是唯一需要 MAIN/page world 參與的片尾任務行為，且受到多層保護：
+
+1. **使用者點擊唯一觸發**：只有真正的使用者點擊 `.subpal-endscreen-timecode` 才會在 page script 中建立 one-shot latch；合成點擊、直接 postMessage、過期或重複請求都會被忽略。
+2. **信任上下文比對**：命令攜帶預期的 `videoId`、`sessionId`、`epoch`、`targetTimestamp`；page script 驗證當前 context 與預期一致才繼續。
+3. **秒轉毫秒只做一次**：任務的 `timestamp` 以秒為單位，在 `videoPlayer.seek(ms)` 前於 page script 內乘以 `1000` 並 clamp 到目前 duration。
+4. **有界驗證**：seek 前後進行身份與時間收斂檢查，若影片切換、session 不符或時間未收斂則 fail closed。
+5. **原生播放器 UI 還原**：seek 成功後，若 Netflix 進入 minimized end-screen 導致控制項不可用，page script 會在預期 player 容器內尋找 credits 控制鈕並點擊一次。驗證只接受同一個唯一預期 player 內可見且 owned 的 `[data-uia="controls-standard"]`、timeline、play/pause control，或保留的 legacy `[data-uia="player-controls"]` fallback，作為恢復成功證據；其他 player 的全域控制項不能證明成功。若無法安全還原則回傳 `partial` 狀態並讓使用者使用原生控制。
+
+Quick-jump 是獨立於提交與投票的動作：它只 dispatch `jump-to-timecode`，不提交翻譯、不投票，也不攜帶 submit/vote 用的 `resolutionContext`。面板上的 `跳至 HH:MM` 仍使用 native button 與可信使用者點擊/播放 context guard；不會因 seek 自動關閉卡片。
+
+#### 5.5 可逆的永久停用
+
+設定鍵：`crowdsourcing.endscreenTasksEnabled`（預設 `true`）。
+
+停用機制：
+
+- 面板提供「不再顯示字幕任務」按鈕，點擊後出現確認對話框說明「之後可在 SubPal 設定中重新啟用」。
+- 確認後寫入 `crowdsourcing.endscreenTasksEnabled = false`，`IsolatedEndscreenTasks` 會立即清理偵測器、面板與 pending 動作。
+- 設定頁提供對應的核取方塊，可隨時重新啟用。
+- 停用狀態下不會初始化 `EndscreenSignalAdapter`，也不會發出 `GET_CROWDSOURCING_TASKS` 請求。
+
+#### 5.6 面板佈局與回應式行為
+
+`EndscreenTaskPanel` 目前只啟用 Type A-specific 的面板定位，固定於播放器左下角，避開 Netflix 主要的「下一集」CTA；Type B 的布局仍停用且未解決：
+
+- 預設 `left: 24px`；最大寬度 `min(380px, calc(100vw - 48px))`；最小寬度 `min(280px, calc(100vw - 48px))`。
+- 窄 viewport（寬度 <= 640px）時底部提高，避免覆蓋行動版控制列。
+- `跳至 HH:MM` 是 action bar 前的 full-width quiet native button；timestamp 缺失、負值或非有限時 disabled。`下一題` 僅在兩個以上任務時顯示，採 modulo 循環並在正常/回繞後把 focus 還給新按鈕；單一任務省略此控制。loading 僅 disable next/action controls，success 或 error 會重新啟用。
+- `提交翻譯` 或候選任務的 vote controls 依任務類型保留 primary action hierarchy，與次要動作保持 `8px` 間距；不渲染舊的 not-now/skip control。現階段啟用的 panel placement 只針對 Type A，Type B layout 仍停用且未定案。
+- 面板使用 `box-sizing: border-box`、`overflow: hidden`、圓角與 backdrop blur，確保在 390px 寬度下仍完整位於視口內（左邊界 24px、右邊界不低於 24px）。
+- 所有任務文字皆透過 `textContent` 寫入，不使用 `innerHTML`，防止字幕內容中的惡意標記被執行。
 
 ---
 
@@ -1485,12 +1691,20 @@ export const CONFIG_SCHEMA = {
       primary: {
         fontSize:      { type: 'number', default: 55 },
         fontWeight:    { type: 'string', default: '700' },        // '400' | '700'
+        outlineEnabled: { type: 'boolean', default: false },
+        outlineWidth:   { type: 'number', default: 2 },
+        outlineColor:   { type: 'string', default: '#000000' },
+        letterSpacing:  { type: 'number', default: 0 },
         textColor:     { type: 'string', default: '#ffffff' },
         backgroundColor: { type: 'string', default: 'rgba(0,0,0,0.6)' }
       },
       secondary: {
         fontSize:      { type: 'number', default: 24 },
         fontWeight:    { type: 'string', default: '400' },
+        outlineEnabled: { type: 'boolean', default: false },
+        outlineWidth:   { type: 'number', default: 2 },
+        outlineColor:   { type: 'string', default: '#000000' },
+        letterSpacing:  { type: 'number', default: 0 },
         textColor:     { type: 'string', default: '#ffff00' },
         backgroundColor: { type: 'string', default: 'rgba(0,0,0,0.6)' }
       },
@@ -1519,6 +1733,8 @@ export const CONFIG_SCHEMA = {
 
 **字重選項**: `400`（一般）、`700`（粗體）
 
+**樣式流向**: Options 寫入 storage 後，isolated ConfigManager 發布 authoritative `CONFIG_CHANGED`，MAIN ConfigBridge 才更新 `subtitle.style.primary.*` 與 `subtitle.style.secondary.*` cache；SubtitleStyleManager 接著組合 glyph text outline 與 `letterSpacing`，最後下發給 SubtitleDisplay 套用到單語與雙語字幕。
+
 ### 2. 配置管理器
 
 #### 2.1 API
@@ -1537,12 +1753,12 @@ await configManager.setMultiple({
 });
 
 // 訂閱配置變更
-configManager.subscribe('subtitle.dualModeEnabled', (newValue, oldValue) => {
+const unsubscribe = configManager.subscribe('subtitle.dualModeEnabled', (key, newValue, oldValue) => {
   console.log('雙語模式變更:', oldValue, '→', newValue);
 });
 
 // 取消訂閱
-configManager.unsubscribe('subtitle.dualModeEnabled', callback);
+unsubscribe();
 
 // 重置為默認值
 await configManager.reset('subtitle.dualModeEnabled');
@@ -1554,34 +1770,26 @@ const allConfigs = await configManager.getAll();
 #### 2.2 訂閱機制
 
 ```javascript
-class ConfigManager {
-  constructor() {
-    this.subscribers = new Map(); // key -> Set(callbacks)
-    this.cache = new Map();       // 緩存
-    
-    // 監聽 storage 變化
-    chrome.storage.onChanged.addListener((changes) => {
-      for (const [key, change] of Object.entries(changes)) {
-        this.notifySubscribers(key, change.newValue, change.oldValue);
-      }
-    });
-  }
-  
-  subscribe(key, callback) {
-    if (!this.subscribers.has(key)) {
-      this.subscribers.set(key, new Set());
-    }
-    this.subscribers.get(key).add(callback);
-  }
-  
-  notifySubscribers(key, newValue, oldValue) {
-    const callbacks = this.subscribers.get(key);
-    if (callbacks) {
-      callbacks.forEach(cb => cb(newValue, oldValue));
-    }
-  }
-}
+ConfigManager.set(key, value)
+  → validation
+  → optimistic isolated cache update
+  → storage write
+  → changed value: storage.onChanged 展開 root/leaf 並發布通知
+  → same value: ConfigManager 明確發布一次通知
+
+storage.onChanged(oldRoot, newRoot)
+  → 依 schema 展開所有受影響 leaf keys
+  → root deletion / partial replacement 的缺值套用 schema default
+  → 先更新 cache，再以 callback(key, newValue, oldValue) 通知真正改變的 leaf
+
+ConfigBridge.set(key, value)
+  → CONFIG_SET request
+  → 等待 isolated ConfigManager 完成 write
+  → 不更新 MAIN cache
+  → 收到 authoritative CONFIG_CHANGED 後才更新 cache 並以 callback(newValue) 通知
 ```
+
+`setMultiple()` 遵守相同契約：changed keys 等待 storage event，same-value keys 各發布一次；validation 或 storage failure 會回滾全部 isolated cache，並發布零通知。單一 subscriber 拋錯不會阻斷其他 subscriber。
 
 ### 3. 配置持久化
 
@@ -1616,23 +1824,27 @@ class StorageAdapter {
 ### 4. 使用示例
 
 ```javascript
-// 在 UI 組件中使用配置
+// MAIN UI 組件透過 ConfigBridge 使用配置
 class SubtitleDisplay {
   constructor() {
-    // 訂閱配置變更
-    configManager.subscribe('subtitle.dualModeEnabled', (enabled) => {
+    this.unsubscribeDualMode = configBridge.subscribe('subtitle.dualModeEnabled', (enabled) => {
       this.toggleDualMode(enabled);
     });
-    
-    configManager.subscribe('style.primary.fontSize', (size) => {
-      this.updatePrimaryFontSize(size);
+
+    this.unsubscribeStyleMode = configBridge.subscribe('subtitle.style.mode', (mode) => {
+      this.updateStyleMode(mode);
     });
   }
-  
-  async initialize() {
+
+  initialize() {
     // 獲取初始配置
-    const dualMode = await configManager.get('subtitle.dualModeEnabled');
+    const dualMode = configBridge.get('subtitle.dualModeEnabled');
     this.toggleDualMode(dualMode);
+  }
+
+  cleanup() {
+    this.unsubscribeDualMode?.();
+    this.unsubscribeStyleMode?.();
   }
 }
 ```
@@ -1675,8 +1887,8 @@ class MyNewComponent {
   }
 }
 
-// 在 UIManager 中註冊
-UIManager.registerComponent('myNewComponent', myNewComponent);
+    // 在 UIManager 內以協調流程接上新元件
+    myUiManager.attachComponent('myNewComponent', myNewComponent);
 ```
 
 #### 2.2 添加新的配置項
@@ -1717,7 +1929,7 @@ if (message.type === 'MY_NEW_ENDPOINT') {
 
 ```javascript
 // 在 Options 頁面開啟，或在 Console 執行：
-chrome.storage.local.set({ 'system.debugMode': true });
+chrome.storage.local.set({ debugMode: true });
 ```
 
 #### 3.2 查看日誌
@@ -1747,7 +1959,7 @@ console.log('[SubPal][ConfigManager]', 'Config changed', { key, newValue });
 
 #### 4.1 字幕不顯示
 
-1. 檢查 `system.isEnabled` 是否為 true
+1. 檢查 `isEnabled` 是否為 true
 2. 檢查 Netflix 是否啟用了字幕
 3. 查看 Console 是否有錯誤日誌
 4. 嘗試重新載入頁面
@@ -1781,6 +1993,9 @@ console.log('[SubPal][ConfigManager]', 'Config changed', { key, newValue });
 - `content/system/initialization-manager.js`
 - `content/system/messaging.js`
 - `content/system/netflix-api-bridge.js`
+- `content/system/isolated-endscreen-tasks.js`：片尾任務 isolated world 所有者（偵測/請求/面板/動作）
+- `content/system/endscreen-action-coordinator.js`：片尾任務動作協調器（投票/提交/timecode 跳轉）
+- `content/system/crowdsourcing-task-client.js`：片尾任務 runtime.sendMessage 客戶端
 - `content/system/config/config-schema.js`
 - `content/system/config/config-manager.js`
 - `content/system/config/config-bridge.js`
@@ -1794,6 +2009,8 @@ console.log('[SubPal][ConfigManager]', 'Config changed', { key, newValue });
 - `content/core/translation-bridge.js`
 - `content/core/replacement-event-bridge.js`
 - `content/core/video-info.js`
+- `content/core/endscreen-signal-adapter.js`：片尾訊號偵測（DOM + media + Netflix UI 標記）
+- `content/core/endscreen-task-controller.js`：片尾任務觸發控制器（context key、去抖、一次性請求）
 
 #### UI 層
 - `content/ui/ui-manager-new.js`
@@ -1801,6 +2018,7 @@ console.log('[SubPal][ConfigManager]', 'Config changed', { key, newValue });
 - `content/ui/subtitle-style-manager.js` — 樣式管理器（ConfigBridge 驅動、UI 重建恢復）
 - `content/ui/interaction-panel.js`
 - `content/ui/submission-dialog.js`
+- `content/ui/endscreen-task-panel.js`：片尾任務面板（時間碼、原字幕、候選翻譯、CTA、停用確認）
 - `content/ui/fullscreen-handler.js`
 - `content/ui/ui-avoidance-handler.js`
 - `content/ui/toast-manager.js`
@@ -1831,14 +2049,21 @@ console.log('[SubPal][ConfigManager]', 'Config changed', { key, newValue });
 #### 後端 API 端點
 
 ```
-POST   /users              # 註冊新用戶
-POST   /users/refresh      # 刷新 JWT
-GET    /subtitles          # 獲取字幕翻譯
-POST   /votes              # 提交投票
-POST   /translations       # 提交翻譯
-POST   /replacement-events # 提交替換事件（批量）
-GET    /users/{id}/stats   # 獲取用戶統計
+POST   /users               # 註冊新用戶
+GET    /users/{id}          # 獲取用戶統計
+GET    /translations?videoID=...  # 獲取字幕翻譯
+GET    /crowdsourcing-tasks  # 獲取片尾眾包字幕任務
+POST   /votes               # 提交投票
+    PUT /votes/state           # 更新投票狀態
+POST   /translations        # 提交翻譯
+POST   /replacement-events  # 提交替換事件（批量）
 ```
+
+### D. 驗證與診斷債
+
+- 文件契約檢查使用 `tests/architecture-documentation-contract.test.mjs`，對照目前 source-backed 字串與文檔內容。
+- Node 測試命令是 `node --experimental-vm-modules --test tests/*.test.mjs`。
+- 仍需 live trace 的診斷債主要在 Netflix 播放會話切換、`subpal-page-script-ready` 失敗重試，以及片尾任務 Type B 的停用路徑，文件只保留現況描述，不把未驗證的推測寫成結論。
 
 ### C. 第三方依賴
 
@@ -1848,7 +2073,6 @@ GET    /users/{id}/stats   # 獲取用戶統計
 - `chrome.storage.local` - 本地存儲
 - `chrome.runtime` - 擴充功能運行時
 - `chrome.alarms` - 定時任務
-- `chrome.tabs` - 標籤頁管理
 
 ---
 
