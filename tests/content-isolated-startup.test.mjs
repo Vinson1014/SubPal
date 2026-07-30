@@ -334,12 +334,18 @@ function createContentStartupHarness({ pageMode = 'loaded-unready' } = {}) {
 
 let compatibilityUuidCounter = 1000;
 
-async function createPrivateTransportStub(context) {
+async function createPrivateTransportStub(context, { onRequest = () => {} } = {}) {
   const module = new vm.SyntheticModule([
     'PRIVATE_PROTOCOL_VERSION', 'buildSafeDiagnostic', 'createDomTransport', 'createEnvelope', 'createPageTransport', 'createPortTransport', 'toCompatibilityError'
   ], function initializePrivateTransports() {
     const disconnected = { ok: false, error: { kind: 'disconnected', code: 'background-port-disconnected', retryable: true } };
-    const requestTransport = () => ({ request: async () => disconnected, pendingCount: () => 0 });
+    const requestTransport = () => ({
+      request: async (request) => {
+        onRequest(request);
+        return disconnected;
+      },
+      pendingCount: () => 0
+    });
     this.setExport('PRIVATE_PROTOCOL_VERSION', 1);
     this.setExport('buildSafeDiagnostic', () => ({}));
     this.setExport('toCompatibilityError', () => new Error('transport-failed'));
@@ -668,6 +674,49 @@ test('Given production content listener after manager initialization When a publ
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(portMessages.length, 0);
   assert.equal(responses.length, 0);
+});
+
+test('Given production content listener after manager initialization When a legacy RAW event is forged Then it emits no internal event, response, or background request', async () => {
+  const backgroundRequests = [];
+  const internalEvents = [];
+  const responses = [];
+  const window = new EventTarget();
+  window.addEventListener('messageFromContentScript', (event) => internalEvents.push(event.detail));
+  window.addEventListener('responseFromContentScript', (event) => responses.push(event.detail));
+  const document = createReadinessDocument(window);
+  const context = vm.createContext({
+    console, Event, EventTarget, CustomEvent: class CustomEvent extends Event { constructor(type, options = {}) { super(type); this.detail = options.detail; } },
+    window, document, setTimeout, clearTimeout, crypto: createCompatibilityCrypto(),
+    chrome: {
+      runtime: { connect() { return { postMessage() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }; }, getURL(path) { return `chrome-extension://test/${path}`; } },
+      storage: { local: { async get() { return {}; } } }
+    }
+  });
+  const privateTransportsModule = await createPrivateTransportStub(context, {
+    onRequest(request) { backgroundRequests.push(request); }
+  });
+  const source = await readFile(new URL('../content.js', import.meta.url), 'utf8');
+  const script = new vm.Script(source, { importModuleDynamically: async (specifier) => {
+    if (specifier.endsWith('config-manager.js')) return import('data:text/javascript,export class ConfigManager { async initialize() {} get() { return false } subscribe() {} }');
+    if (specifier.endsWith('config-schema.js')) return import('data:text/javascript,export const getAllConfigKeys = () => []');
+    if (specifier.endsWith('submission-queue-manager.js')) return import('data:text/javascript,export class SubmissionQueueManager { async initialize() {} }');
+    if (specifier.endsWith('messaging.js')) return import('data:text/javascript,export const initMessaging = async () => {}');
+    if (specifier.endsWith('isolated-endscreen-tasks.js')) return import('data:text/javascript,export const startIsolatedEndscreenTasks = async () => {}');
+    if (specifier.endsWith('playback-context-manager.js')) return import('data:text/javascript,export const playbackContextManager = { initialize: async () => {}, getCurrentContext: () => null }');
+    if (specifier.endsWith('capabilities/private-transports.js')) return privateTransportsModule;
+    throw new Error(`Unexpected import: ${specifier}`);
+  } });
+  script.runInContext(context);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  window.dispatchEvent(new context.CustomEvent('messageToContentScript', {
+    detail: { messageId: 'forged-raw', message: { type: 'RAW_TTML_INTERCEPTED', cacheKey: 'forged' } }
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(internalEvents, []);
+  assert.deepEqual(responses, []);
+  assert.deepEqual(backgroundRequests, []);
 });
 
 test('Given cold page-script injection When isolated PlaybackContext starts Then readiness arrives before its first snapshot request', async () => {

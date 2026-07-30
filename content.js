@@ -518,6 +518,7 @@
     debugLog('Received from page:', messageId, message);
 
     if (message?.type === 'GET_CROWDSOURCING_TASKS') return;
+    if (message?.type === 'RAW_TTML_INTERCEPTED') return;
 
     const pageVideoObservation = adaptPageVideoObservation(message);
     if (pageVideoObservation) {
@@ -542,7 +543,7 @@
     }
 
     // 檢查是否為內部消息（不需要發送到 background）
-    const internalMessages = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED'];
+    const internalMessages = ['SUBTITLE_READY'];
 
     if (internalMessages.includes(message.type)) {
       debugLog('處理內部消息:', message.type);
