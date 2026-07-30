@@ -14,6 +14,7 @@ import { getCurrentTimestamp, getVideoId } from '../core/video-info.js';
 import { playbackContextManager } from '../core/playback-context-manager.js';
 import { getPlayerAdapter, setRegionConfigs } from '../ui/netflix-player-adapter.js';
 import { DOMOverlapMatcher } from './dom-overlap-matcher.js';
+import { TtmlAcquisitionIngress, bindTtmlAcquisitionCapture } from '../system/capabilities/ttml-acquisition-ingress.js';
 
 class SubtitleInterceptor {
   constructor() {
@@ -43,6 +44,8 @@ class SubtitleInterceptor {
     this.renderInterval = null;
     this._renderGeneration = 0;
     this._internalEventDisposers = [];
+    this.ttmlAcquisitionIngress = null;
+    this.disposeTtmlAcquisitionCapture = null;
     this.contextReloadTimer = null;
     this.isLoadingInterceptedSubtitles = false;
     this.pendingLoadInterceptedSubtitles = false;
@@ -158,6 +161,8 @@ class SubtitleInterceptor {
         }
       });
 
+      this.bindTtmlAcquisitionIngress();
+
       // 設置事件處理器
       this.setupEventHandlers();
 
@@ -185,6 +190,7 @@ class SubtitleInterceptor {
       return;
     }
 
+    this.bindTtmlAcquisitionIngress();
     this.setupEventHandlers();
     
     this.log('啟動字幕攔截模式...');
@@ -206,6 +212,7 @@ class SubtitleInterceptor {
 
   stop() {
     this.disposeInternalEventHandlers();
+    this.disposeTtmlAcquisitionIngress();
 
     if (!this.isActive) {
       this.log('字幕攔截已經停止，跳過');
@@ -238,6 +245,39 @@ class SubtitleInterceptor {
   onSubtitleDetected(callback) {
     this.callback = callback;
     this.log('字幕檢測回調已註冊');
+  }
+
+  getTtmlAcquisitionIngress() {
+    if (!this.ttmlAcquisitionIngress) {
+      this.ttmlAcquisitionIngress = new TtmlAcquisitionIngress(this);
+    }
+    return this.ttmlAcquisitionIngress;
+  }
+
+  bindTtmlAcquisitionIngress() {
+    const ingress = this.getTtmlAcquisitionIngress();
+    if (!this.disposeTtmlAcquisitionCapture && typeof window !== 'undefined') {
+      this.disposeTtmlAcquisitionCapture = bindTtmlAcquisitionCapture(window, this.ttmlAcquisitionIngress);
+    }
+    return ingress;
+  }
+
+  disposeTtmlAcquisitionIngress() {
+    this.disposeTtmlAcquisitionCapture?.();
+    this.disposeTtmlAcquisitionCapture = null;
+  }
+
+  captureRawTTMLEvidence(evidence, options) {
+    const normalized = {
+      cacheKey: evidence.cacheKey,
+      rawContent: evidence.rawContent,
+      language: evidence.language,
+      requestInfo: evidence.requestInfo,
+      source: 'netflix-page-script'
+    };
+    if (evidence.rawMetadata !== undefined) normalized.rawMetadata = evidence.rawMetadata;
+    if (evidence.metadata !== undefined) normalized.metadata = evidence.metadata;
+    return this.getTtmlAcquisitionIngress().capture(normalized, options);
   }
 
   // 等待播放器準備就緒（簡化版本，假設播放器助手已在 initialization-manager 中初始化）
@@ -430,7 +470,7 @@ class SubtitleInterceptor {
       
       // 處理有效的新數據
       needsProcessing.forEach(({ cacheKey, ttmlData }) => {
-        this.handleRawTTMLIntercepted({
+        this.captureRawTTMLEvidence({
           cacheKey: cacheKey,
           rawContent: ttmlData.rawContent,
           requestInfo: ttmlData.requestInfo,
@@ -468,7 +508,7 @@ class SubtitleInterceptor {
     if (!response?.success) {
       const result = {
         success: false,
-        error: response?.error || 'GET_ALL_INTERCEPTED_TTML failed'
+        error: 'page-raw-cache-unavailable'
       };
       this.recordDebugEvent('RAW_TTML_CACHE_DIAGNOSTIC_FAILED', result);
       return result;
@@ -497,20 +537,18 @@ class SubtitleInterceptor {
           regionCount: Object.keys(parseResult?.regionConfigs || {}).length,
           firstSubtitle: subtitles[0] ? {
             startTime: subtitles[0].startTime,
-            endTime: subtitles[0].endTime,
-            text: subtitles[0].text?.substring(0, 80) || ''
+            endTime: subtitles[0].endTime
           } : null,
           lastSubtitle: subtitles.length > 0 ? {
             startTime: subtitles[subtitles.length - 1].startTime,
-            endTime: subtitles[subtitles.length - 1].endTime,
-            text: subtitles[subtitles.length - 1].text?.substring(0, 80) || ''
+            endTime: subtitles[subtitles.length - 1].endTime
           } : null,
           error: null
         };
       } catch (error) {
         parse = {
           ...parse,
-          error: error.message
+          error: 'parse-error'
         };
       }
 
@@ -519,7 +557,6 @@ class SubtitleInterceptor {
         language: data?.language || null,
         rawMetadata: data?.rawMetadata || data?.metadata || data?.requestInfo?.rawTtmlMetadata || null,
         rawLength: rawContent.length,
-        rawStart: rawContent.substring(0, 160),
         hasXmlDeclaration: rawContent.includes('<?xml'),
         hasTTElement: rawContent.includes('<tt'),
         paragraphTagCount: (rawContent.match(/<p[\s>]/g) || []).length,
@@ -2916,9 +2953,8 @@ class SubtitleInterceptor {
         matchedAt: Date.now()
       };
 
-      // 3. 透過 handleRawTTMLIntercepted 執行 recovery
       try {
-        this.handleRawTTMLIntercepted({
+        this.captureRawTTMLEvidence({
           cacheKey: matchResult.cacheKey,
           rawContent: matchResult.rawContent,
           requestInfo: enrichedRequestInfo,
@@ -3088,7 +3124,7 @@ class SubtitleInterceptor {
       };
 
       try {
-        this.handleRawTTMLIntercepted({
+        this.captureRawTTMLEvidence({
           cacheKey: matchResult.cacheKey,
           rawContent: matchResult.rawContent,
           requestInfo: enrichedRequestInfo,
@@ -3208,7 +3244,6 @@ class SubtitleInterceptor {
    * 當 secondary acquisition 因 polluted request evidence 失敗時，
    * 嘗試暫時切換 Netflix active track 到 secondaryLanguage，
    * 收集 DOM sample 並使用 DOMOverlapMatcher 比對 raw TTML pool 中的候選，
-   * 匹配成功則透過 handleRawTTMLIntercepted 注入字幕。
    *
    * 設計原則：
    * - 僅在 primary slot ready/locked、context ready、secondary slot 缺失時觸發
@@ -3413,7 +3448,7 @@ class SubtitleInterceptor {
       };
 
       try {
-        this.handleRawTTMLIntercepted({
+        this.captureRawTTMLEvidence({
           cacheKey: match.cacheKey,
           rawContent: match.rawContent,
           requestInfo: enrichedRequestInfo,
@@ -3535,9 +3570,13 @@ class SubtitleInterceptor {
   /**
    * 處理接收到的 raw TTML 數據 - 增加 videoID 驗證
    */
-  handleRawTTMLIntercepted(event) {
+  captureTtmlEvidence(event, { resolveWaiters = false } = {}) {
     const { cacheKey, rawContent, requestInfo, language } = event;
     const rawMetadata = event.rawMetadata || event.metadata || requestInfo?.rawTtmlMetadata || null;
+    const finish = (outcome) => {
+      if (resolveWaiters) this.resolveAcquisitionWaiters(event);
+      return outcome;
+    };
     
     this.log(`接收到 raw TTML: ${language}, 緩存鍵: ${cacheKey}`);
     
@@ -3545,7 +3584,7 @@ class SubtitleInterceptor {
     const parsedKey = this.parseCacheKey(cacheKey);
     if (!parsedKey) {
       this.log(`無效的緩存鍵格式，跳過處理: ${cacheKey}`);
-      return;
+      return finish({ status: 'domain-rejected', category: 'gate', reason: 'invalid-cache-key' });
     }
     
     // 步驟2: 使用 PlaybackContext 與 request-time evidence 驗證字幕歸屬
@@ -3556,10 +3595,9 @@ class SubtitleInterceptor {
       this.recordDebugEvent('RAW_TTML_SKIPPED', {
         reason: 'missing-current-video-id',
         cacheKey,
-        language,
-        requestInfo
+        language
       });
-      return;
+      return finish({ status: 'domain-rejected', category: 'gate', reason: 'missing-current-video-id' });
     }
 
     if (!gate.accepted) {
@@ -3573,15 +3611,15 @@ class SubtitleInterceptor {
       this.recordDebugEvent('RAW_TTML_REJECTED_BY_GATE', {
         cacheKey,
         language,
-        requestInfo,
         rawMetadata,
         gate
       });
       this.dispatchSubtitleReadinessChanged('raw-ttml-rejected-by-gate', { cacheKey, language, gate });
       if (gate.reason === 'playback-context-transitioning') {
         this.scheduleReloadAfterContextReady('raw-ttml-gate-transitioning', this.getCurrentPlaybackContext());
+        return finish({ status: 'stale-context', reason: 'playback-context-transitioning' });
       }
-      return;
+      return finish({ status: 'domain-rejected', category: 'gate', reason: gate.reason });
     }
     
     // 步驟3: 驗證是否為當前影片的字幕
@@ -3609,7 +3647,6 @@ class SubtitleInterceptor {
       parsedVideoId: parsedKey.videoId,
       currentVideoId,
       isCurrentVideo,
-      requestInfo,
       rawMetadata,
       playbackContext: this.getCurrentPlaybackContext(),
       gate,
@@ -3678,19 +3715,21 @@ class SubtitleInterceptor {
                 playbackContext: this.getCurrentPlaybackContext()
               });
               // 保留 parsed cache 在 interceptedSubtitles 中供日後復原用
-              return;
+              return finish({ status: 'retained', role: promotionRole });
             }
-          }
 
-          this.checkAndProcessLanguage(language, subtitles, {
-            cacheKey,
-            timeIndex,
-            playbackContext: this.getCurrentPlaybackContext(),
-            gate,
-            requestInfo,
-            rawMetadata
-          });
+            this.checkAndProcessLanguage(language, subtitles, {
+              cacheKey,
+              timeIndex,
+              playbackContext: this.getCurrentPlaybackContext(),
+              gate,
+              requestInfo,
+              rawMetadata
+            });
+            return finish({ status: 'promoted', role: promotionRole });
+          }
         }
+        return finish({ status: 'retained' });
       } else {
         if (this.matchesLanguageForAcquisition(language, this.primaryLanguage)) {
           this.lastSubtitleMissingReasons.primary = 'parse-empty';
@@ -3704,28 +3743,28 @@ class SubtitleInterceptor {
           language,
           rawMetadata,
           rawLength: rawContent?.length || 0,
-          rawStart: rawContent?.substring(0, 160) || '',
           gate
         });
+        return finish({ status: 'domain-rejected', category: 'parse', reason: 'empty' });
       }
     } catch (error) {
-      console.error(`解析 ${language} TTML 失敗:`, error);
+      console.error('解析 TTML 失敗');
       if (this.matchesLanguageForAcquisition(language, this.primaryLanguage)) {
         this.lastSubtitleMissingReasons.primary = 'parse-error';
       }
       if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage)) {
         this.lastSubtitleMissingReasons.secondary = 'parse-error';
       }
-      this.dispatchSubtitleReadinessChanged('raw-ttml-parse-error', { cacheKey, language, error: error.message });
+      this.dispatchSubtitleReadinessChanged('raw-ttml-parse-error', { cacheKey, language, reason: 'parse-error' });
       this.recordDebugEvent('RAW_TTML_PARSE_ERROR', {
         cacheKey,
         language,
         rawMetadata,
         rawLength: rawContent?.length || 0,
-        rawStart: rawContent?.substring(0, 160) || '',
-        error: error.message,
+        reason: 'parse-error',
         gate
       });
+      return finish({ status: 'domain-rejected', category: 'parse', reason: 'error' });
     }
   }
 
@@ -3738,7 +3777,7 @@ class SubtitleInterceptor {
       metadata?.requestInfo?.attributedVideoId === this.getCurrentPlaybackContext()?.videoId;
     const langMatchOpts = isDomMatchEntry ? { allowGenericFallback: true } : {};
 
-    // Promotion Guard (入口防禦)：避免其他路徑繞過 handleRawTTMLIntercepted() 的 guard
+    // Promotion Guard (入口防禦)：避免其他路徑繞過既有歸屬檢查。
     if (this.matchesLanguageForAcquisition(language, this.primaryLanguage, langMatchOpts) ||
         (this.matchesLanguageForAcquisition(language, this.secondaryLanguage, langMatchOpts) && this.dualSubtitleEnabled)) {
       const promotionRole = this.resolveLanguageRole(language);
@@ -3916,12 +3955,6 @@ class SubtitleInterceptor {
   // 設置事件處理器
   setupEventHandlers() {
     this.disposeInternalEventHandlers();
-
-    // 監聽 raw TTML 攔截事件
-    this._internalEventDisposers.push(registerInternalEventHandler('RAW_TTML_INTERCEPTED', (event) => {
-      this.handleRawTTMLIntercepted(event);
-      this.resolveAcquisitionWaiters(event);
-    }));
 
     // 監聽影片 ID 變化事件
     this._internalEventDisposers.push(registerInternalEventHandler('VIDEO_ID_CHANGED', async (event) => {

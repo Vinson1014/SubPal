@@ -4,6 +4,8 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 
 const interceptorSource = await readFile(new URL('../content/subtitle-modes/subtitle-interceptor.js', import.meta.url), 'utf8');
+const resultSource = await readFile(new URL('../content/system/capabilities/result.js', import.meta.url), 'utf8');
+const ingressSource = await readFile(new URL('../content/system/capabilities/ttml-acquisition-ingress.js', import.meta.url), 'utf8');
 
 function createPlaybackContext(videoId, epoch) {
   return {
@@ -48,6 +50,16 @@ async function createTTMLHarness() {
   let context = createPlaybackContext('episode-A', 1);
   const rawCache = new Map();
   const rendered = [];
+  const eventListeners = new Map();
+  const window = {
+    addEventListener(type, listener) {
+      const listeners = eventListeners.get(type) ?? new Set();
+      listeners.add(listener);
+      eventListeners.set(type, listeners);
+    },
+    removeEventListener(type, listener) { eventListeners.get(type)?.delete(listener); },
+    listenerCount(type) { return eventListeners.get(type)?.size ?? 0; }
+  };
   const pageMessage = async ({ type }) => {
     assert.equal(type, 'GET_ALL_INTERCEPTED_TTML');
     return { success: true, allTTMLs: Object.fromEntries(rawCache) };
@@ -56,6 +68,7 @@ async function createTTMLHarness() {
     Date,
     Promise,
     console: { log() {}, warn() {}, error() {} },
+    window,
     document: { getElementById() { return null; }, querySelector() { return null; } },
     setTimeout,
     clearTimeout
@@ -95,13 +108,29 @@ async function createTTMLHarness() {
   const overlapMatcher = await createSyntheticModule(sandbox, 'dom-overlap-matcher.js', {
     DOMOverlapMatcher: class DOMOverlapMatcher {}
   });
+  const result = new vm.SourceTextModule(resultSource, {
+    context: sandbox,
+    identifier: 'content/system/capabilities/result.js'
+  });
+  const ingress = new vm.SourceTextModule(ingressSource, {
+    context: sandbox,
+    identifier: 'content/system/capabilities/ttml-acquisition-ingress.js'
+  });
+  await result.link(() => { throw new Error('Unexpected result dependency'); });
+  await ingress.link((specifier) => {
+    assert.equal(specifier, './result.js');
+    return result;
+  });
+  await result.evaluate();
+  await ingress.evaluate();
   const dependencies = new Map([
     ['../utils/subtitle-parser.js', parser],
     ['../system/messaging.js', messaging],
     ['../core/video-info.js', videoInfo],
     ['../core/playback-context-manager.js', playback],
     ['../ui/netflix-player-adapter.js', playerAdapter],
-    ['./dom-overlap-matcher.js', overlapMatcher]
+    ['./dom-overlap-matcher.js', overlapMatcher],
+    ['../system/capabilities/ttml-acquisition-ingress.js', ingress]
   ]);
   const module = new vm.SourceTextModule(interceptorSource, {
     context: sandbox,
@@ -128,14 +157,14 @@ async function createTTMLHarness() {
   return {
     capture({ videoId, language, text, requestTime }) {
       const cacheKey = `${language}_${videoId}_fixture_track`;
-      const event = {
+      const event = vm.runInContext(`(${JSON.stringify({
         cacheKey,
         rawContent: text,
         requestInfo: createRequestInfo(videoId, language, requestTime),
         language
-      };
+      })})`, sandbox);
       rawCache.set(cacheKey, event);
-      interceptor.handleRawTTMLIntercepted(event);
+      interceptor.captureRawTTMLEvidence(event);
       return cacheKey;
     },
     async readPageRawCacheKeys() {
@@ -155,6 +184,15 @@ async function createTTMLHarness() {
     },
     readiness() {
       return interceptor.getSubtitleReadinessSnapshot();
+    },
+    bindIngress() {
+      interceptor.bindTtmlAcquisitionIngress();
+    },
+    stop() {
+      interceptor.stop();
+    },
+    ingressListenerCount() {
+      return window.listenerCount('subpal-ttml-acquisition-captured');
     }
   };
 }
@@ -231,4 +269,13 @@ test('Given TTML capture evidence is old When cache is reevaluated Then age alon
   assert.deepEqual(harness.render(), { primaryText: 'A primary', secondaryText: 'A secondary' });
   assert.equal(harness.readiness().primary.cacheKey, activeA.primaryCacheKey);
   assert.equal(harness.readiness().secondary.cacheKey, activeA.secondaryCacheKey);
+});
+
+test('Given a stopped interceptor When late cache capture runs Then it does not rebind the dedicated physical listener', async () => {
+  const harness = await createTTMLHarness();
+  harness.bindIngress();
+  assert.equal(harness.ingressListenerCount(), 1);
+  harness.stop();
+  harness.capture({ videoId: 'episode-A', language: 'zh-Hant', text: 'late capture' });
+  assert.equal(harness.ingressListenerCount(), 0);
 });
