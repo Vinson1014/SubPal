@@ -20,6 +20,22 @@ async function createModule(context, identifier, exports) {
   return module;
 }
 
+async function createPrivateTransportModule(context) {
+  const module = new vm.SyntheticModule(['createEnvelope', 'createPortTransport'], function initializePrivateTransports() {
+    this.setExport('createEnvelope', ({ requestId, kind, payload, context: contextValue }) => ({ protocolVersion: 1, requestId, kind, payload, ...(contextValue === undefined ? {} : { context: contextValue }) }));
+    this.setExport('createPortTransport', ({ connect }) => {
+      let port = null;
+      return {
+        start() { if (!port) port = connect(); return port; },
+        request: async () => ({ ok: false, error: { kind: 'disconnected', code: 'background-port-disconnected', retryable: true } })
+      };
+    });
+  }, { context, identifier: 'content/system/capabilities/private-transports.js' });
+  await module.link(() => { throw new Error('Unexpected private transport dependency'); });
+  await module.evaluate();
+  return module;
+}
+
 async function loadPageIngressModule(context = vm.createContext({})) {
   const [resultSource, ingressSource] = await Promise.all([
     sourceOrNull('content/system/capabilities/result.js'),
@@ -106,6 +122,7 @@ async function createContentHarness() {
     isolated: await createModule(context, 'isolated-endscreen-tasks.js', { startIsolatedEndscreenTasks: async () => {} }),
     playback: await createModule(context, 'playback-context-manager.js', { playbackContextManager: {} })
   };
+  const privateTransports = await createPrivateTransportModule(context);
   const source = await readFile(new URL('../content.js', import.meta.url), 'utf8');
   const script = new vm.Script(source, {
     importModuleDynamically: async (specifier) => {
@@ -120,6 +137,7 @@ async function createContentHarness() {
         if (!ingress) throw new Error('PageIngress capability is missing');
         return ingress;
       }
+      if (specifier.endsWith('capabilities/private-transports.js')) return privateTransports;
       throw new Error(`Unexpected import: ${specifier}`);
     }
   });

@@ -19,7 +19,7 @@
   debugLog('Initializing message bridge with long-lived connection...');
 
   let messageCounter = 0; // 用於生成唯一訊息 ID 的計數器
-  let backgroundPort = null; // 長連接 port
+  let backgroundPortTransportPromise = null;
   let configManager = null; // ConfigManager 實例
   let submissionQueueManager = null; // SubmissionQueueManager 實例
   let pageScriptReadinessPromise = null;
@@ -435,40 +435,26 @@
     }
   }
 
-  // 建立到 background script 的長連接
-  function connectToBackground() {
-    backgroundPort = chrome.runtime.connect({ name: "subtitle-assistant-channel" });
-    debugLog('Connected to background script.');
-
-    // 監聽來自 background 的消息
-    backgroundPort.onMessage.addListener((message) => {
-      debugLog('Received from background (port):', message.type, message);
-
-      // 處理廣播消息（沒有 messageId 或特定 messageId）
-      if (message.messageId === 'subtitle-style-broadcast' ||
-          message.response?.type) {
-        // 將廣播消息轉發給 messaging.js 作為內部事件
-        window.dispatchEvent(new CustomEvent('messageFromContentScript', {
-          detail: {
-            message: message.response || message,
-            messageId: message.messageId,
-            sender: 'background'
+  function getBackgroundPortTransport() {
+    if (!backgroundPortTransportPromise) {
+      backgroundPortTransportPromise = import(chrome.runtime.getURL('content/system/capabilities/private-transports.js')).then(({ createEnvelope, createPortTransport }) => ({
+        createEnvelope,
+        transport: createPortTransport({
+          connect: () => chrome.runtime.connect({ name: 'subtitle-assistant-channel' }),
+          isNotification: (message) => message?.messageId === 'subtitle-style-broadcast' || Boolean(message?.response?.type),
+          onNotification: (message) => {
+            window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+              detail: { message: message.response || message, messageId: message.messageId, sender: 'background' }
+            }));
           }
-        }));
-      } else {
-        // 將 background 的回應轉發回 page context (messaging.js)
-        window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-          detail: { messageId: message.messageId, response: message.response }
-        }));
-      }
-    });
+        })
+      }));
+    }
+    return backgroundPortTransportPromise;
+  }
 
-    // 監聽連接斷開事件
-    backgroundPort.onDisconnect.addListener(() => {
-      console.warn('[Content Script] Disconnected from background script. Attempting to reconnect...');
-      backgroundPort = null;
-      setTimeout(connectToBackground, 1000);
-    });
+  function connectToBackground() {
+    getBackgroundPortTransport().then(({ transport }) => transport.start());
   }
 
   function dispatchInternalMessage(messageId, message) {
@@ -570,18 +556,15 @@
     // 生成唯一的訊息 ID，如果未提供
     const uniqueMessageId = messageId || generateUniqueMessageId(message.type);
 
-    if (backgroundPort && backgroundPort.postMessage) {
-      debugLog('Forwarding message to background (port):', uniqueMessageId, message.type);
-      // 通過 port 發送消息，包含 messageId
-      backgroundPort.postMessage({ messageId: uniqueMessageId, message: message });
-      // 注意：這裡不再需要設置超時，因為 messaging.js 已經處理了超時
-    } else {
-      console.error('[Content Script] Background port is not connected. Cannot send message:', uniqueMessageId, message.type);
-      // 如果 port 未連接，立即向 page context 發送錯誤響應
+    getBackgroundPortTransport().then(({ createEnvelope, transport }) => transport.request(createEnvelope({
+      requestId: uniqueMessageId,
+      kind: 'background-forward',
+      payload: message
+    }))).then((result) => {
       window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: { messageId: uniqueMessageId, response: { error: 'Background service is unavailable.' } }
+        detail: { messageId: uniqueMessageId, response: result.ok ? result.value : result }
       }));
-    }
+    });
   });
 
   // 移除舊的 chrome.runtime.onMessage 監聽器，因為我們現在使用 port

@@ -292,6 +292,7 @@ function createContentStartupHarness({ pageMode = 'loaded-unready' } = {}) {
       await module.link(() => { throw new Error('Unexpected static import'); });
       await module.evaluate();
     }
+    const privateTransportsModule = await createPrivateTransportStub(context);
 
     const source = await readFile(new URL('../content.js', import.meta.url), 'utf8');
     const script = new vm.Script(source, {
@@ -305,6 +306,7 @@ function createContentStartupHarness({ pageMode = 'loaded-unready' } = {}) {
         if (specifier.endsWith('messaging.js')) return messagingModule;
         if (specifier.endsWith('isolated-endscreen-tasks.js')) return isolatedModule;
         if (specifier.endsWith('playback-context-manager.js')) return playbackModule;
+        if (specifier.endsWith('capabilities/private-transports.js')) return privateTransportsModule;
         throw new Error(`Unexpected import: ${specifier}`);
       }
     });
@@ -331,6 +333,28 @@ function createContentStartupHarness({ pageMode = 'loaded-unready' } = {}) {
 }
 
 let compatibilityUuidCounter = 1000;
+
+async function createPrivateTransportStub(context) {
+  const module = new vm.SyntheticModule([
+    'PRIVATE_PROTOCOL_VERSION', 'buildSafeDiagnostic', 'createDomTransport', 'createEnvelope', 'createPageTransport', 'createPortTransport', 'toCompatibilityError'
+  ], function initializePrivateTransports() {
+    const disconnected = { ok: false, error: { kind: 'disconnected', code: 'background-port-disconnected', retryable: true } };
+    const requestTransport = () => ({ request: async () => disconnected, pendingCount: () => 0 });
+    this.setExport('PRIVATE_PROTOCOL_VERSION', 1);
+    this.setExport('buildSafeDiagnostic', () => ({}));
+    this.setExport('toCompatibilityError', () => new Error('transport-failed'));
+    this.setExport('createEnvelope', ({ requestId, kind, payload, context: contextValue }) => ({ protocolVersion: 1, requestId, kind, payload, ...(contextValue === undefined ? {} : { context: contextValue }) }));
+    this.setExport('createDomTransport', requestTransport);
+    this.setExport('createPageTransport', requestTransport);
+    this.setExport('createPortTransport', ({ connect }) => {
+      let port = null;
+      return { start() { if (!port) port = connect(); return port; }, request: async () => disconnected, pendingCount: () => 0 };
+    });
+  }, { context, identifier: 'content/system/capabilities/private-transports.js' });
+  await module.link(() => { throw new Error('Unexpected private transport dependency'); });
+  await module.evaluate();
+  return module;
+}
 
 function createCompatibilityCrypto() {
   return {
@@ -634,6 +658,7 @@ test('Given production content listener after manager initialization When a publ
     if (specifier.endsWith('messaging.js')) return import('data:text/javascript,export const initMessaging = async () => {}');
     if (specifier.endsWith('isolated-endscreen-tasks.js')) return import('data:text/javascript,export const startIsolatedEndscreenTasks = async () => {}');
     if (specifier.endsWith('playback-context-manager.js')) return import('data:text/javascript,export const playbackContextManager = { initialize: async () => {}, getCurrentContext: () => null }');
+    if (specifier.endsWith('capabilities/private-transports.js')) return createPrivateTransportStub(context);
     throw new Error(`Unexpected import: ${specifier}`);
   } });
   script.runInContext(context);
@@ -699,6 +724,7 @@ test('Given cold page-script injection When isolated PlaybackContext starts Then
     if (specifier.endsWith('messaging.js')) return messagingModule;
     if (specifier.endsWith('isolated-endscreen-tasks.js')) return isolatedModule;
     if (specifier.endsWith('playback-context-manager.js')) return playbackModule;
+    if (specifier.endsWith('capabilities/private-transports.js')) return createPrivateTransportStub(context);
     throw new Error(`Unexpected import: ${specifier}`);
   } });
 
@@ -743,6 +769,7 @@ test('Given cold startup with page readiness delayed beyond the legacy timeout W
     if (specifier.endsWith('messaging.js')) return messagingModule;
     if (specifier.endsWith('isolated-endscreen-tasks.js')) return isolatedModule;
     if (specifier.endsWith('playback-context-manager.js')) return playbackModule;
+    if (specifier.endsWith('capabilities/private-transports.js')) return createPrivateTransportStub(context);
     throw new Error(`Unexpected import: ${specifier}`);
   } });
   Object.defineProperty(context, 'isolatedStarts', {
@@ -827,7 +854,11 @@ test('Given isolated startup with its own messaging module When content forwards
       throw new Error(`Unexpected messaging import: ${specifier}`);
     }
   });
-  await isolatedMessagingModule.link(() => { throw new Error('messaging.js should not have static imports'); });
+  const privateTransportsModule = await createPrivateTransportStub(context);
+  await isolatedMessagingModule.link((specifier) => {
+    assert.equal(specifier, './capabilities/private-transports.js');
+    return privateTransportsModule;
+  });
   await isolatedMessagingModule.evaluate();
   assert.equal(window.listenerCount('messageFromContentScript'), 0);
 
@@ -855,6 +886,7 @@ test('Given isolated startup with its own messaging module When content forwards
     if (specifier.endsWith('messaging.js')) return isolatedMessagingModule;
     if (specifier.endsWith('isolated-endscreen-tasks.js')) return isolatedModule;
     if (specifier.endsWith('playback-context-manager.js')) return playbackModule;
+    if (specifier.endsWith('capabilities/private-transports.js')) return privateTransportsModule;
     throw new Error(`Unexpected import: ${specifier}`);
   } });
 
