@@ -25,6 +25,7 @@
   let pageScriptReadinessPromise = null;
   let pageContextStartAttempted = false;
   let isolatedEndscreenStartPromise = null;
+  let pageIngressPromise = null;
 
   const PAGE_SCRIPT_READY_EVENT = 'subpal-page-script-ready';
   const PAGE_SCRIPT_READY_REQUEST_EVENT = 'subpal-request-page-script-ready';
@@ -470,12 +471,73 @@
     });
   }
 
+  function dispatchInternalMessage(messageId, message) {
+    window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+      detail: { messageId, message }
+    }));
+  }
+
+  function respondToPageObservation(messageId, response) {
+    window.dispatchEvent(new CustomEvent('responseFromContentScript', {
+      detail: { messageId, response }
+    }));
+  }
+
+  function hasAuthorityBearingKey(message) {
+    return ['destination', 'command', 'backgroundCommand', 'storage', 'storageKey',
+      'endpoint', 'credential', 'credentials', 'sync', 'syncConfig', 'lifecycle', 'lifecycleConfig', 'config'
+    ].some((key) => Object.prototype.hasOwnProperty.call(message, key));
+  }
+
+  function adaptPageVideoObservation(message) {
+    if (!message || typeof message !== 'object') return null;
+    if (message.category === 'page-observation') return { input: message, authorityEscalated: false };
+    if (message.type !== 'VIDEO_ID_CHANGED') return null;
+
+    const payload = {};
+    if (Object.prototype.hasOwnProperty.call(message, 'oldVideoId')) payload.oldVideoId = message.oldVideoId;
+    if (Object.prototype.hasOwnProperty.call(message, 'newVideoId')) payload.newVideoId = message.newVideoId;
+    if (Object.prototype.hasOwnProperty.call(message, 'videoId')) payload.videoId = message.videoId;
+    return {
+      input: {
+        category: 'page-observation',
+        variant: 'video-context-changed',
+        payload
+      },
+      authorityEscalated: hasAuthorityBearingKey(message)
+    };
+  }
+
+  function getPageIngress() {
+    if (!pageIngressPromise) {
+      pageIngressPromise = import(chrome.runtime.getURL('content/system/capabilities/page-ingress.js'))
+        .then(({ PageIngress }) => PageIngress);
+    }
+    return pageIngressPromise;
+  }
+
+  function acceptPageVideoObservation(messageId, observation) {
+    getPageIngress().then((pageIngress) => {
+      const result = pageIngress.accept(observation.input, {
+        authorityEscalated: observation.authorityEscalated,
+        dispatch: (message) => dispatchInternalMessage(messageId, message)
+      });
+      respondToPageObservation(messageId, result);
+    });
+  }
+
   // 1. 監聽來自 page context (messaging.js) 的消息事件
   window.addEventListener('messageToContentScript', (event) => {
     const { messageId, message } = event.detail;
     debugLog('Received from page:', messageId, message);
 
     if (message?.type === 'GET_CROWDSOURCING_TASKS') return;
+
+    const pageVideoObservation = adaptPageVideoObservation(message);
+    if (pageVideoObservation) {
+      acceptPageVideoObservation(messageId, pageVideoObservation);
+      return;
+    }
 
     // 檢查是否為配置相關訊息（由 content script 處理，不轉發到 background）
     const configMessages = ['CONFIG_GET_ALL', 'CONFIG_GET', 'CONFIG_SET', 'CONFIG_SET_MULTIPLE'];
@@ -494,18 +556,12 @@
     }
 
     // 檢查是否為內部消息（不需要發送到 background）
-    const internalMessages = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED', 'VIDEO_ID_CHANGED'];
+    const internalMessages = ['SUBTITLE_READY', 'RAW_TTML_INTERCEPTED'];
 
     if (internalMessages.includes(message.type)) {
       debugLog('處理內部消息:', message.type);
 
-      // 將內部消息分發給 page context 模組
-      window.dispatchEvent(new CustomEvent('messageFromContentScript', {
-        detail: {
-          messageId: messageId,
-          message: message
-        }
-      }));
+      dispatchInternalMessage(messageId, message);
 
       // 內部消息不需要回應，直接返回
       return;
