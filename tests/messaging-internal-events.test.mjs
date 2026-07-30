@@ -3,6 +3,27 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 
+async function loadPrivateTransportModule(context) {
+  const paths = [
+    '../content/system/capabilities/result.js',
+    '../content/system/capabilities/private-transport-diagnostics.js',
+    '../content/system/capabilities/private-transports.js'
+  ];
+  const sources = await Promise.all(paths.map((path) => readFile(new URL(path, import.meta.url), 'utf8')));
+  const [result, diagnostics, transports] = sources.map((source, index) => new vm.SourceTextModule(source, {
+    context, identifier: paths[index]
+  }));
+  await result.link(() => { throw new Error('result.js should not import dependencies'); });
+  await diagnostics.link(() => { throw new Error('diagnostics should not import dependencies'); });
+  await transports.link((specifier) => {
+    if (specifier === './result.js') return result;
+    if (specifier === './private-transport-diagnostics.js') return diagnostics;
+    throw new Error(`Unexpected private transport dependency: ${specifier}`);
+  });
+  await result.evaluate(); await diagnostics.evaluate(); await transports.evaluate();
+  return transports;
+}
+
 async function loadMessagingModule() {
   const source = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
   const context = vm.createContext({ console });
@@ -10,8 +31,10 @@ async function loadMessagingModule() {
     context,
     identifier: 'content/system/messaging.js'
   });
-  await module.link(() => {
-    throw new Error('messaging.js should not import dependencies for this test');
+  const transports = await loadPrivateTransportModule(context);
+  await module.link((specifier) => {
+    assert.equal(specifier, './capabilities/private-transports.js');
+    return transports;
   });
   await module.evaluate();
   return module.namespace;
@@ -41,7 +64,11 @@ async function loadMessagingModuleWithMainOnlyPageScript(pageResponse = {
   };
   const context = vm.createContext({ console, window, setTimeout, clearTimeout });
   const module = new vm.SourceTextModule(source, { context, identifier: 'content/system/messaging.js' });
-  await module.link(() => { throw new Error('messaging.js should not import dependencies for this test'); });
+  const transports = await loadPrivateTransportModule(context);
+  await module.link((specifier) => {
+    assert.equal(specifier, './capabilities/private-transports.js');
+    return transports;
+  });
   await module.evaluate();
   return { messaging: module.namespace, posts };
 }
@@ -80,10 +107,44 @@ async function loadMessagingContentBridgeHarness() {
       return configModule;
     }
   });
-  await module.link(() => { throw new Error('messaging.js should only dynamically import ConfigBridge'); });
+  const transports = await loadPrivateTransportModule(context);
+  await module.link((specifier) => {
+    assert.equal(specifier, './capabilities/private-transports.js');
+    return transports;
+  });
   await module.evaluate();
   await module.namespace.initMessaging();
   return { messaging: module.namespace, window, CustomEvent };
+}
+
+async function loadMessagingTimeoutHarness({ pageResponse } = {}) {
+  const source = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
+  const listeners = new Map();
+  const timers = new Map();
+  let nextTimerId = 0;
+  const window = {
+    addEventListener(type, listener) { (listeners.get(type) ?? listeners.set(type, new Set()).get(type)).add(listener); },
+    removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
+    dispatchEvent(event) { for (const listener of [...(listeners.get(event.type) ?? [])]) listener(event); return true; },
+    postMessage(message) {
+      if (!pageResponse) return;
+      for (const listener of [...(listeners.get('message') ?? [])]) listener({ data: { source: 'subpal-page-script', messageId: message.messageId, ...pageResponse } });
+    }
+  };
+  const setTimeout = (callback, delay) => { const id = ++nextTimerId; timers.set(id, { callback, delay }); return id; };
+  const clearTimeout = (id) => timers.delete(id);
+  const context = vm.createContext({ console, window, CustomEvent: class CustomEvent { constructor(type, options = {}) { this.type = type; this.detail = options.detail; } }, setTimeout, clearTimeout });
+  const module = new vm.SourceTextModule(source, { context, identifier: 'content/system/messaging.js' });
+  const transports = await loadPrivateTransportModule(context);
+  await module.link((specifier) => {
+    assert.equal(specifier, './capabilities/private-transports.js');
+    return transports;
+  });
+  await module.evaluate();
+  return {
+    messaging: module.namespace,
+    run(delay) { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.callback(); } }
+  };
 }
 
 test('Given an internal event handler When it is registered Then a disposer is returned and removes only that handler', async () => {
@@ -181,4 +242,22 @@ test('Given a parseable partial page response with diagnostics When transported 
   assert.equal(result.status, 'partial');
   assert.equal(result.reason, partial.reason);
   assert.deepEqual(result.playerUiRestore, partial.playerUiRestore);
+});
+
+test('Given legacy DOM and page callers When private transports terminate Then they reject safe Errors while partial page values remain raw', async () => {
+  const dom = await loadMessagingTimeoutHarness();
+  const domPending = dom.messaging.sendMessage({ type: 'PING' });
+  dom.run(10000);
+  await assert.rejects(domPending, (error) => error?.kind === 'timeout' && error.code === 'dom-response-timeout' && error.retryable === true && error.message === 'dom-response-timeout');
+
+  const page = await loadMessagingTimeoutHarness();
+  const pagePending = page.messaging.sendMessageToPageScript({ type: 'PING' });
+  page.run(10000);
+  await assert.rejects(pagePending, (error) => error?.kind === 'timeout' && error.code === 'page-response-timeout' && error.retryable === true && error.message === 'page-response-timeout');
+
+  const partial = { success: false, status: 'partial', reason: 'player-ui-restore-timeout' };
+  const partialPage = await loadMessagingTimeoutHarness({ pageResponse: partial });
+  const partialResult = await partialPage.messaging.sendMessageToPageScript({ type: 'PING' });
+  assert.equal(partialResult.status, partial.status);
+  assert.equal(partialResult.reason, partial.reason);
 });

@@ -179,8 +179,24 @@ async function settleActionStart() {
 
 async function loadMessagingInstance() {
   const source = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
-  const module = new vm.SourceTextModule(source, { context: vm.createContext({ console }) });
-  await module.link(() => { throw new Error('messaging.js has no static dependencies'); });
+  const context = vm.createContext({ console });
+  const transports = new vm.SyntheticModule([
+    'PRIVATE_PROTOCOL_VERSION', 'buildSafeDiagnostic', 'createDomTransport', 'createEnvelope', 'createPageTransport', 'toCompatibilityError'
+  ], function initializePrivateTransports() {
+    this.setExport('PRIVATE_PROTOCOL_VERSION', 1);
+    this.setExport('buildSafeDiagnostic', () => ({}));
+    this.setExport('toCompatibilityError', () => new Error('transport-failed'));
+    this.setExport('createDomTransport', () => ({}));
+    this.setExport('createEnvelope', () => ({}));
+    this.setExport('createPageTransport', () => ({}));
+  }, { context });
+  await transports.link(() => { throw new Error('private transport test stub has no dependencies'); });
+  await transports.evaluate();
+  const module = new vm.SourceTextModule(source, { context });
+  await module.link((specifier) => {
+    assert.equal(specifier, './capabilities/private-transports.js');
+    return transports;
+  });
   await module.evaluate();
   return module.namespace;
 }

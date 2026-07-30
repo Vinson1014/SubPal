@@ -1,6 +1,8 @@
 // content/messaging.js
 // 消息傳遞模組 - 抽象層，與 content.js 透過 CustomEvent 通訊
 
+import { PRIVATE_PROTOCOL_VERSION, buildSafeDiagnostic, createDomTransport, createEnvelope, createPageTransport, toCompatibilityError } from './capabilities/private-transports.js';
+
 // 註冊的消息處理器
 // 修改為支持多個 handler 的結構：type -> Set<handler>
 const messageHandlers = new Map();
@@ -11,9 +13,6 @@ const internalEventHandlers = new Map();
 // 調試模式開關 (由 content.js 控制)
 let debugMode = false;
 let messagingInitializationPromise = null;
-
-// 存儲所有活動的監聽器和超時計時器
-const activeListeners = new Map(); // messageId => { listener, timeoutId, resolve, reject }
 
 // 根據訊息類型定義不同的超時時間
 const messageTimeouts = {
@@ -32,19 +31,35 @@ function getTimeoutForMessageType(type) {
   return messageTimeouts[type] || messageTimeouts.DEFAULT;
 }
 
-/**
- * 清理指定 messageId 的監聽器和超時計時器
- * @param {string} messageId - 消息 ID
- */
-function cleanupListener(messageId) {
-  const item = activeListeners.get(messageId);
-  if (item) {
-    const { listener, timeoutId } = item;
-    window.removeEventListener('responseFromContentScript', listener);
-    clearTimeout(timeoutId);
-    activeListeners.delete(messageId);
-    debugLog(`清理監聽器: ${messageId}`);
+let domTransport = null;
+let pageTransport = null;
+const legacyDomRequestEvent = 'messageToContentScript';
+const legacyDomResponseEvent = 'responseFromContentScript';
+
+function getDomTransport() {
+  if (!domTransport) {
+    domTransport = createDomTransport({
+      window,
+      makeEvent: (type, detail) => new CustomEvent(type, { detail }),
+      requestEvent: legacyDomRequestEvent,
+      responseEvent: legacyDomResponseEvent
+    });
   }
+  return domTransport;
+}
+
+function getPageTransport() {
+  if (!pageTransport) pageTransport = createPageTransport({ window });
+  return pageTransport;
+}
+
+function unwrapLegacyResult(result, rejectRawError = true) {
+  if (!result.ok) throw toCompatibilityError(result);
+  if (rejectRawError && result.value?.error) throw toCompatibilityError({
+    ok: false,
+    error: { kind: 'domain-rejected', code: 'legacy-response-error', retryable: false }
+  });
+  return result.value;
 }
 
 // 添加連接狀態檢查函數
@@ -145,44 +160,8 @@ async function initializeMessaging() {
       return;
     }
 
-    if (message.type === 'CONNECTION_STATUS_CHANGED') {
-      const wasConnected = isConnected;
-      isConnected = message.connected;
-      debugLog(`連接狀態變更: ${isConnected ? '已連接' : '已斷開'}`);
-
-      if (!isConnected && wasConnected) {
-        // 連接斷開時，處理所有待處理的訊息響應
-        debugLog(`連接斷開，處理 ${activeListeners.size} 個待處理消息`);
-        for (const [messageId, { resolve, reject }] of activeListeners.entries()) {
-           // 找到對應的 Promise 的 reject 函數並調用
-           const error = new Error('Background connection lost');
-           console.error(`消息 ${messageId} 因連接斷開而失敗:`, error);
-           cleanupListener(messageId); // 清理監聽器和計時器
-           reject(error); // 拒絕 Promise
-        }
-      } else if (isConnected && !wasConnected) {
-         // 連接恢復時，處理隊列中的消息
-         processMessageQueue();
-      }
-      return; // 不需要進一步處理
-    }
-
-
     // 處理來自 background 的回應 (通過 content.js 轉發)
     // 這些回應應該有 messageId
-    if (message.messageId) {
-       // 找到對應的監聽器並觸發
-       const item = activeListeners.get(message.messageId);
-       if (item && item.listener) {
-          // 觸發監聽器，listener 會處理響應並清理
-          item.listener({ detail: { messageId: message.messageId, response: message.response } });
-       } else {
-          debugLog('收到無效或已過期消息的回應:', message.messageId, message.type);
-       }
-       return; // 處理完回應後返回
-    }
-
-
     // 處理其他來自 content.js 的內部消息 (如果有的話)
     // 收集所有匹配的 handler：type-specific + wildcard
     const typeHandlers = messageHandlers.get(message.type) || new Set();
@@ -208,22 +187,6 @@ async function initializeMessaging() {
       }
     }
   });
-
-  // 監聽來自 content.js 的回應事件 (舊的 sendMessage 機制可能還在使用，保留兼容性)
-   window.addEventListener('responseFromContentScript', (event) => {
-      // 這個監聽器主要用於兼容舊的 sendMessage 實現，
-      // 新的基於 port 的回應應該直接在 messageFromContentScript 中處理
-      // 這裡可以保留，以防萬一，但主要邏輯應移至 messageFromContentScript
-      debugLog('收到來自 content.js 的回應事件 (舊機制)', event.detail.messageId, event.detail.response);
-      // 找到對應的監聽器並觸發
-      const item = activeListeners.get(event.detail.messageId);
-      if (item && item.listener) {
-         item.listener(event); // 觸發監聽器，listener 會處理響應並清理
-      } else {
-         debugLog('收到無效或已過期回應事件 (舊機制):', event.detail.messageId);
-      }
-   });
-
 
   // debugMode 將通過 initMessaging() 初始化
 
@@ -345,56 +308,21 @@ export function sendMessage(message) {
   }
 
 
-  debugLog('發送消息 (透過 content.js)', message);
-  return new Promise((resolve, reject) => {
-    // 生成唯一的訊息 ID
-    const messageId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    const timeoutMs = getTimeoutForMessageType(message.type); // 根據類型獲取超時時間
-
-    debugLog('生成訊息 ID:', messageId, '類型:', message.type, '超時:', timeoutMs, 'ms');
-
-    // 創建監聽器
-    const listener = (event) => {
-      // 檢查 messageId 是否匹配
-      if (event.detail.messageId === messageId) {
-        // 收到回應，清理監聽器和超時計時器
-        cleanupListener(messageId);
-        debugLog('收到回應 (來自 content.js)', messageId, message.type, event.detail.response);
-
-        // 處理響應
-        if (event.detail.response?.error) {
-          // 模擬 chrome.runtime.lastError
-          const error = new Error(event.detail.response.error);
-          console.error('sendMessage 失敗:', messageId, message.type, error);
-          reject(error);
-        } else {
-          resolve(event.detail.response);
-        }
-      }
-    };
-
-    // 添加回應監聽器
-    window.addEventListener('responseFromContentScript', listener);
-    debugLog('添加回應監聽器:', messageId, message.type);
-
-    // 設置超時處理
-    const timeoutId = setTimeout(() => {
-      // 超時發生，清理監聽器和超時計時器
-      cleanupListener(messageId);
-      const error = new Error(`Message response timeout: ${message.type}`);
-      console.error('sendMessage 超時:', messageId, message.type, error);
-      reject(error);
-    }, timeoutMs);
-    debugLog('設置超時處理:', messageId, message.type, timeoutMs, 'ms');
-
-    // 保存監聽器和計時器引用
-    activeListeners.set(messageId, { listener, timeoutId, resolve, reject }); // 保存 resolve/reject 以便連接斷開時使用
-
-    // 發送事件到 content.js
-    window.dispatchEvent(new CustomEvent('messageToContentScript', {
-      detail: { messageId, message }
+  const messageId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const timeoutMs = getTimeoutForMessageType(message.type);
+  return getDomTransport().request(createEnvelope({
+    requestId: messageId,
+    kind: 'background-message',
+    payload: message
+  }), {
+    deadlineMs: timeoutMs,
+    wire: { messageId, message }
+  }).then((result) => {
+    debugLog('DOM 傳輸已結束', buildSafeDiagnostic({
+      requestId: messageId, capability: 'messaging', operation: 'background-message', protocolVersion: PRIVATE_PROTOCOL_VERSION,
+      result, deadlineMs: timeoutMs
     }));
-    debugLog('已發送訊息到 content.js:', messageId, message.type);
+    return unwrapLegacyResult(result);
   });
 }
 
@@ -440,76 +368,33 @@ export function onMessage(callback) {
 
 // === Page Script 通信功能 ===
 
-// 存儲 page script 監聽器
-const pageScriptListeners = new Map();
-
 /**
  * 發送消息到 page script
  * @param {Object} message - 消息對象
  * @returns {Promise<any>}
  */
 export function sendMessageToPageScript(message) {
-  debugLog('發送消息到 page script:', message);
-  
-  return new Promise((resolve, reject) => {
-    // 生成唯一的訊息 ID
-    const messageId = `page_msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    const timeoutMs = getTimeoutForMessageType(message.type);
-
-    debugLog('發送到 page script:', messageId, message.type, timeoutMs, 'ms');
-
-    // 創建監聽器
-    const listener = (event) => {
-      // 檢查消息來源和 messageId
-      if (event.data?.source === 'subpal-page-script' && 
-          event.data?.messageId === messageId) {
-        // 收到回應，清理監聽器和超時計時器
-        cleanupPageScriptListener(messageId);
-        debugLog('收到 page script 回應:', messageId, event.data);
-
-        resolve(event.data);
-      }
-    };
-
-    // 添加監聽器
-    window.addEventListener('message', listener);
-
-    // 設置超時處理
-    const timeoutId = setTimeout(() => {
-      cleanupPageScriptListener(messageId);
-      const error = new Error(`Page script message timeout: ${message.type}`);
-      console.error('page script 消息超時:', messageId, message.type, error);
-      reject(error);
-    }, timeoutMs);
-
-    // 保存監聽器和計時器引用
-    pageScriptListeners.set(messageId, { listener, timeoutId });
-
-    // 發送消息到 page script
-    window.postMessage({
+  const messageId = `page_msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const timeoutMs = getTimeoutForMessageType(message.type);
+  return getPageTransport().request(createEnvelope({
+    requestId: messageId,
+    kind: 'page-script-command',
+    payload: message
+  }), {
+    deadlineMs: timeoutMs,
+    wire: {
       source: 'subpal-content-script',
       target: 'subpal-page-script',
-      messageId: messageId,
+      messageId,
       ...message
-    }, '*');
-    
-    debugLog('已發送訊息到 page script:', messageId, message.type);
+    }
+  }).then((result) => {
+    debugLog('頁面傳輸已結束', buildSafeDiagnostic({
+      requestId: messageId, capability: 'messaging', operation: 'page-script-command', protocolVersion: PRIVATE_PROTOCOL_VERSION,
+      result, deadlineMs: timeoutMs
+    }));
+    return unwrapLegacyResult(result, false);
   });
-}
-
-/**
- * 清理 page script 監聽器
- * @param {string} messageId - 消息 ID
- */
-function cleanupPageScriptListener(messageId) {
-  const item = pageScriptListeners.get(messageId);
-  if (item) {
-    const { listener, timeoutId } = item;
-    window.removeEventListener('message', listener);
-    clearTimeout(timeoutId);
-    pageScriptListeners.delete(messageId);
-    debugLog(`清理 page script 監聽器: ${messageId}`);
-  }
 }
 
 /**
