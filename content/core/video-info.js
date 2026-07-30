@@ -259,13 +259,6 @@ class VideoInfoManager {
             // 通知視頻變更
             if (oldVideoId !== null) {
                 try {
-                    // 發送內部事件（給 content script 組件）
-                    dispatchInternalEvent({
-                        type: 'VIDEO_ID_CHANGED',
-                        oldVideoId: oldVideoId,
-                        newVideoId: videoId
-                    });
-                    
                     // 同時發送到 page script（給 netflix-page-script.js）
                     window.dispatchEvent(new CustomEvent('messageToContentScript', {
                         detail: {
