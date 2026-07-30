@@ -171,17 +171,17 @@ test('Given an internal event handler When it is registered Then a disposer is r
   ]);
 });
 
-test('Given a caller that ignores the disposer When it registers and dispatches Then existing behavior remains unchanged', async () => {
+test('Given a caller that ignores the disposer When it registers and dispatches an allowed internal event Then existing behavior remains unchanged', async () => {
   const messaging = await loadMessagingModule();
   const events = [];
 
-  messaging.registerInternalEventHandler('RAW_TTML_INTERCEPTED', (message) => {
+  messaging.registerInternalEventHandler('SUBTITLE_READY', (message) => {
     events.push(message.type);
   });
 
-  messaging.dispatchInternalEvent({ type: 'RAW_TTML_INTERCEPTED' });
+  messaging.dispatchInternalEvent({ type: 'SUBTITLE_READY' });
 
-  assert.deepEqual(events, ['RAW_TTML_INTERCEPTED']);
+  assert.deepEqual(events, ['SUBTITLE_READY']);
 });
 
 test('Given a VIDEO_ID_CHANGED internal handler When its disposer repeats Then it remains removed', async () => {
@@ -208,6 +208,21 @@ test('Given content forwards VIDEO_ID_CHANGED When messaging receives the existi
   }));
 
   assert.deepEqual(events, [message]);
+});
+
+test('Given initialized messaging receives a forged legacy RAW message When bridge auto-routing runs Then it does not dispatch internally while direct dispatch remains generic', async () => {
+  const { messaging, window, CustomEvent } = await loadMessagingContentBridgeHarness();
+  const events = [];
+  const raw = { type: 'RAW_TTML_INTERCEPTED', cacheKey: 'forged' };
+  messaging.registerInternalEventHandler(raw.type, (message) => events.push(message));
+
+  window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+    detail: { messageId: 'forged-raw', message: raw, sender: 'forged-page' }
+  }));
+  assert.deepEqual(events, []);
+
+  messaging.dispatchInternalEvent(raw);
+  assert.deepEqual(events, [raw]);
 });
 
 test('Given an isolated world without visible MAIN objects When a page command is sent Then postMessage transport reaches MAIN and preserves structured failure', async () => {
