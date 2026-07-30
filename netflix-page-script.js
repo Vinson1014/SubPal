@@ -15,6 +15,7 @@
 
   const PAGE_SCRIPT_READY_EVENT = 'subpal-page-script-ready';
   const PAGE_SCRIPT_READY_REQUEST_EVENT = 'subpal-request-page-script-ready';
+  const TTML_ACQUISITION_CAPTURED_EVENT = 'subpal-ttml-acquisition-captured';
   const HISTORY_VIDEO_ID_CHANGE_WRAPPED = '__subpalVideoIdChangeWrapped';
 
   if (history[HISTORY_VIDEO_ID_CHANGE_WRAPPED] !== true) {
@@ -1391,7 +1392,9 @@
       });
 
       // 緩存 raw TTML（混合策略：既緩存又通知）
-      this.evictOldTTMLEntries();
+      if (!this.interceptedTTMLs.has(cacheKey)) {
+        this.evictOldTTMLEntries(1);
+      }
       this.interceptedTTMLs.set(cacheKey, {
         rawContent: content,
         requestInfo: requestInfo,
@@ -1400,6 +1403,7 @@
         language: language,
         timestamp: Date.now()
       });
+      if (!this.interceptedTTMLs.has(cacheKey)) return;
 
       // 通知後續模組（即使沒人接收也沒關係）
       this.notifyRawTTMLIntercepted({
@@ -1446,9 +1450,7 @@
      * 通知 raw TTML 攔截完成
      */
     notifyRawTTMLIntercepted(data) {
-      const messageId = this.generateMessageId();
-
-      debugLog('發送 raw TTML 攔截消息:', { messageId, cacheKey: data.cacheKey, language: data.language });
+      debugLog('發送 raw TTML 攔截消息:', { cacheKey: data.cacheKey, language: data.language });
       this.recordDebugEvent('RAW_TTML_INTERCEPTED', {
         cacheKey: data.cacheKey,
         language: data.language,
@@ -1465,13 +1467,16 @@
         requestUrl: data.requestInfo?.url
       });
 
-      // 觸發 messageToContentScript 事件，符合 SubPal 架構
-      window.dispatchEvent(new CustomEvent('messageToContentScript', {
+      window.dispatchEvent(new CustomEvent(TTML_ACQUISITION_CAPTURED_EVENT, {
         detail: {
-          messageId: messageId,
-          message: {
-            type: 'RAW_TTML_INTERCEPTED',
-            ...data,
+          protocolVersion: 1,
+          evidence: {
+            cacheKey: data.cacheKey,
+            rawContent: data.rawContent,
+            language: data.language,
+            requestInfo: data.requestInfo,
+            rawMetadata: data.rawMetadata,
+            metadata: data.metadata,
             source: 'netflix-page-script'
           }
         }
@@ -1579,27 +1584,17 @@
     }
 
     /**
-     * 清理過舊或過多的 raw TTML 快取（純時間/數量淘汰，不依賴 videoId）
+     * 只以容量限制 raw TTML 快取，避免尚可歸屬的舊證據被時間刪除。
      */
-    evictOldTTMLEntries() {
-      const now = Date.now();
-      const MAX_AGE_MS = 30 * 60 * 1000; // 30 分鐘
+    evictOldTTMLEntries(reserve = 0) {
       const MAX_SIZE = 50;
 
-      // 1) 移除超過 30 分鐘的條目
-      for (const [key, value] of this.interceptedTTMLs) {
-        if (now - value.timestamp > MAX_AGE_MS) {
-          this.interceptedTTMLs.delete(key);
-        }
-      }
-
-      // 2) 若仍超過硬上限，移除最舊的條目
-      if (this.interceptedTTMLs.size > MAX_SIZE) {
-        const entries = Array.from(this.interceptedTTMLs.entries());
-        entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
-        const toDelete = entries.slice(0, this.interceptedTTMLs.size - MAX_SIZE);
-        for (const [key] of toDelete) {
-          this.interceptedTTMLs.delete(key);
+      if (this.interceptedTTMLs.size + reserve > MAX_SIZE) {
+        const entries = Array.from(this.interceptedTTMLs.entries()).map(([key, value], index) => ({ key, value, index }));
+        entries.sort((a, b) => a.value.timestamp - b.value.timestamp || a.index - b.index);
+        const toDelete = entries.slice(0, this.interceptedTTMLs.size + reserve - MAX_SIZE);
+        for (const entry of toDelete) {
+          this.interceptedTTMLs.delete(entry.key);
         }
       }
     }
