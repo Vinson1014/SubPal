@@ -233,6 +233,7 @@ export async function loadRealContentTransport(background, sender = netflixSende
   const portMessages = [];
   const runtimeMessages = [];
   const portMessageListeners = [];
+  const portDisconnectListeners = [];
   const port = {
     name: 'subtitle-assistant-channel',
     sender,
@@ -240,8 +241,8 @@ export async function loadRealContentTransport(background, sender = netflixSende
       portMessages.push(message);
       backgroundPortListener(message);
     },
-    disconnect() {},
-    onDisconnect: { addListener() {} },
+    disconnect() { for (const listener of portDisconnectListeners) listener(); },
+    onDisconnect: { addListener(listener) { portDisconnectListeners.push(listener); } },
     onMessage: { addListener(listener) { portMessageListeners.push(listener); } }
   };
   let backgroundPortListener = null;
@@ -297,11 +298,38 @@ export async function loadRealContentTransport(background, sender = netflixSende
       storage: { local: { async get() { return {}; } } }
     }
   });
+  const [resultSource, diagnosticsSource, transportsSource] = await Promise.all([
+    readFile(new URL('../content/system/capabilities/result.js', import.meta.url), 'utf8'),
+    readFile(new URL('../content/system/capabilities/private-transport-diagnostics.js', import.meta.url), 'utf8'),
+    readFile(new URL('../content/system/capabilities/private-transports.js', import.meta.url), 'utf8')
+  ]);
+  const resultModule = new vm.SourceTextModule(resultSource, { context, identifier: 'content/system/capabilities/result.js' });
+  const diagnosticsModule = new vm.SourceTextModule(diagnosticsSource, { context, identifier: 'content/system/capabilities/private-transport-diagnostics.js' });
+  const transportsModule = new vm.SourceTextModule(transportsSource, { context, identifier: 'content/system/capabilities/private-transports.js' });
+  await resultModule.link(() => { throw new Error('result.js should not import dependencies'); });
+  await diagnosticsModule.link(() => { throw new Error('diagnostics should not import dependencies'); });
+  await transportsModule.link((specifier) => {
+    if (specifier === './result.js') return resultModule;
+    if (specifier === './private-transport-diagnostics.js') return diagnosticsModule;
+    throw new Error(`Unexpected private transport dependency: ${specifier}`);
+  });
+  await resultModule.evaluate();
+  await diagnosticsModule.evaluate();
+  await transportsModule.evaluate();
   const contentSource = await readFile(new URL('../content.js', import.meta.url), 'utf8');
-  new vm.Script(contentSource, { filename: 'content.js' }).runInContext(context);
+  new vm.Script(contentSource, {
+    filename: 'content.js',
+    importModuleDynamically: async (specifier) => {
+      if (specifier.endsWith('capabilities/private-transports.js')) return transportsModule;
+      throw new Error(`Unexpected content import: ${specifier}`);
+    }
+  }).runInContext(context);
   const messagingSource = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
   const messagingModule = new vm.SourceTextModule(messagingSource, { context, identifier: 'content/system/messaging.js' });
-  await messagingModule.link(() => { throw new Error('messaging.js should not import dependencies'); });
+  await messagingModule.link((specifier) => {
+    assert.equal(specifier, './capabilities/private-transports.js');
+    return transportsModule;
+  });
   await messagingModule.evaluate();
   const controllerSource = await readFile(new URL('../content/core/endscreen-task-controller.js', import.meta.url), 'utf8');
   const controllerModule = new vm.SourceTextModule(controllerSource, { context, identifier: 'content/core/endscreen-task-controller.js' });
@@ -309,12 +337,19 @@ export async function loadRealContentTransport(background, sender = netflixSende
   await controllerModule.evaluate();
   const taskClientSource = await readFile(new URL('../content/system/crowdsourcing-task-client.js', import.meta.url), 'utf8');
   const taskClientModule = new vm.SourceTextModule(taskClientSource, { context, identifier: 'content/system/crowdsourcing-task-client.js' });
-  await taskClientModule.link(() => { throw new Error('crowdsourcing-task-client.js should not import dependencies'); });
+  await taskClientModule.link((specifier) => {
+    assert.equal(specifier, './capabilities/private-transports.js');
+    return transportsModule;
+  });
   await taskClientModule.evaluate();
+  await Promise.resolve();
+  await Promise.resolve();
 
   return {
     EndscreenTaskController: controllerModule.namespace.EndscreenTaskController,
     sendMessage: taskClientModule.namespace.requestCrowdsourcingTasks,
+    sendLegacyMessage: messagingModule.namespace.sendMessage,
+    disconnectContentPort() { port.disconnect(); },
     portMessages,
     runtimeMessages,
     window,

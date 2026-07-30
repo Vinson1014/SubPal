@@ -12,6 +12,11 @@ import {
   waitForResponse
 } from './crowdsourcing-test-harness.mjs';
 
+function deferred() {
+  let resolve;
+  return { promise: new Promise((resolvePromise) => { resolve = resolvePromise; }), resolve };
+}
+
 test('Given existing subtitle route When CHECK_SUBTITLE is sent over content port Then subtitles are returned', async () => {
   const background = await loadBackgroundWithApi({
     async fetchSubtitles(options) {
@@ -26,6 +31,19 @@ test('Given existing subtitle route When CHECK_SUBTITLE is sent over content por
     success: true,
     subtitles: [{ translationID: 'translation-1', originalSubtitle: 'Hello' }]
   }));
+});
+
+test('Given a pending legacy DOM request When the real content Port disconnects Then the caller rejects with the normalized Port code', async () => {
+  const pendingSubtitle = deferred();
+  const background = await loadBackgroundWithApi({
+    async fetchSubtitles() { return pendingSubtitle.promise; }
+  });
+  const transport = await loadRealContentTransport(background);
+  const request = transport.sendLegacyMessage({ type: 'CHECK_SUBTITLE', videoId: 'netflix-81234567', timestamp: 12 });
+  await new Promise(setImmediate);
+  transport.disconnectContentPort();
+  await assert.rejects(request, (error) => error?.kind === 'disconnected' && error.code === 'background-port-disconnected' && error.retryable === true && error.message === 'background-port-disconnected');
+  pendingSubtitle.resolve([]);
 });
 
 test('Given a task query on the generic content port When GET_CROWDSOURCING_TASKS is sent Then it is rejected without API calls', async () => {
