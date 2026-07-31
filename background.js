@@ -27,6 +27,7 @@ import {
   setBackendProfileCredentials
 } from './background/backend-profiles.js';
 import { ensureStorageMigrationsComplete } from './background/storage-migrations.js';
+import { enqueueContribution, parseContributionIntent, readVoteAuthority, retryContribution } from './background/contribution-queue.js';
 
 let lifecycleInitialization;
 
@@ -117,6 +118,11 @@ const BACKEND_PROFILE_COMMANDS = new Set([
   'BACKEND_PROFILES_DELETE',
   'BACKEND_PROFILES_EXPORT_QUEUE'
 ]);
+const CONTRIBUTION_ENQUEUE_COMMAND = 'CONTRIBUTION_ENQUEUE';
+// Temporary private adapters until Slice 7 migrates their public callers.
+const CONTRIBUTION_COMPATIBILITY_COMMANDS = new Set([
+  'VOTE_RETRY', 'TRANSLATION_RETRY', 'REPLACEMENT_EVENT_RETRY', 'VOTE_GET_AUTHORITY'
+]);
 
 function profileFailure(kind, code) {
   return { ok: false, error: { kind, code, retryable: false } };
@@ -160,6 +166,108 @@ function isTrustedOptionsSender(port) {
       (sender.origin === undefined || sender.origin === optionsOrigin);
   } catch {
     return false;
+  }
+}
+
+function isHttpsNetflixUrl(value) {
+  try {
+    const { hostname, protocol } = new URL(value);
+    return protocol === 'https:' && (hostname === 'netflix.com' || hostname.endsWith('.netflix.com'));
+  } catch {
+    return false;
+  }
+}
+
+function isTrustedContributionPort(port) {
+  try {
+    const sender = port?.sender;
+    const tab = sender?.tab;
+    return port?.name === 'subtitle-assistant-channel' &&
+      sender?.id === chrome.runtime.id &&
+      Number.isInteger(tab?.id) && tab.id >= 0 &&
+      isHttpsNetflixUrl(sender.url) && isHttpsNetflixUrl(tab.url);
+  } catch {
+    return false;
+  }
+}
+
+function contributionFailure(kind, code, retryable = false) {
+  return { ok: false, error: { kind, code, retryable } };
+}
+
+function parseContributionRequest(request) {
+  try {
+    if (!isRecord(request)) return null;
+    const keys = Object.getOwnPropertyNames(request);
+    if (Object.getOwnPropertySymbols(request).length !== 0 || keys.length !== 2 || !keys.includes('type') || !keys.includes('intent')) return null;
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(request, key);
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || descriptor.enumerable !== true) return null;
+    }
+    if (request.type !== CONTRIBUTION_ENQUEUE_COMMAND) return null;
+    const intent = parseContributionIntent(request.intent);
+    return intent ? { intent: request.intent } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function handleContributionPortRequest(messageId, request, port) {
+  if (!isTrustedContributionPort(port)) {
+    port.postMessage({ messageId, response: contributionFailure('forbidden', 'contribution-port-access') });
+    return;
+  }
+  const parsed = parseContributionRequest(request);
+  if (!parsed) {
+    port.postMessage({ messageId, response: contributionFailure('invalid', 'contribution-input') });
+    return;
+  }
+  try {
+    await ensureStorageMigrationsComplete(chrome.storage.local);
+    const value = await enqueueContribution(chrome.storage.local, parsed.intent);
+    port.postMessage({ messageId, response: { ok: true, value } });
+  } catch (error) {
+    const code = error?.message === 'Invalid active backend profile'
+      ? 'profile-unavailable'
+      : error?.message === 'Invalid contribution intent'
+        ? 'contribution-input'
+        : 'local-persistence-failed';
+    port.postMessage({ messageId, response: contributionFailure('domain-rejected', code, code === 'local-persistence-failed') });
+  }
+}
+
+function parseContributionCompatibilityRequest(request) {
+  try {
+    if (!isRecord(request) || !CONTRIBUTION_COMPATIBILITY_COMMANDS.has(request.type)) return null;
+    const keys = Object.keys(request);
+    if (keys.length !== 2 || !keys.includes('type') || !keys.includes('payload') || !isRecord(request.payload)) return null;
+    const payloadKeys = Object.keys(request.payload);
+    const expectedKey = request.type === 'VOTE_GET_AUTHORITY' ? 'translationID' : 'itemId';
+    if (payloadKeys.length !== 1 || payloadKeys[0] !== expectedKey || typeof request.payload[expectedKey] !== 'string' || !request.payload[expectedKey]) return null;
+    return { type: request.type, value: request.payload[expectedKey] };
+  } catch {
+    return null;
+  }
+}
+
+async function handleContributionCompatibilityPortRequest(messageId, request, port) {
+  if (!isTrustedContributionPort(port)) {
+    port.postMessage({ messageId, response: { error: 'Unauthorized contribution compatibility request' } });
+    return;
+  }
+  const parsed = parseContributionCompatibilityRequest(request);
+  if (!parsed) {
+    port.postMessage({ messageId, response: { error: 'Invalid contribution compatibility request' } });
+    return;
+  }
+  try {
+    await ensureStorageMigrationsComplete(chrome.storage.local);
+    const response = parsed.type === 'VOTE_GET_AUTHORITY'
+      ? await readVoteAuthority(chrome.storage.local, parsed.value)
+      : { success: await retryContribution(chrome.storage.local, parsed.type, parsed.value) };
+    port.postMessage({ messageId, response });
+  } catch (error) {
+    port.postMessage({ messageId, response: { error: error?.message || 'Contribution compatibility request failed' } });
   }
 }
 
@@ -284,6 +392,14 @@ chrome.runtime.onConnect.addListener((port) => {
       const { messageId, message, type } = request;
       if (isBackendProfileCommand(type)) {
         port.postMessage({ messageId, response: profileFailure('forbidden', 'page-profile-change') });
+        return;
+      }
+      if (type === CONTRIBUTION_ENQUEUE_COMMAND) {
+        void handleContributionPortRequest(messageId, message, port);
+        return;
+      }
+      if (CONTRIBUTION_COMPATIBILITY_COMMANDS.has(type)) {
+        void handleContributionCompatibilityPortRequest(messageId, message, port);
         return;
       }
       const handledCoreMessageTypes = [
