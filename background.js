@@ -410,16 +410,16 @@ function handleCoreMessagePort(messageId, request, port) {
 
 
 /**
- * 處理 CHECK_SUBTITLE 請求
- * @param {Object} request - 消息請求對象
+ * 處理私有字幕查詢
+ * @param {Object} request - 私有 Port 請求對象
  * @param {Function} portSendResponse - 回應函數
  */
-async function handleCheckSubtitle(request, portSendResponse) {
-  const { videoId, timestamp } = request;
+async function handleSubtitleQuery(request, portSendResponse) {
+  const { videoId, timestamp, duration } = request.query || {};
 
-  if (!videoId || typeof timestamp !== 'number') {
-    console.error('[Background] CHECK_SUBTITLE error: Missing videoId or timestamp');
-    portSendResponse({ success: false, error: '缺少 videoId 或 timestamp' });
+  if (!videoId || typeof timestamp !== 'number' || duration !== 180) {
+    console.error('[Background] SUBTITLE_QUERY error: invalid subtitle query');
+    portSendResponse({ ok: false, error: { kind: 'invalid', code: 'subtitle-query', retryable: false } });
     return;
   }
 
@@ -429,14 +429,14 @@ async function handleCheckSubtitle(request, portSendResponse) {
     const subtitles = await apiModule.fetchSubtitles({
       videoId: videoId,
       startTime: timestamp,
-      duration: 180 // 3分鐘
+      duration
     });
 
     console.log(`[Background] Successfully fetched ${subtitles.length} subtitles`);
-    portSendResponse({ success: true, subtitles: subtitles });
+    portSendResponse({ ok: true, value: { subtitles } });
   } catch (error) {
     console.error('[Background] Error fetching subtitles:', error);
-    portSendResponse({ success: false, error: `獲取字幕失敗: ${error.message}` });
+    portSendResponse({ ok: false, error: { kind: 'domain-rejected', code: 'subtitle-fetch-failed', retryable: false } });
   }
 }
 
@@ -512,7 +512,7 @@ function handleRuntimeCrowdsourcingTasks(request, sender, sendResponse) {
 function routeMessageToModulePort(messageId, request, port) {
   // 定義訊息類型到模組的映射
   const moduleMapping = {
-    'CHECK_SUBTITLE': 'api',
+    'SUBTITLE_QUERY': 'api',
     'RETRY_FAILED_VOTES': 'sync',
     'RETRY_FAILED_TRANSLATIONS': 'sync',
     'RETRY_FAILED_REPLACEMENT_EVENTS': 'sync',
@@ -533,8 +533,8 @@ function routeMessageToModulePort(messageId, request, port) {
     switch (moduleName) {
       case 'api':
         console.log('[Background] Handling in api module (port):', request.type);
-        if (request.type === 'CHECK_SUBTITLE') {
-          handleCheckSubtitle(request, portSendResponse);
+        if (request.type === 'SUBTITLE_QUERY') {
+          handleSubtitleQuery(request, portSendResponse);
         } else {
           console.error('[Background] Unhandled API request type:', request.type);
           portSendResponse({ success: false, error: `Unhandled API request type: ${request.type}` });

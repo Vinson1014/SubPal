@@ -17,7 +17,7 @@ function deferred() {
   return { promise: new Promise((resolvePromise) => { resolve = resolvePromise; }), resolve };
 }
 
-test('Given existing subtitle route When CHECK_SUBTITLE is sent over content port Then subtitles are returned', async () => {
+test('Given a private subtitle query When it is sent over the content Port Then normalized subtitles are returned', async () => {
   const background = await loadBackgroundWithApi({
     async fetchSubtitles(options) {
         assert.equal(JSON.stringify(options), JSON.stringify({ videoId: 'netflix-81234567', startTime: 12, duration: 180 }));
@@ -26,20 +26,39 @@ test('Given existing subtitle route When CHECK_SUBTITLE is sent over content por
   });
   const { port, sentMessages, send } = createPort();
   background.connect(port);
-  send({ messageId: 'baseline-1', message: { type: 'CHECK_SUBTITLE', videoId: 'netflix-81234567', timestamp: 12 } });
+  send({
+    messageId: 'baseline-1',
+    message: {
+      type: 'SUBTITLE_QUERY',
+      query: {
+        videoId: 'netflix-81234567',
+        timestamp: 12,
+        duration: 180,
+        context: { videoId: 'netflix-81234567', sessionId: 'watch-session-1', epoch: 7 }
+      }
+    }
+  });
   assert.equal(JSON.stringify(await waitForResponse(sentMessages, 'baseline-1')), JSON.stringify({
-    success: true,
-    subtitles: [{ translationID: 'translation-1', originalSubtitle: 'Hello' }]
+    ok: true,
+    value: { subtitles: [{ translationID: 'translation-1', originalSubtitle: 'Hello' }] }
   }));
 });
 
-test('Given a pending legacy DOM request When the real content Port disconnects Then the caller rejects with the normalized Port code', async () => {
+test('Given a pending subtitle query When the real content Port disconnects Then the caller rejects with the normalized Port code', async () => {
   const pendingSubtitle = deferred();
   const background = await loadBackgroundWithApi({
     async fetchSubtitles() { return pendingSubtitle.promise; }
   });
   const transport = await loadRealContentTransport(background);
-  const request = transport.sendLegacyMessage({ type: 'CHECK_SUBTITLE', videoId: 'netflix-81234567', timestamp: 12 });
+  const request = transport.sendLegacyMessage({
+    type: 'SUBTITLE_QUERY',
+    query: {
+      videoId: 'netflix-81234567',
+      timestamp: 12,
+      duration: 180,
+      context: { videoId: 'netflix-81234567', sessionId: 'watch-session-1', epoch: 7 }
+    }
+  });
   await new Promise(setImmediate);
   transport.disconnectContentPort();
   await assert.rejects(request, (error) => error?.kind === 'disconnected' && error.code === 'background-port-disconnected' && error.retryable === true && error.message === 'background-port-disconnected');
