@@ -168,7 +168,9 @@ class EndscreenActionCoordinator {
         voteState,
         resolutionContext: actionData.resolutionContext
       });
-      return result?.itemId ? { status: 'success' } : { status: 'error', error: '投票未加入隊列，請再試一次。' };
+      return result?.ok === true && result.value?.status === 'queued-locally' && result.value.operationId
+        ? { status: 'queued-locally', operationId: result.value.operationId }
+        : { status: 'error', error: '投票未加入隊列，請再試一次。' };
     } catch (error) {
       return { status: 'error', error: error instanceof Error ? error.message : '投票失敗，請再試一次。' };
     }
@@ -259,8 +261,10 @@ class EndscreenActionCoordinator {
         translationID: null,
         sourceTranslationID: payload.sourceTranslationID
       });
-      const completion = result?.itemId ? { status: 'success' } : { status: 'error', error: '翻譯未加入隊列，請再試一次。' };
-      if (completion.status === 'success') this.finishSubmission(pending, completion);
+      const completion = result?.ok === true && result.value?.status === 'queued-locally' && result.value.operationId
+        ? { status: 'queued-locally', operationId: result.value.operationId }
+        : { status: 'error', error: '翻譯未加入隊列，請再試一次。' };
+      if (completion.status === 'queued-locally') this.finishSubmission(pending, completion);
       else pending.isSubmitting = false;
       return completion;
     } catch (error) {

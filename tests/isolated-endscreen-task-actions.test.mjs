@@ -60,7 +60,7 @@ function createPayload(intent, task = officialTask) {
   };
 }
 
-function createOwner({ translationResult = { itemId: 'translation-1' }, translationError = null, voteResult = { itemId: 'vote-1' }, sendPageMessage = async (message) => ({ success: true, status: 'success', action: 'jump-to-timecode', requestId: message.requestId, controlId: message.controlId, issuedAt: message.issuedAt, expected: message.expected, targetTimestamp: message.expected.targetTimestamp, targetMilliseconds: message.expected.targetTimestamp * 1000, snapshot: { videoId: message.expected.videoId, sessionId: message.expected.sessionId, currentTime: message.expected.targetTimestamp * 1000 } }), pathname = '/watch/81234567', playbackContext = { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, state: 'ready' }, playbackContextManager = { getCurrentContext: () => ({ ...playbackContext }) } } = {}) {
+function createOwner({ translationResult = { ok: true, value: { status: 'queued-locally', operationId: 'translation-1' } }, translationError = null, voteResult = { ok: true, value: { status: 'queued-locally', operationId: 'vote-1' } }, sendPageMessage = async (message) => ({ success: true, status: 'success', action: 'jump-to-timecode', requestId: message.requestId, controlId: message.controlId, issuedAt: message.issuedAt, expected: message.expected, targetTimestamp: message.expected.targetTimestamp, targetMilliseconds: message.expected.targetTimestamp * 1000, snapshot: { videoId: message.expected.videoId, sessionId: message.expected.sessionId, currentTime: message.expected.targetTimestamp * 1000 } }), pathname = '/watch/81234567', playbackContext = { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, state: 'ready' }, playbackContextManager = { getCurrentContext: () => ({ ...playbackContext }) } } = {}) {
   const calls = { opens: [], translations: [], votes: [], pageMessages: [] };
   const location = { pathname };
   const internalEventHandlers = new Map();
@@ -230,7 +230,7 @@ test('Given an isolated submit action When the dialog opens Then completion wait
   });
 
   await completion;
-  assert.deepEqual(await action, { status: 'success' });
+  assert.deepEqual(await action, { status: 'queued-locally', operationId: 'translation-1' });
   assert.equal(calls.translations.length, 1);
   assert.deepEqual(calls.translations[0].resolutionContext, resolutionContext);
   assert.equal(calls.translations[0].translationID, null);
@@ -274,7 +274,7 @@ test('Given a candidate vote action When handled by the isolated owner Then vote
 
   const result = await owner.handlePanelAction(owner.panel, 1, createPayload('vote-like', candidateTask));
 
-  assert.deepEqual(result, { status: 'success' });
+  assert.deepEqual(result, { status: 'queued-locally', operationId: 'vote-1' });
   assert.equal(calls.votes.length, 1);
   assert.equal(calls.votes[0].translationID, candidateTask.translationID);
   assert.deepEqual(Object.keys(calls.votes[0].resolutionContext).sort(), ['action', 'slotKey', 'targetType', 'taskID', 'timestamp']);
@@ -290,7 +290,7 @@ test('Given a non-jump action When handled by the isolated owner Then no page se
 
   const result = await owner.handlePanelAction(owner.panel, 1, createPayload('vote-like', candidateTask));
 
-  assert.deepEqual(result, { status: 'success' });
+  assert.deepEqual(result, { status: 'queued-locally', operationId: 'vote-1' });
   assert.deepEqual(calls.pageMessages, []);
 });
 
@@ -651,7 +651,7 @@ test('Given an opted-out owner When a vote or submission reaches enqueue Then no
   owner.configManager.get = (key) => key === 'crowdsourcing.endscreenTasksEnabled' ? setting.enabled : true;
 
   const vote = await owner.handlePanelAction(owner.panel, 1, createPayload('vote-like', candidateTask));
-  assert.equal(vote.status, 'success');
+  assert.equal(vote.status, 'queued-locally');
   setting.enabled = false;
 
   const submission = owner.handlePanelAction(owner.panel, 1, createPayload('submit-improvement'));
@@ -698,7 +698,7 @@ test('Given isolated startup When the panel emits a submit intent Then the same-
     submissionReason: 'improvement'
   });
 
-  assert.deepEqual(await action, { status: 'success' });
+  assert.deepEqual(await action, { status: 'queued-locally', operationId: 'translation-1' });
   assert.equal(calls.translations.length, 1);
   owner.cleanup();
 });
@@ -717,7 +717,7 @@ test('Given a candidate better-submit When the dialog submits Then the queue rec
     submissionReason: 'candidate improvement'
   });
 
-  assert.deepEqual(await action, { status: 'success' });
+  assert.deepEqual(await action, { status: 'queued-locally', operationId: 'translation-1' });
   assert.equal(calls.translations[0].sourceTranslationID, task.translationID);
   assert.equal(calls.translations[0].translationID, null);
   assert.deepEqual(Object.keys(calls.translations[0].resolutionContext).sort(), ['action', 'slotKey', 'targetType', 'taskID', 'timestamp']);
@@ -760,7 +760,7 @@ test('Given a nullable slot key When the isolated submit action queues Then it p
     submissionReason: 'improvement'
   });
 
-  assert.deepEqual(await action, { status: 'success' });
+  assert.deepEqual(await action, { status: 'queued-locally', operationId: 'translation-1' });
   assert.equal(calls.translations[0].resolutionContext.slotKey, null);
 });
 

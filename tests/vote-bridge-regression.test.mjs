@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { enqueueContribution } from '../background/contribution-queue.js';
 
 async function loadVoteBridge(sendMessage) {
   const source = await readFile(new URL('../content/core/vote-bridge.js', import.meta.url), 'utf8');
@@ -23,49 +24,23 @@ async function loadVoteBridge(sendMessage) {
   return module.namespace.voteBridge;
 }
 
-async function loadSubmissionQueueManager({ queue = [], uuid = 'vote-item-1' } = {}) {
-  const source = await readFile(
-    new URL('../content/core/submission-queue-manager.js', import.meta.url),
-    'utf8'
-  );
-  const context = vm.createContext({ console, __uuid: uuid });
-  const storageModule = new vm.SourceTextModule(
-    `export class StorageAdapter {
-      async initialize() {}
-      async getQueue() { return []; }
-      async getHistory() { return []; }
-    }
-    export const generateUUID = () => globalThis.__uuid;`,
-    { context }
-  );
-  const module = new vm.SourceTextModule(source, {
-    context,
-    identifier: 'content/core/submission-queue-manager.js'
-  });
-
-  await module.link((specifier) => {
-    if (specifier === '../system/config/storage-adapter.js') return storageModule;
-    throw new Error(`Unexpected import: ${specifier}`);
-  });
-  await module.evaluate();
-
-  const storedQueue = structuredClone(queue);
-  const storage = {
-    async getQueue(type) {
-      assert.equal(type, 'vote');
-      return storedQueue;
+function queueStorage(queue = []) {
+  const values = {
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'profile-a',
+      byId: { 'profile-a': { id: 'profile-a', endpoint: 'https://a.example.test', userId: 'user-a', jwt: null } }
     },
-    async appendToQueue(type, item) {
-      assert.equal(type, 'vote');
-      storedQueue.push(structuredClone(item));
-    },
-    async set(value) {
-      assert.deepEqual(Object.keys(value), ['voteQueue']);
-      storedQueue.splice(0, storedQueue.length, ...structuredClone(value.voteQueue));
-    }
+    voteQueue: structuredClone(queue)
   };
-  const manager = new module.namespace.SubmissionQueueManager({ storage });
-  return { manager, storedQueue };
+  return {
+    async get(keys) {
+      const requested = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(requested.map((key) => [key, structuredClone(values[key])]));
+    },
+    async set(updates) { Object.assign(values, structuredClone(updates)); },
+    values
+  };
 }
 
 function legacyVote(voteType) {
@@ -88,7 +63,7 @@ function resolutionContext(overrides = {}) {
   };
 }
 
-test('Given legacy upvote and downvote calls When voteBridge serializes them Then voteState is omitted', async () => {
+test('Given legacy upvote and downvote calls When voteBridge serializes them Then each uses a typed contribution intent and voteState is omitted', async () => {
   const messages = [];
   const voteBridge = await loadVoteBridge(async (message) => {
     messages.push(message);
@@ -100,7 +75,8 @@ test('Given legacy upvote and downvote calls When voteBridge serializes them The
 
   assert.equal(messages.length, 2);
   for (const message of messages) {
-    assert.equal(message.type, 'VOTE_ENQUEUE');
+    assert.equal(message.category, 'contribution-intent');
+    assert.equal(message.variant, 'enqueue-vote');
     assert.equal(Object.hasOwn(message.payload, 'voteState'), false);
   }
 });
@@ -123,19 +99,20 @@ test('Given explicit translation vote states When voteBridge serializes them The
   assert.deepEqual(messages.map((message) => message.payload.voteState), ['like', 'dislike', 'none']);
 });
 
-test('Given voteState is omitted When SubmissionQueueManager enqueues a legacy vote Then the vote is accepted', async () => {
-  const { manager, storedQueue } = await loadSubmissionQueueManager();
+test('Given voteState is omitted When the background queue enqueues a legacy vote Then the vote is accepted', async () => {
+  const storage = queueStorage();
+  const result = await enqueueContribution(storage, { category: 'contribution-intent', variant: 'enqueue-vote', payload: legacyVote('upvote') });
 
-  const result = await manager.enqueueVote(legacyVote('upvote'));
-
-  assert.equal(result.itemId, 'vote-item-1');
-  assert.equal(storedQueue.length, 1);
-  assert.equal(storedQueue[0].status, 'pending');
+  assert.equal(result.status, 'queued-locally');
+  assert.equal(storage.values.voteQueue.length, 1);
+  assert.equal(storage.values.voteQueue[0].status, 'pending');
 });
 
-test('Given a pending translation vote When a later vote is merged Then its item ID and non-null rollback baseline are retained', async () => {
+test('Given a pending translation vote When a later vote is merged by the background queue Then its item ID and non-null rollback baseline are retained', async () => {
   const pendingVote = {
     id: 'existing-vote-1',
+    operationId: 'existing-vote-1',
+    backendProfileId: 'profile-a',
     videoId: 'netflix-81234567',
     timestamp: 12.5,
     voteType: 'upvote',
@@ -147,22 +124,22 @@ test('Given a pending translation vote When a later vote is merged Then its item
     createdAt: 1,
     updatedAt: 1
   };
-  const { manager, storedQueue } = await loadSubmissionQueueManager({ queue: [pendingVote] });
+  const storage = queueStorage([pendingVote]);
 
-  const result = await manager.enqueueVote({
+  const result = await enqueueContribution(storage, { category: 'contribution-intent', variant: 'enqueue-vote', payload: {
     ...legacyVote('downvote'),
     translationID: 'translation-1',
     voteState: 'dislike',
     previousVoteState: 'like',
     previousCounts: { like: 5, dislike: 2 }
-  });
+  }});
 
-  assert.equal(result.itemId, 'existing-vote-1');
-  assert.equal(storedQueue.length, 1);
-  assert.equal(storedQueue[0].id, 'existing-vote-1');
-  assert.equal(storedQueue[0].voteState, 'dislike');
-  assert.equal(storedQueue[0].previousVoteState, 'dislike');
-  assert.deepEqual(storedQueue[0].previousCounts, { like: 4, dislike: 2 });
+  assert.equal(result.operationId, 'existing-vote-1');
+  assert.equal(storage.values.voteQueue.length, 1);
+  assert.equal(storage.values.voteQueue[0].id, 'existing-vote-1');
+  assert.equal(storage.values.voteQueue[0].voteState, 'dislike');
+  assert.equal(storage.values.voteQueue[0].previousVoteState, 'dislike');
+  assert.deepEqual(storage.values.voteQueue[0].previousCounts, { like: 4, dislike: 2 });
 });
 
 test('Given sendMessage returns an error When voteBridge enqueues Then the response error is wrapped', async () => {
@@ -188,7 +165,8 @@ test('Given a normal subtitle hover vote When voteBridge enqueues it Then the le
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
-    type: 'VOTE_ENQUEUE',
+    category: 'contribution-intent',
+    variant: 'enqueue-vote',
     payload: {
       videoId: 'netflix-81234567',
       timestamp: 12.5,

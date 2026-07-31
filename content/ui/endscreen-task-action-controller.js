@@ -118,7 +118,7 @@ class EndscreenTaskActionController {
   }
 
   applyResult(intent, result, notifyIdle = false) {
-    if (result?.status === 'success') {
+    if (result?.status === 'success' || result?.status === 'queued-locally') {
       this.state = 'success';
       this.error = null;
       this.successfulIntent = intent;

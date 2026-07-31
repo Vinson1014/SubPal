@@ -127,7 +127,7 @@ export const voteBridge = {
     }
 
     try {
-      this.log('發送 VOTE_ENQUEUE 消息到 content script');
+      this.log('發送 typed vote contribution intent 到 content script');
       const payload = {
         videoId,
         timestamp,
@@ -148,11 +148,12 @@ export const voteBridge = {
       }
 
       const response = await sendMessage({
-        type: 'VOTE_ENQUEUE',
+        category: 'contribution-intent',
+        variant: 'enqueue-vote',
         payload
       });
 
-      this.log('VOTE_ENQUEUE 響應:', response);
+      this.log('vote contribution intent 響應:', response);
 
       if (response.error) {
         throw new Error(response.error);

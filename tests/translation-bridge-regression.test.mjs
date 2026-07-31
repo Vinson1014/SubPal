@@ -46,7 +46,7 @@ function resolutionContext(overrides = {}) {
   };
 }
 
-test('Given a normal subtitle hover submission When translationBridge enqueues it Then the legacy payload shape remains unchanged', async () => {
+test('Given a normal subtitle hover submission When translationBridge enqueues it Then it uses a typed contribution intent with the existing payload', async () => {
   const messages = [];
   const translationBridge = await loadTranslationBridge(async (message) => {
     messages.push(message);
@@ -56,7 +56,8 @@ test('Given a normal subtitle hover submission When translationBridge enqueues i
   await translationBridge.enqueue(legacyTranslation({ slotKey: 'slot-000124' }));
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
-    type: 'TRANSLATION_ENQUEUE',
+    category: 'contribution-intent',
+    variant: 'enqueue-translation',
     payload: {
       videoId: 'netflix-81234567',
       timestamp: 12.5,

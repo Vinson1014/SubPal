@@ -132,7 +132,7 @@ export const translationBridge = {
     }
 
     try {
-      this.log('發送 TRANSLATION_ENQUEUE 消息到 content script');
+      this.log('發送 typed translation contribution intent 到 content script');
       const payload = {
         videoId,
         timestamp,
@@ -155,11 +155,12 @@ export const translationBridge = {
       }
 
       const response = await sendMessage({
-        type: 'TRANSLATION_ENQUEUE',
+        category: 'contribution-intent',
+        variant: 'enqueue-translation',
         payload
       });
 
-      this.log('TRANSLATION_ENQUEUE 響應:', response);
+      this.log('translation contribution intent 響應:', response);
 
       if (response.error) {
         throw new Error(response.error);

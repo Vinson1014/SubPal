@@ -873,7 +873,7 @@ class UIManager {
 
         const result = await this.voteBridge.enqueue(voteParams);
 
-        if (result && result.itemId) {
+        if (result?.ok === true && result.value?.status === 'queued-locally' && result.value.operationId) {
           this.showToast(`點${actionLabel}已加入隊列`, 'success');
           this.log('投票已加入隊列:', result);
         } else {
@@ -892,7 +892,7 @@ class UIManager {
 
         const result = await this.voteBridge.enqueue(voteParams);
 
-        if (result && result.itemId) {
+        if (result?.ok === true && result.value?.status === 'queued-locally' && result.value.operationId) {
           this.showToast(`點${actionLabel}已加入隊列`, 'success');
           this.log('投票已加入隊列:', result);
         } else {
@@ -1100,9 +1100,9 @@ class UIManager {
       // 使用翻譯橋接器
       const result = await this.translationBridge.enqueue(submissionData);
 
-      if (result && result.itemId) {
+      if (result?.ok === true && result.value?.status === 'queued-locally' && result.value.operationId) {
         this.subtitleReplacer.upsertLocalReplacement({
-          itemId: result.itemId,
+          itemId: result.value.operationId,
           slotKey: sourceSlotKey,
           videoId: sourceVideoId,
           originalSubtitle: sourceSubtitle?.original || sourceSubtitle?.text,
@@ -1121,7 +1121,7 @@ class UIManager {
 
         this.showToast('翻譯已加入隊列', 'success');
         this.log('翻譯已加入隊列:', result);
-        return { ...result, status: 'success' };
+        return { status: 'queued-locally', operationId: result.value.operationId };
       } else {
         this.showToast('翻譯提交失敗', 'error');
         return { status: 'error', error: '翻譯提交失敗，請再試一次。' };

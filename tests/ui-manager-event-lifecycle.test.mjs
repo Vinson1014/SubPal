@@ -214,16 +214,15 @@ test('Given components were recreated When the coordinator renders Then the new 
 test('Given translation enqueue succeeds When the dialog submit callback settles Then it returns success instead of a false failure', async () => {
   const fixture = await loadManager();
   fixture.manager.translationBridge = {
-    enqueue: async () => ({ itemId: 'translation-1', message: '翻譯已加入同步隊列' })
+    enqueue: async () => ({ ok: true, value: { status: 'queued-locally', operationId: 'translation-1' } })
   };
   fixture.manager.showToast = () => {};
 
   const result = await fixture.lifecycle.submissionCallback({ translation: '修正翻譯' });
 
   assert.deepEqual(JSON.parse(JSON.stringify(result)), {
-    status: 'success',
-    itemId: 'translation-1',
-    message: '翻譯已加入同步隊列'
+    status: 'queued-locally',
+    operationId: 'translation-1'
   });
   assert.equal(fixture.lifecycle.localReplacementUpserts.length, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(fixture.lifecycle.localReplacementUpserts[0])), {

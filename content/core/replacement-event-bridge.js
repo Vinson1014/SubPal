@@ -86,9 +86,10 @@ export const replacementEventBridge = {
     }
 
     try {
-      this.log('發送 REPLACEMENT_EVENT_ENQUEUE 消息到 content script');
+      this.log('發送 typed replacement-event contribution intent 到 content script');
       const response = await sendMessage({
-        type: 'REPLACEMENT_EVENT_ENQUEUE',
+        category: 'contribution-intent',
+        variant: 'enqueue-replacement-event',
         payload: {
           translationID,
           contributorUserID,
@@ -97,7 +98,7 @@ export const replacementEventBridge = {
         }
       });
 
-      this.log('REPLACEMENT_EVENT_ENQUEUE 響應:', response);
+      this.log('replacement-event contribution intent 響應:', response);
 
       if (response.error) {
         throw new Error(response.error);
