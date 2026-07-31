@@ -5,11 +5,14 @@ const PAGE_OBSERVATION_CATEGORY = 'page-observation';
 const VIDEO_CONTEXT_CHANGED_VARIANT = 'video-context-changed';
 const SUBTITLE_QUERY_CATEGORY = 'subtitle-query';
 const REPLACEMENT_SUBTITLE_QUERY_VARIANT = 'replacement-subtitle-query';
+const BACKEND_PROFILE_CATEGORY = 'backend-profile';
 const PAYLOAD_KEYS = new Set(['oldVideoId', 'newVideoId', 'videoId']);
 const ENVELOPE_KEYS = new Set(['category', 'variant', 'payload']);
 const AUTHORITY_KEYS = new Set([
   'destination', 'command', 'backgroundCommand', 'storage', 'storageKey',
-  'endpoint', 'credential', 'credentials', 'sync', 'syncConfig', 'lifecycle', 'lifecycleConfig', 'config'
+  'endpoint', 'credential', 'credentials', 'sync', 'syncConfig', 'lifecycle', 'lifecycleConfig', 'config',
+  'backendProfileId', 'backendProfiles', 'activeProfileId', 'profile',
+  'jwt', 'token', 'auth', 'user', 'userId'
 ]);
 
 function isRecord(value) {
@@ -17,7 +20,12 @@ function isRecord(value) {
 }
 
 function hasForbiddenAuthority(value) {
-  return Object.keys(value).some((key) => AUTHORITY_KEYS.has(key));
+  for (const key of AUTHORITY_KEYS) {
+    for (let target = value; target !== null; target = Object.getPrototypeOf(target)) {
+      if (Object.getOwnPropertyDescriptor(target, key)) return true;
+    }
+  }
+  return false;
 }
 
 function normalizedVideoChange(payload) {
@@ -38,30 +46,32 @@ function normalizedVideoChange(payload) {
 }
 
 function parseIngress(input, options) {
-  if (!isRecord(input) || options?.authorityEscalated === true) {
-    return options?.authorityEscalated === true
-      ? fail('forbidden', 'page-ingress-variant', false)
-      : fail('invalid', 'malformed-page-observation', false);
-  }
-  if (hasForbiddenAuthority(input)) return fail('forbidden', 'page-ingress-variant', false);
-  if (typeof input.category !== 'string' || typeof input.variant !== 'string' || !isRecord(input.payload)) {
+  try {
+    if (!isRecord(input)) return fail('invalid', 'malformed-page-observation', false);
+    if (input.category === BACKEND_PROFILE_CATEGORY) return fail('forbidden', 'page-profile-change', false);
+    if (options?.authorityEscalated === true || hasForbiddenAuthority(input)) {
+      return fail('forbidden', 'page-ingress-variant', false);
+    }
+    if (typeof input.category !== 'string' || typeof input.variant !== 'string' || !isRecord(input.payload)) {
+      return fail('invalid', 'malformed-page-observation', false);
+    }
+    if (Object.keys(input).some((key) => !ENVELOPE_KEYS.has(key))) {
+      return fail('invalid', 'malformed-page-observation', false);
+    }
+    if (hasForbiddenAuthority(input.payload)) return fail('forbidden', 'page-ingress-variant', false);
+    if (input.category === SUBTITLE_QUERY_CATEGORY && input.variant === REPLACEMENT_SUBTITLE_QUERY_VARIANT) {
+      return parseSubtitleQuery(input.payload);
+    }
+    if (input.category !== PAGE_OBSERVATION_CATEGORY || input.variant !== VIDEO_CONTEXT_CHANGED_VARIANT) {
+      return fail('forbidden', 'page-ingress-variant', false);
+    }
+    if (Object.keys(input.payload).some((key) => !PAYLOAD_KEYS.has(key))) {
+      return fail('invalid', 'malformed-page-observation', false);
+    }
+    return normalizedVideoChange(input.payload);
+  } catch {
     return fail('invalid', 'malformed-page-observation', false);
   }
-  if (Object.keys(input).some((key) => !ENVELOPE_KEYS.has(key))) {
-    return fail('invalid', 'malformed-page-observation', false);
-  }
-  if (input.category === SUBTITLE_QUERY_CATEGORY && input.variant === REPLACEMENT_SUBTITLE_QUERY_VARIANT) {
-    return parseSubtitleQuery(input.payload);
-  }
-  if (input.category !== PAGE_OBSERVATION_CATEGORY || input.variant !== VIDEO_CONTEXT_CHANGED_VARIANT) {
-    return fail('forbidden', 'page-ingress-variant', false);
-  }
-  if (hasForbiddenAuthority(input.payload) || Object.keys(input.payload).some((key) => !PAYLOAD_KEYS.has(key))) {
-    return hasForbiddenAuthority(input.payload)
-      ? fail('forbidden', 'page-ingress-variant', false)
-      : fail('invalid', 'malformed-page-observation', false);
-  }
-  return normalizedVideoChange(input.payload);
 }
 
 function accept(input, options = {}) {

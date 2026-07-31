@@ -210,7 +210,7 @@
   // CONFIG_GET_ALL 處理
   async function handleConfigGetAll(messageId) {
     try {
-      const config = configManager.getAll();
+      const config = projectPublicConfig(configManager.getAll());
       window.dispatchEvent(new CustomEvent('responseFromContentScript', {
         detail: {
           messageId: messageId,
@@ -470,34 +470,130 @@
     }));
   }
 
+  function terminalIngressFailure(authorityEscalated) {
+    return {
+      terminal: authorityEscalated
+        ? { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } }
+        : { ok: false, error: { kind: 'invalid', code: 'malformed-page-observation', retryable: false } }
+    };
+  }
+
+  function ownDataProperty(message, key) {
+    const descriptor = Object.getOwnPropertyDescriptor(message, key);
+    if (!descriptor) return { present: false };
+    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) return null;
+    return { present: true, value: descriptor.value };
+  }
+
+  function dataProperty(message, key) {
+    for (let target = message; target !== null; target = Object.getPrototypeOf(target)) {
+      const descriptor = Object.getOwnPropertyDescriptor(target, key);
+      if (!descriptor) continue;
+      if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) return null;
+      return { present: true, value: descriptor.value };
+    }
+    return { present: false };
+  }
+
+  function isIdentityConfigKey(key) {
+    return typeof key === 'string' && key.split('.').some((part) => [
+      'user', 'userId', 'jwt', 'token', 'auth', 'backendProfileId', 'backendProfiles',
+      'activeProfileId', 'profile', 'credential', 'credentials'
+    ].includes(part));
+  }
+
+  function hasIdentityConfigField(value, visited = new Set()) {
+    if (!value || typeof value !== 'object') return false;
+    if (visited.has(value)) return false;
+    visited.add(value);
+    for (let target = value; target !== null; target = Object.getPrototypeOf(target)) {
+      for (const key of Object.getOwnPropertyNames(target)) {
+        if (isIdentityConfigKey(key)) return true;
+        const descriptor = Object.getOwnPropertyDescriptor(target, key);
+        if (target === value && Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
+          hasIdentityConfigField(descriptor.value, visited)) return true;
+      }
+    }
+    return false;
+  }
+
+  function inspectPublicConfigMessage(message) {
+    try {
+      const type = dataProperty(message, 'type');
+      if (!type.present) return terminalIngressFailure(false);
+      const request = { type: type.value };
+      if (type.value === 'CONFIG_GET_ALL') return { request };
+      const key = dataProperty(message, 'key');
+      if (key === null || isIdentityConfigKey(key.value)) return terminalIngressFailure(key !== null);
+      request.key = key.value;
+      if (type.value === 'CONFIG_GET') return { request };
+      const value = dataProperty(message, type.value === 'CONFIG_SET' ? 'value' : 'items');
+      if (value === null || hasIdentityConfigField(value.value)) return terminalIngressFailure(value !== null);
+      if (type.value === 'CONFIG_SET') request.value = value.value;
+      if (type.value === 'CONFIG_SET_MULTIPLE') request.items = value.value;
+      return { request };
+    } catch {
+      return terminalIngressFailure(false);
+    }
+  }
+
+  function projectPublicConfig(config) {
+    return Object.fromEntries(Object.entries(config).filter(([key, value]) => (
+      !isIdentityConfigKey(key) && !hasIdentityConfigField(value)
+    )));
+  }
+
   function hasAuthorityBearingKey(message) {
-    return ['destination', 'command', 'backgroundCommand', 'storage', 'storageKey',
-      'endpoint', 'credential', 'credentials', 'sync', 'syncConfig', 'lifecycle', 'lifecycleConfig', 'config'
-    ].some((key) => Object.prototype.hasOwnProperty.call(message, key));
+    const authorityKeys = ['destination', 'command', 'backgroundCommand', 'storage', 'storageKey',
+      'endpoint', 'credential', 'credentials', 'sync', 'syncConfig', 'lifecycle', 'lifecycleConfig', 'config',
+      'backendProfileId', 'backendProfiles', 'activeProfileId', 'profile',
+      'jwt', 'token', 'auth', 'user', 'userId'
+    ];
+    for (const key of authorityKeys) {
+      for (let target = message; target !== null; target = Object.getPrototypeOf(target)) {
+        if (Object.getOwnPropertyDescriptor(target, key)) return true;
+      }
+    }
+    return false;
   }
 
   function adaptPageIngressMessage(message) {
-    if (!message || typeof message !== 'object') return null;
-    if (message.category === 'page-observation' || message.category === 'subtitle-query') {
-      return { input: message, authorityEscalated: hasAuthorityBearingKey(message) };
-    }
-    if (message.type === 'CHECK_SUBTITLE') {
-      return { input: message, authorityEscalated: false };
-    }
-    if (message.type !== 'VIDEO_ID_CHANGED') return null;
+    if (!message || typeof message !== 'object') return terminalIngressFailure(false);
+    let authorityEscalated = false;
+    try {
+      authorityEscalated = hasAuthorityBearingKey(message);
+      const category = ownDataProperty(message, 'category');
+      const type = ownDataProperty(message, 'type');
+      if (category === null || type === null) return terminalIngressFailure(authorityEscalated);
+      if (category?.value === 'backend-profile') {
+        return { terminal: { ok: false, error: { kind: 'forbidden', code: 'page-profile-change', retryable: false } } };
+      }
+      if (category?.value === 'page-observation' || category?.value === 'subtitle-query') {
+        return { input: message, type: type.value, authorityEscalated };
+      }
+      if (type.value === 'CHECK_SUBTITLE') return { input: message, type: type.value, authorityEscalated: false };
+      if (type.value !== 'VIDEO_ID_CHANGED') {
+        return type.present ? { type: type.value } : terminalIngressFailure(authorityEscalated);
+      }
 
-    const payload = {};
-    if (Object.prototype.hasOwnProperty.call(message, 'oldVideoId')) payload.oldVideoId = message.oldVideoId;
-    if (Object.prototype.hasOwnProperty.call(message, 'newVideoId')) payload.newVideoId = message.newVideoId;
-    if (Object.prototype.hasOwnProperty.call(message, 'videoId')) payload.videoId = message.videoId;
-    return {
-      input: {
-        category: 'page-observation',
-        variant: 'video-context-changed',
-        payload
-      },
-      authorityEscalated: hasAuthorityBearingKey(message)
-    };
+      const payload = {};
+      for (const key of ['oldVideoId', 'newVideoId', 'videoId']) {
+        const value = ownDataProperty(message, key);
+        if (value === null) return terminalIngressFailure(authorityEscalated);
+        if (value.present) payload[key] = value.value;
+      }
+      return {
+        input: {
+          category: 'page-observation',
+          variant: 'video-context-changed',
+          payload
+        },
+        type: type.value,
+        authorityEscalated
+      };
+    } catch {
+      return terminalIngressFailure(authorityEscalated);
+    }
   }
 
   function getPageIngress() {
@@ -541,16 +637,29 @@
 
   // 1. 監聽來自 page context (messaging.js) 的消息事件
   window.addEventListener('messageToContentScript', (event) => {
-    const { messageId, message } = event.detail;
-    debugLog('Received from page:', messageId, message);
+    const { messageId, message: rawMessage } = event.detail;
+    const pageIngressMessage = adaptPageIngressMessage(rawMessage);
+    if (pageIngressMessage.terminal) {
+      respondToPageObservation(messageId, pageIngressMessage.terminal);
+      return;
+    }
+    const message = { type: pageIngressMessage.type };
+
+    debugLog('Received from page:', messageId, rawMessage);
 
     if (message?.type === 'GET_CROWDSOURCING_TASKS') return;
     if (message?.type === 'RAW_TTML_INTERCEPTED') return;
 
-    const pageIngressMessage = adaptPageIngressMessage(message);
-    if (pageIngressMessage) {
-      acceptPageIngress(messageId, pageIngressMessage);
+    if (['RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS'].includes(message.type)) {
+      respondToPageObservation(messageId, terminalIngressFailure(true).terminal);
       return;
+    }
+
+    if (pageIngressMessage) {
+      if (pageIngressMessage.input) {
+        acceptPageIngress(messageId, pageIngressMessage);
+        return;
+      }
     }
 
     // 檢查是否為配置相關訊息（由 content script 處理，不轉發到 background）
@@ -558,14 +667,19 @@
 
     if (configMessages.includes(message.type)) {
       debugLog('處理配置訊息:', message.type);
-      handleConfigMessage(messageId, message);
+      const configRequest = inspectPublicConfigMessage(rawMessage);
+      if (configRequest.terminal) {
+        respondToPageObservation(messageId, configRequest.terminal);
+        return;
+      }
+      handleConfigMessage(messageId, configRequest.request);
       return;
     }
 
     // 檢查是否為隊列相關訊息（由 content script 處理，不轉發到 background）
     if (QUEUE_MESSAGE_TYPES.includes(message.type)) {
       debugLog('處理隊列訊息:', message.type);
-      handleQueueMessage(messageId, message);
+      handleQueueMessage(messageId, rawMessage);
       return;
     }
 
@@ -575,7 +689,7 @@
     if (internalMessages.includes(message.type)) {
       debugLog('處理內部消息:', message.type);
 
-      dispatchInternalMessage(messageId, message);
+      dispatchInternalMessage(messageId, rawMessage);
 
       // 內部消息不需要回應，直接返回
       return;
@@ -587,7 +701,7 @@
     getBackgroundPortTransport().then(({ createEnvelope, transport }) => transport.request(createEnvelope({
       requestId: uniqueMessageId,
       kind: 'background-forward',
-      payload: message
+      payload: rawMessage
     }))).then((result) => {
       window.dispatchEvent(new CustomEvent('responseFromContentScript', {
         detail: { messageId: uniqueMessageId, response: result.ok ? result.value : result }

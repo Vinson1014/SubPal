@@ -20,7 +20,7 @@ async function createModule(context, identifier, exports) {
   return module;
 }
 
-async function createPrivateTransportModule(context) {
+async function createPrivateTransportModule(context, { onRequest = () => {} } = {}) {
   const module = new vm.SyntheticModule(['createDomTransport', 'createEnvelope', 'createPortTransport'], function initializePrivateTransports() {
     this.setExport('createDomTransport', () => ({ request: async () => ({ ok: false, error: { kind: 'disconnected', code: 'background-port-disconnected', retryable: true } }) }));
     this.setExport('createEnvelope', ({ requestId, kind, payload, context: contextValue }) => ({ protocolVersion: 1, requestId, kind, payload, ...(contextValue === undefined ? {} : { context: contextValue }) }));
@@ -28,7 +28,10 @@ async function createPrivateTransportModule(context) {
       let port = null;
       return {
         start() { if (!port) port = connect(); return port; },
-        request: async () => ({ ok: false, error: { kind: 'disconnected', code: 'background-port-disconnected', retryable: true } })
+        request: async () => {
+          onRequest();
+          return { ok: false, error: { kind: 'disconnected', code: 'background-port-disconnected', retryable: true } };
+        }
       };
     });
   }, { context, identifier: 'content/system/capabilities/private-transports.js' });
@@ -70,9 +73,12 @@ async function settle() { for (let index = 0; index < 64; index += 1) await Prom
 async function createContentHarness() {
   const listeners = new Map();
   const bridgeEvents = [];
+  const responses = [];
   const portMessages = [];
   const errors = [];
+  const configCalls = [];
   let storageReads = 0;
+  let portRequests = 0;
   const window = {
     location: { pathname: '/watch/81234567' },
     addEventListener(type, listener) {
@@ -87,6 +93,7 @@ async function createContentHarness() {
     }
   };
   window.addEventListener('messageFromContentScript', (event) => bridgeEvents.push(event.detail));
+  window.addEventListener('responseFromContentScript', (event) => responses.push(event.detail));
   const marker = {
     getAttribute(name) {
       return name === 'data-subpal-page-script-state' ? 'ready' : '';
@@ -124,7 +131,30 @@ async function createContentHarness() {
   });
   const modules = {
     config: await createModule(context, 'config-manager.js', {
-      ConfigManager: class ConfigManager { async initialize() {} get() { return false; } subscribe() {} }
+      ConfigManager: class ConfigManager {
+        async initialize() {}
+        get(key) {
+          configCalls.push({ type: 'get', key });
+          return {
+            'subtitle.primaryLanguage': 'zh-Hant',
+            'user.userId': 'private-user',
+            jwt: 'private-token',
+            backendProfiles: [{ id: 'private-profile' }]
+          }[key];
+        }
+        getAll() {
+          configCalls.push({ type: 'get-all' });
+          return {
+            'subtitle.primaryLanguage': 'zh-Hant',
+            'user.userId': 'private-user',
+            jwt: 'private-token',
+            backendProfiles: [{ id: 'private-profile' }]
+          };
+        }
+        async set(key, value) { configCalls.push({ type: 'set', key, value }); }
+        async setMultiple(items) { configCalls.push({ type: 'set-multiple', items }); }
+        subscribe() {}
+      }
     }),
     schema: await createModule(context, 'config-schema.js', { getAllConfigKeys: () => [] }),
     queue: await createModule(context, 'submission-queue-manager.js', { SubmissionQueueManager: class SubmissionQueueManager { async initialize() {} } }),
@@ -132,7 +162,7 @@ async function createContentHarness() {
     isolated: await createModule(context, 'isolated-endscreen-tasks.js', { startIsolatedEndscreenTasks: async () => {} }),
     playback: await createModule(context, 'playback-context-manager.js', { playbackContextManager: {} })
   };
-  const privateTransports = await createPrivateTransportModule(context);
+  const privateTransports = await createPrivateTransportModule(context, { onRequest() { portRequests += 1; } });
   const source = await readFile(new URL('../content.js', import.meta.url), 'utf8');
   const script = new vm.Script(source, {
     importModuleDynamically: async (specifier) => {
@@ -153,10 +183,11 @@ async function createContentHarness() {
   });
   script.runInContext(context);
   await settle();
-  const baseline = () => ({ storageReads, portMessages: portMessages.length, errors: errors.length });
+  const baseline = () => ({ storageReads, portMessages: portMessages.length, portRequests, configCalls: configCalls.length, errors: errors.length });
   return {
     baseline,
     bridgeEvents,
+    responses,
     dispatchAndWait(messageId, message) {
       return new Promise((resolve, reject) => {
         const timeoutId = setTimeout(() => {
@@ -215,6 +246,94 @@ test('Given malformed, unknown, or authority-bearing page observations When Page
     });
   }
   assert.deepEqual(dispatched, []);
+});
+
+test('Given profile, authentication, endpoint, sync, or lifecycle authority in a public envelope or payload When PageIngress receives it Then it denies the attempt before dispatching or querying', async () => {
+  const ingress = await loadPageIngress();
+  assert.ok(ingress, 'PageIngress capability is missing');
+  const dispatched = [];
+  let queries = 0;
+  const forbidden = { kind: 'forbidden', code: 'page-ingress-variant', retryable: false };
+  const options = {
+    dispatch(event) { dispatched.push(event); },
+    query() { queries += 1; return { ok: true, value: { subtitles: [] } }; }
+  };
+  const authorityKeys = [
+    'backendProfileId', 'backendProfiles', 'activeProfileId', 'profile', 'jwt', 'token', 'auth', 'user', 'userId',
+    'destination', 'command', 'backgroundCommand', 'storage', 'storageKey',
+    'endpoint', 'credential', 'credentials', 'sync', 'syncConfig', 'lifecycle', 'lifecycleConfig', 'config'
+  ];
+
+  for (const key of authorityKeys) {
+    for (const input of [
+      { ...acceptedInput(), [key]: { attempted: key } },
+      acceptedInput({ oldVideoId: '81234567', [key]: { attempted: key } }),
+      {
+        category: 'subtitle-query', variant: 'replacement-subtitle-query',
+        payload: {
+          videoId: '81234567', timestamp: 12, duration: 180,
+          context: { videoId: '81234567', sessionId: 'session-1', epoch: 1 },
+          [key]: { attempted: key }
+        }
+      }
+    ]) {
+      assert.deepEqual(plain(ingress.PageIngress.accept(input, options)), { ok: false, error: forbidden });
+    }
+  }
+
+  assert.deepEqual(dispatched, []);
+  assert.equal(queries, 0);
+});
+
+test('Given an explicit backend-profile category When PageIngress receives it Then it returns the terminal profile-change denial without dispatching or querying', async () => {
+  const ingress = await loadPageIngress();
+  assert.ok(ingress, 'PageIngress capability is missing');
+  const dispatched = [];
+  let queries = 0;
+
+  const result = ingress.PageIngress.accept({
+    category: 'backend-profile', variant: 'activate',
+    payload: { backendProfileId: 'profile-secret', jwt: 'private-token' }
+  }, {
+    dispatch(event) { dispatched.push(event); },
+    query() { queries += 1; return { ok: true, value: { subtitles: [] } }; }
+  });
+
+  assert.deepEqual(plain(result), {
+    ok: false, error: { kind: 'forbidden', code: 'page-profile-change', retryable: false }
+  });
+  assert.deepEqual(dispatched, []);
+  assert.equal(queries, 0);
+});
+
+test('Given an inspectable authority-bearing Proxy that throws on has When PageIngress receives it Then it preserves a forbidden result without dispatching or querying', async () => {
+  const ingress = await loadPageIngress();
+  assert.ok(ingress, 'PageIngress capability is missing');
+  const dispatched = [];
+  let queries = 0;
+  const input = new Proxy({ ...acceptedInput(), destination: 'background' }, {
+    has() { throw new Error('has trap'); }
+  });
+
+  const result = ingress.PageIngress.accept(input, {
+    dispatch(event) { dispatched.push(event); },
+    query() { queries += 1; return { ok: true, value: { subtitles: [] } }; }
+  });
+
+  assert.deepEqual(plain(result), {
+    ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false }
+  });
+  const opaqueResult = ingress.PageIngress.accept({
+    get category() { throw new Error('category getter'); }
+  }, {
+    dispatch(event) { dispatched.push(event); },
+    query() { queries += 1; return { ok: true, value: { subtitles: [] } }; }
+  });
+  assert.deepEqual(plain(opaqueResult), {
+    ok: false, error: { kind: 'invalid', code: 'malformed-page-observation', retryable: false }
+  });
+  assert.deepEqual(dispatched, []);
+  assert.equal(queries, 0);
 });
 
 test('Given a non-coercible ID When PageIngress parses a page observation Then it returns invalid without dispatching or throwing', async () => {
@@ -298,4 +417,111 @@ test('Given malformed, unknown, or authority-bearing public page envelopes When 
     });
     assert.deepEqual(harness.baseline(), before.effects);
   }
+});
+
+test('Given repeated explicit backend-profile envelopes When the isolated bridge receives them Then it emits only terminal profile-change denials without forwarding profile data', async () => {
+  const harness = await createContentHarness();
+  const attempts = [
+    { id: 'backend-profile-activate', message: { category: 'backend-profile', variant: 'activate', payload: { backendProfileId: 'profile-secret', jwt: 'private-token' } } },
+    { id: 'backend-profile-snapshot', message: { category: 'backend-profile', variant: 'snapshot', payload: { profile: { userId: 'private-user' }, token: 'private-token' } } }
+  ];
+
+  for (const attempt of attempts) {
+    const before = { events: harness.bridgeEvents.length, effects: harness.baseline() };
+    const response = await harness.dispatchAndWait(attempt.id, attempt.message);
+    assert.deepEqual(plain(response), {
+      messageId: attempt.id,
+      response: { ok: false, error: { kind: 'forbidden', code: 'page-profile-change', retryable: false } }
+    });
+    assert.equal(harness.bridgeEvents.length, before.events);
+    assert.deepEqual(harness.baseline(), before.effects);
+  }
+});
+
+test('Given legacy video messages inherit destination, jwt, or profile authority When the isolated bridge receives them Then it denies each without sanitizing it into an observation', async () => {
+  const harness = await createContentHarness();
+  const authorityKeys = ['destination', 'jwt', 'profile'];
+  const forbidden = { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } };
+
+  for (const key of authorityKeys) {
+    const message = Object.assign(Object.create({ [key]: { attempted: key } }), {
+      type: 'VIDEO_ID_CHANGED', oldVideoId: '81234567', newVideoId: '87654321'
+    });
+    const before = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
+    const response = await harness.dispatchAndWait(`inherited-${key}`, message);
+    assert.deepEqual(plain(response), { messageId: `inherited-${key}`, response: forbidden });
+    assert.equal(harness.bridgeEvents.length, before.events);
+    assert.equal(harness.responses.length, before.responses + 1);
+    assert.deepEqual(harness.baseline(), before.effects);
+  }
+});
+
+test('Given hostile category or type accessors and Proxy traps When the isolated bridge receives them Then it emits one controlled terminal response without privileged effects', async () => {
+  const harness = await createContentHarness();
+  const invalid = { ok: false, error: { kind: 'invalid', code: 'malformed-page-observation', retryable: false } };
+  const forbidden = { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } };
+  const legacyTarget = (key) => Object.assign(Object.create({ [key]: { attempted: key } }), {
+    type: 'VIDEO_ID_CHANGED', oldVideoId: '81234567', newVideoId: '87654321'
+  });
+  const attempts = [
+    { id: 'throwing-category', message: { get category() { throw new Error('category getter'); } }, expected: invalid },
+    { id: 'throwing-type', message: { get type() { throw new Error('type getter'); } }, expected: invalid },
+    { id: 'throwing-has', message: new Proxy(legacyTarget('destination'), { has() { throw new Error('has trap'); } }), expected: forbidden },
+    { id: 'throwing-own-keys', message: new Proxy(legacyTarget('profile'), { ownKeys() { throw new Error('ownKeys trap'); } }), expected: forbidden }
+  ];
+
+  for (const attempt of attempts) {
+    const before = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
+    const response = await harness.dispatchAndWait(attempt.id, attempt.message);
+    assert.deepEqual(plain(response), { messageId: attempt.id, response: attempt.expected });
+    assert.equal(harness.bridgeEvents.length, before.events);
+    assert.equal(harness.responses.length, before.responses + 1);
+    assert.deepEqual(harness.baseline(), before.effects);
+  }
+});
+
+test('Given MAIN legacy retry commands When the isolated bridge receives them Then it denies each before Port forwarding or sync work', async () => {
+  const harness = await createContentHarness();
+  const retryTypes = ['RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS'];
+  const forbidden = { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } };
+
+  for (const type of retryTypes) {
+    const before = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
+    const response = await harness.dispatchAndWait(`main-${type}`, { type });
+    assert.deepEqual(plain(response), { messageId: `main-${type}`, response: forbidden });
+    assert.equal(harness.bridgeEvents.length, before.events);
+    assert.equal(harness.responses.length, before.responses + 1);
+    assert.deepEqual(harness.baseline(), before.effects);
+  }
+});
+
+test('Given MAIN CONFIG messages target identity fields When the isolated bridge receives them Then forbidden requests reach neither config nor storage and GET_ALL projects identity away', async () => {
+  const harness = await createContentHarness();
+  const forbidden = { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } };
+  const deniedAttempts = [
+    { id: 'get-user-id', message: { type: 'CONFIG_GET', key: 'user.userId' } },
+    { id: 'set-jwt', message: { type: 'CONFIG_SET', key: 'jwt', value: 'private-token' } },
+    { id: 'set-multiple-auth', message: { type: 'CONFIG_SET_MULTIPLE', items: { 'subtitle.primaryLanguage': 'ja', 'auth.token': 'private-token' } } },
+    { id: 'inherited-profile', message: Object.assign(Object.create({ key: 'profile.endpoint' }), { type: 'CONFIG_GET' }) },
+    { id: 'proxy-identity', message: new Proxy({ type: 'CONFIG_GET', key: 'backendProfiles' }, { has() { throw new Error('has trap'); }, ownKeys() { throw new Error('ownKeys trap'); } }) }
+  ];
+
+  for (const attempt of deniedAttempts) {
+    const before = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
+    const response = await harness.dispatchAndWait(attempt.id, attempt.message);
+    assert.deepEqual(plain(response), { messageId: attempt.id, response: forbidden });
+    assert.equal(harness.bridgeEvents.length, before.events);
+    assert.equal(harness.responses.length, before.responses + 1);
+    assert.deepEqual(harness.baseline(), before.effects);
+  }
+
+  const before = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
+  const response = await harness.dispatchAndWait('get-all-public-config', { type: 'CONFIG_GET_ALL' });
+  assert.deepEqual(plain(response), {
+    messageId: 'get-all-public-config',
+    response: { success: true, config: { 'subtitle.primaryLanguage': 'zh-Hant' } }
+  });
+  assert.equal(harness.bridgeEvents.length, before.events);
+  assert.equal(harness.responses.length, before.responses + 1);
+  assert.deepEqual(harness.baseline(), { ...before.effects, configCalls: before.effects.configCalls + 1 });
 });
