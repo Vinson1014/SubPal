@@ -6,6 +6,7 @@ const VIDEO_CONTEXT_CHANGED_VARIANT = 'video-context-changed';
 const SUBTITLE_QUERY_CATEGORY = 'subtitle-query';
 const REPLACEMENT_SUBTITLE_QUERY_VARIANT = 'replacement-subtitle-query';
 const BACKEND_PROFILE_CATEGORY = 'backend-profile';
+const CONTRIBUTION_CATEGORY = 'contribution-intent';
 const PAYLOAD_KEYS = new Set(['oldVideoId', 'newVideoId', 'videoId']);
 const ENVELOPE_KEYS = new Set(['category', 'variant', 'payload']);
 const AUTHORITY_KEYS = new Set([
@@ -59,6 +60,7 @@ function parseIngress(input, options) {
       return fail('invalid', 'malformed-page-observation', false);
     }
     if (hasForbiddenAuthority(input.payload)) return fail('forbidden', 'page-ingress-variant', false);
+    if (input.category === CONTRIBUTION_CATEGORY) return ok(input);
     if (input.category === SUBTITLE_QUERY_CATEGORY && input.variant === REPLACEMENT_SUBTITLE_QUERY_VARIANT) {
       return parseSubtitleQuery(input.payload);
     }
@@ -77,6 +79,16 @@ function parseIngress(input, options) {
 function accept(input, options = {}) {
   const parsed = parseIngress(input, options);
   if (!parsed.ok) return parsed;
+  if (input.category === CONTRIBUTION_CATEGORY) {
+    if (typeof options.contributions?.enqueue !== 'function') {
+      return fail('disconnected', 'contributions-unavailable', true);
+    }
+    try {
+      return Promise.resolve(options.contributions.enqueue(parsed.value, options.cancellation));
+    } catch (error) {
+      return fromThrown(error, 'contribution-enqueue-failed');
+    }
+  }
   if (input.category === SUBTITLE_QUERY_CATEGORY) {
     if (typeof options.query !== 'function') return fail('disconnected', 'background-port-disconnected', true);
     try {

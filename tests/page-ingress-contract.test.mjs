@@ -28,9 +28,9 @@ async function createPrivateTransportModule(context, { onRequest = () => {} } = 
       let port = null;
       return {
         start() { if (!port) port = connect(); return port; },
-        request: async () => {
-          onRequest();
-          return { ok: false, error: { kind: 'disconnected', code: 'background-port-disconnected', retryable: true } };
+        request: async (envelope) => {
+          const response = onRequest(envelope);
+          return response ?? { ok: false, error: { kind: 'disconnected', code: 'background-port-disconnected', retryable: true } };
         }
       };
     });
@@ -68,9 +68,25 @@ async function loadPageIngressModule(context = vm.createContext({})) {
 
 async function loadPageIngress(context) { return (await loadPageIngressModule(context))?.namespace ?? null; }
 
+async function loadContributionsModule(context) {
+  const [resultSource, contributionsSource] = await Promise.all([
+    sourceOrNull('content/system/capabilities/result.js'),
+    sourceOrNull('content/system/capabilities/contributions.js')
+  ]);
+  const result = new vm.SourceTextModule(resultSource, { context });
+  const contributions = new vm.SourceTextModule(contributionsSource, { context });
+  await result.link(() => { throw new Error('result.js has no dependencies'); });
+  await contributions.link((specifier) => {
+    if (specifier === './result.js') return result;
+    throw new Error(`Unexpected Contributions dependency: ${specifier}`);
+  });
+  await result.evaluate(); await contributions.evaluate();
+  return contributions;
+}
+
 async function settle() { for (let index = 0; index < 64; index += 1) await Promise.resolve(); await new Promise((resolve) => setTimeout(resolve, 0)); for (let index = 0; index < 16; index += 1) await Promise.resolve(); }
 
-async function createContentHarness() {
+async function createContentHarness({ backendProfiles = {}, queueWrites = [] } = {}) {
   const listeners = new Map();
   const bridgeEvents = [];
   const responses = [];
@@ -126,7 +142,7 @@ async function createContentHarness() {
         },
         getURL(path) { return `chrome-extension://test/${path}`; }
       },
-      storage: { local: { async get() { storageReads += 1; return {}; } } }
+      storage: { local: { async get() { storageReads += 1; return { backendProfiles }; } } }
     }
   });
   const modules = {
@@ -157,12 +173,20 @@ async function createContentHarness() {
       }
     }),
     schema: await createModule(context, 'config-schema.js', { getAllConfigKeys: () => [] }),
-    queue: await createModule(context, 'submission-queue-manager.js', { SubmissionQueueManager: class SubmissionQueueManager { async initialize() {} } }),
+    queue: await createModule(context, 'submission-queue-manager.js', { SubmissionQueueManager: class SubmissionQueueManager {
+      async initialize() {}
+      async enqueueVote(payload, backendProfileId) { queueWrites.push({ payload, backendProfileId }); return { operationId: 'queued-vote-1' }; }
+    } }),
     messaging: await createModule(context, 'messaging.js', { initMessaging: async () => {} }),
     isolated: await createModule(context, 'isolated-endscreen-tasks.js', { startIsolatedEndscreenTasks: async () => {} }),
     playback: await createModule(context, 'playback-context-manager.js', { playbackContextManager: {} })
   };
-  const privateTransports = await createPrivateTransportModule(context, { onRequest() { portRequests += 1; } });
+  const privateTransports = await createPrivateTransportModule(context, { onRequest(envelope) {
+    portRequests += 1;
+    if (envelope?.payload?.type === 'CONTRIBUTION_ENQUEUE') {
+      return { ok: true, value: { status: 'queued-locally', operationId: 'queued-vote-1' } };
+    }
+  } });
   const source = await readFile(new URL('../content.js', import.meta.url), 'utf8');
   const script = new vm.Script(source, {
     importModuleDynamically: async (specifier) => {
@@ -177,6 +201,7 @@ async function createContentHarness() {
         if (!ingress) throw new Error('PageIngress capability is missing');
         return ingress;
       }
+      if (specifier.endsWith('capabilities/contributions.js')) return loadContributionsModule(context);
       if (specifier.endsWith('capabilities/private-transports.js')) return privateTransports;
       throw new Error(`Unexpected import: ${specifier}`);
     }
@@ -187,6 +212,7 @@ async function createContentHarness() {
   return {
     baseline,
     bridgeEvents,
+    queueWrites,
     responses,
     dispatchAndWait(messageId, message) {
       return new Promise((resolve, reject) => {
@@ -223,6 +249,28 @@ test('Given an allowlisted page observation When accepted Then PageIngress dispa
 
   assert.deepEqual(plain(result), { ok: true, value: { status: 'accepted' } });
   assert.deepEqual(plain(dispatched), [{ type: 'VIDEO_ID_CHANGED', oldVideoId: '81234567', newVideoId: '87654321' }]);
+});
+
+test('Given a MAIN contribution intent When PageIngress accepts it Then it waits for Contributions durable enqueue before returning the queued-local ACK', async () => {
+  const ingress = await loadPageIngress();
+  assert.ok(ingress, 'PageIngress capability is missing');
+  let resolvePersistence;
+  const persistence = new Promise((resolve) => { resolvePersistence = resolve; });
+  const intent = {
+    category: 'contribution-intent',
+    variant: 'enqueue-vote',
+    payload: { videoId: 'netflix-81234567', timestamp: 12.5, voteType: 'upvote' }
+  };
+  const result = ingress.PageIngress.accept(intent, {
+    contributions: { enqueue: () => persistence }
+  });
+
+  assert.equal(await Promise.race([result, Promise.resolve('pending')]), 'pending');
+  resolvePersistence({ ok: true, value: { status: 'queued-locally', operationId: 'operation-1' } });
+  assert.deepEqual(plain(await result), {
+    ok: true,
+    value: { status: 'queued-locally', operationId: 'operation-1' }
+  });
 });
 
 test('Given malformed, unknown, or authority-bearing page observations When PageIngress receives them Then it fails closed without dispatching', async () => {
@@ -480,9 +528,12 @@ test('Given hostile category or type accessors and Proxy traps When the isolated
   }
 });
 
-test('Given MAIN legacy retry commands When the isolated bridge receives them Then it denies each before Port forwarding or sync work', async () => {
+test('Given MAIN legacy retry or raw contribution enqueue commands When the isolated bridge receives them Then it denies each before Port forwarding or persistence work', async () => {
   const harness = await createContentHarness();
-  const retryTypes = ['RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS'];
+  const retryTypes = [
+    'RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS',
+    'VOTE_ENQUEUE', 'TRANSLATION_ENQUEUE', 'REPLACEMENT_EVENT_ENQUEUE'
+  ];
   const forbidden = { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } };
 
   for (const type of retryTypes) {
@@ -492,6 +543,28 @@ test('Given MAIN legacy retry commands When the isolated bridge receives them Th
     assert.equal(harness.bridgeEvents.length, before.events);
     assert.equal(harness.responses.length, before.responses + 1);
     assert.deepEqual(harness.baseline(), before.effects);
+  }
+});
+
+test('Given any content-local profile record When MAIN submits a contribution intent through PageIngress Then it reaches only the private durable queue command', async () => {
+  const valid = { activeProfileId: 'profile-a', byId: { 'profile-a': { id: 'profile-a' } } };
+  const intent = { category: 'contribution-intent', variant: 'enqueue-vote', payload: { videoId: 'netflix-81234567', timestamp: 12.5, voteType: 'upvote' } };
+  const validHarness = await createContentHarness({ backendProfiles: valid });
+  const before = validHarness.baseline();
+  const validResponse = await validHarness.dispatchAndWait('valid-profile-contribution', intent);
+  assert.deepEqual(plain(validResponse.response), { ok: true, value: { status: 'queued-locally', operationId: 'queued-vote-1' } });
+  assert.equal(validHarness.queueWrites.length, 0);
+  assert.equal(validHarness.baseline().storageReads, before.storageReads);
+  assert.equal(validHarness.baseline().portRequests, before.portRequests + 1);
+
+  for (const profile of [null, [], { id: 'other-profile' }, { get id() { return 'profile-a'; } }]) {
+    const harness = await createContentHarness({ backendProfiles: { activeProfileId: 'profile-a', byId: { 'profile-a': profile } } });
+    const invalidBefore = harness.baseline();
+    const response = await harness.dispatchAndWait('invalid-profile-contribution', intent);
+    assert.deepEqual(plain(response.response), { ok: true, value: { status: 'queued-locally', operationId: 'queued-vote-1' } });
+    assert.deepEqual(harness.queueWrites, []);
+    assert.equal(harness.baseline().storageReads, invalidBefore.storageReads);
+    assert.equal(harness.baseline().portRequests, invalidBefore.portRequests + 1);
   }
 });
 

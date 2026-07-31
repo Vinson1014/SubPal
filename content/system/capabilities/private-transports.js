@@ -170,7 +170,7 @@ export function createPortTransport({ connect, onNotification = () => {}, isNoti
   };
   return {
     start,
-    request(envelope, { signal } = {}) {
+    request(envelope, { deadlineMs, signal } = {}) {
       const parsed = validateEnvelope(envelope);
       if (!parsed.ok) return Promise.resolve(parsed);
       if (!port) return Promise.resolve(disconnected());
@@ -178,15 +178,20 @@ export function createPortTransport({ connect, onNotification = () => {}, isNoti
       if (pending.has(requestId)) return Promise.resolve(invalidEnvelope('duplicate-request-id'));
       return new Promise((resolve) => {
         let settled = false;
+        let timerId;
         const settle = (result) => {
           if (settled) return;
           settled = true;
           pending.delete(requestId);
+          if (timerId !== undefined) clearTimeout(timerId);
           signal?.removeEventListener?.('abort', abort);
           resolve(result);
         };
         const abort = () => settle(fail('cancelled', 'caller-cancelled', false));
         pending.set(requestId, { settle });
+        if (Number.isFinite(deadlineMs) && deadlineMs > 0) {
+          timerId = setTimeout(() => settle(fail('timeout', 'background-port-timeout', true)), deadlineMs);
+        }
         signal?.addEventListener?.('abort', abort, { once: true });
         if (signal?.aborted) {
           abort();

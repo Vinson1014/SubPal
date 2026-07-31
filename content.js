@@ -26,6 +26,7 @@
   let pageContextStartAttempted = false;
   let isolatedEndscreenStartPromise = null;
   let pageIngressPromise = null;
+  let contributionsCapabilityPromise = null;
   let subtitleQueryCapabilityPromise = null;
 
   const PAGE_SCRIPT_READY_EVENT = 'subpal-page-script-ready';
@@ -44,9 +45,9 @@
 
   // 隊列消息類型常數
   const QUEUE_MESSAGE_TYPES = [
-    'VOTE_ENQUEUE', 'VOTE_GET_HISTORY', 'VOTE_GET_STATUS', 'VOTE_GET_AUTHORITY', 'VOTE_RETRY',
-    'TRANSLATION_ENQUEUE', 'TRANSLATION_GET_HISTORY', 'TRANSLATION_GET_RECONCILIATION', 'TRANSLATION_RETRY',
-    'GET_ALL_PENDING', 'GET_QUEUE_STATS', 'REPLACEMENT_EVENT_ENQUEUE', 
+    'VOTE_GET_HISTORY', 'VOTE_GET_STATUS', 'VOTE_GET_AUTHORITY', 'VOTE_RETRY',
+    'TRANSLATION_GET_HISTORY', 'TRANSLATION_GET_RECONCILIATION', 'TRANSLATION_RETRY',
+    'GET_ALL_PENDING', 'GET_QUEUE_STATS',
     'REPLACEMENT_EVENT_GET_HISTORY', 'REPLACEMENT_EVENT_RETRY'
   ];
 
@@ -338,11 +339,20 @@
       let result;
 
       switch (type) {
-        // 投票消息（支援 voteState 用於 translation-target 投票）
-        case 'VOTE_ENQUEUE':
-          result = await submissionQueueManager.enqueueVote(payload);
+        case 'VOTE_RETRY':
+        case 'TRANSLATION_RETRY':
+        case 'REPLACEMENT_EVENT_RETRY':
+        case 'VOTE_GET_AUTHORITY': {
+          const { createEnvelope, transport } = await getBackgroundPortTransport();
+          const response = await transport.request(createEnvelope({
+            requestId: generateUniqueMessageId(type),
+            kind: 'contribution-compatibility',
+            payload: { type, payload }
+          }), { deadlineMs: 10000 });
+          if (!response.ok) throw new Error(response.error.code);
+          result = response.value;
           break;
-
+        }
         case 'VOTE_GET_HISTORY':
           result = await submissionQueueManager.getVoteHistory(payload?.limit);
           result = { history: result };
@@ -350,20 +360,6 @@
 
         case 'VOTE_GET_STATUS':
           result = await submissionQueueManager.getVoteStatus(payload.itemId);
-          break;
-
-        case 'VOTE_GET_AUTHORITY':
-          result = await submissionQueueManager.getVoteAuthority(payload.translationID);
-          break;
-
-        case 'VOTE_RETRY':
-          result = await submissionQueueManager.retryVote(payload.itemId);
-          result = { success: result };
-          break;
-
-        // 翻譯消息
-        case 'TRANSLATION_ENQUEUE':
-          result = await submissionQueueManager.enqueueTranslation(payload);
           break;
 
         case 'TRANSLATION_GET_HISTORY':
@@ -375,24 +371,9 @@
           result = await submissionQueueManager.getTranslationReconciliation(payload.itemIds);
           break;
 
-        case 'TRANSLATION_RETRY':
-          result = await submissionQueueManager.retryTranslation(payload.itemId);
-          result = { success: result };
-          break;
-
-        // 替換事件消息
-        case 'REPLACEMENT_EVENT_ENQUEUE':
-          result = await submissionQueueManager.enqueueReplacementEvent(payload);
-          break;
-
         case 'REPLACEMENT_EVENT_GET_HISTORY':
           result = await submissionQueueManager.getReplacementEventHistory(payload?.limit);
           result = { history: result };
-          break;
-
-        case 'REPLACEMENT_EVENT_RETRY':
-          result = await submissionQueueManager.retryReplacementEvent(payload.itemId);
-          result = { success: result };
           break;
 
         // 通用消息
@@ -568,7 +549,7 @@
       if (category?.value === 'backend-profile') {
         return { terminal: { ok: false, error: { kind: 'forbidden', code: 'page-profile-change', retryable: false } } };
       }
-      if (category?.value === 'page-observation' || category?.value === 'subtitle-query') {
+      if (category?.value === 'page-observation' || category?.value === 'subtitle-query' || category?.value === 'contribution-intent') {
         return { input: message, type: type.value, authorityEscalated };
       }
       if (type.value === 'CHECK_SUBTITLE') return { input: message, type: type.value, authorityEscalated: false };
@@ -604,6 +585,25 @@
     return pageIngressPromise;
   }
 
+  function getContributionsCapability() {
+    if (!contributionsCapabilityPromise) {
+      contributionsCapabilityPromise = Promise.all([
+        getBackgroundPortTransport(),
+        import(chrome.runtime.getURL('content/system/capabilities/contributions.js'))
+      ]).then(([{ createEnvelope, transport }, { createContributions }]) => createContributions({
+        persist(intent, options) {
+          const requestId = generateUniqueMessageId('CONTRIBUTION_ENQUEUE');
+          return transport.request(createEnvelope({
+            requestId,
+            kind: 'contribution-enqueue',
+            payload: { type: 'CONTRIBUTION_ENQUEUE', intent }
+          }), options);
+        }
+        }));
+    }
+    return contributionsCapabilityPromise;
+  }
+
   function getSubtitleQueryCapability() {
     if (!subtitleQueryCapabilityPromise) {
       subtitleQueryCapabilityPromise = Promise.all([
@@ -626,11 +626,15 @@
 
   function acceptPageIngress(messageId, observation) {
     getPageIngress().then(async (pageIngress) => {
-      const result = await pageIngress.accept(observation.input, {
+      const options = {
         authorityEscalated: observation.authorityEscalated,
         dispatch: (message) => dispatchInternalMessage(messageId, message),
         query: (subtitleQuery) => getSubtitleQueryCapability().then((subtitles) => subtitles.query(subtitleQuery))
-      });
+      };
+      if (observation.input.category === 'contribution-intent') {
+        options.contributions = await getContributionsCapability();
+      }
+      const result = await pageIngress.accept(observation.input, options);
       respondToPageObservation(messageId, result);
     });
   }
@@ -650,7 +654,8 @@
     if (message?.type === 'GET_CROWDSOURCING_TASKS') return;
     if (message?.type === 'RAW_TTML_INTERCEPTED') return;
 
-    if (['RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS'].includes(message.type)) {
+    if (['RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS',
+      'VOTE_ENQUEUE', 'TRANSLATION_ENQUEUE', 'REPLACEMENT_EVENT_ENQUEUE'].includes(message.type)) {
       respondToPageObservation(messageId, terminalIngressFailure(true).terminal);
       return;
     }

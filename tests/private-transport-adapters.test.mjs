@@ -165,6 +165,30 @@ test('Given an in-flight Port request When background disconnects and reconnects
   assert.equal(ports[1].port.sent.length, 1);
 });
 
+test('Given a deadline-bound Port request When its deadline expires Then it posts once, ignores a late ACK, and a fresh request remains independent', async () => {
+  const adapters = await loadAdapters();
+  const scheduler = createScheduler();
+  const ports = [];
+  const connect = () => {
+    const messages = []; const disconnects = []; const sent = [];
+    ports.push({ sent, emit(value) { for (const listener of messages) listener(value); }, disconnect() { for (const listener of disconnects) listener(); } });
+    return { postMessage(value) { sent.push(value); }, onMessage: { addListener(listener) { messages.push(listener); } }, onDisconnect: { addListener(listener) { disconnects.push(listener); } } };
+  };
+  const transport = adapters.createPortTransport({ connect, setTimeout: scheduler.setTimeout, clearTimeout: scheduler.clearTimeout });
+  transport.start();
+  const expired = transport.request(envelope(adapters, 'deadline'), { deadlineMs: 10 });
+  assert.equal(ports[0].sent.length, 1);
+  scheduler.run(10);
+  assert.deepEqual(plain(await expired), { ok: false, error: { kind: 'timeout', code: 'background-port-timeout', retryable: true } });
+  assert.equal(transport.pendingCount(), 0);
+  ports[0].emit({ messageId: 'deadline', response: { late: true } });
+  ports[0].disconnect();
+  scheduler.run(1000);
+  const fresh = transport.request(envelope(adapters, 'fresh'), { deadlineMs: 10 });
+  ports[1].emit({ messageId: 'fresh', response: { fresh: true } });
+  assert.deepEqual(plain(await fresh), { ok: true, value: { fresh: true } });
+});
+
 test('Given an already-normalized background Result When the Port response arrives Then it is preserved instead of wrapped as a successful value', async () => {
   const adapters = await loadAdapters();
   assert.ok(adapters, 'private transport adapters are missing');
