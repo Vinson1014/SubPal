@@ -132,8 +132,7 @@ export function createPortTransport({ connect, onNotification = () => {}, isNoti
     }, reconnectDelayMs);
   };
   const settlePending = () => {
-    for (const { resolve } of pending.values()) resolve(disconnected());
-    pending.clear();
+    for (const entry of pending.values()) entry.settle(disconnected());
   };
   const receive = (sourcePort, message) => {
     if (stopped || port !== sourcePort) return;
@@ -143,8 +142,7 @@ export function createPortTransport({ connect, onNotification = () => {}, isNoti
     }
     const entry = pending.get(message?.messageId);
     if (entry) {
-      pending.delete(message.messageId);
-      entry.resolve(isResult(message.response) ? message.response : ok(message.response));
+      entry.settle(isResult(message.response) ? message.response : ok(message.response));
       return;
     }
     if (message?.messageId && Object.prototype.hasOwnProperty.call(message, 'response')) return;
@@ -172,20 +170,33 @@ export function createPortTransport({ connect, onNotification = () => {}, isNoti
   };
   return {
     start,
-    request(envelope) {
+    request(envelope, { signal } = {}) {
       const parsed = validateEnvelope(envelope);
       if (!parsed.ok) return Promise.resolve(parsed);
       if (!port) return Promise.resolve(disconnected());
       const { requestId, payload } = parsed.value;
       if (pending.has(requestId)) return Promise.resolve(invalidEnvelope('duplicate-request-id'));
       return new Promise((resolve) => {
-        pending.set(requestId, { resolve });
+        let settled = false;
+        const settle = (result) => {
+          if (settled) return;
+          settled = true;
+          pending.delete(requestId);
+          signal?.removeEventListener?.('abort', abort);
+          resolve(result);
+        };
+        const abort = () => settle(fail('cancelled', 'caller-cancelled', false));
+        pending.set(requestId, { settle });
+        signal?.addEventListener?.('abort', abort, { once: true });
+        if (signal?.aborted) {
+          abort();
+          return;
+        }
         try {
           port.postMessage({ messageId: requestId, message: payload });
         } catch (error) {
           void error;
-          pending.delete(requestId);
-          resolve(disconnected());
+          settle(disconnected());
         }
       });
     },
