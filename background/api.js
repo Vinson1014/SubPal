@@ -2,16 +2,25 @@
 // API 模組 - 負責 HTTP 通信層
 // 重構版本：職責單一，只負責 API 請求與響應處理
 
+import {
+  resolveBackendProfile,
+  setBackendProfileCredentials
+} from './backend-profiles.js';
+import { ensureStorageMigrationsComplete } from './storage-migrations.js';
+
 // ==================== 配置 ====================
 
 /**
  * 獲取 API Base URL（從新配置系統讀取）
  * @returns {Promise<string>} - API Base URL
  */
-async function getApiBaseUrl() {
-  const result = await chrome.storage.local.get(['api']);
-  console.log('[API Module] Retrieved API Base URL from storage:', result.api?.baseUrl);
-  return result.api?.baseUrl || 'https://subnfbackend.zeabur.app';
+async function resolveApiProfile(backendProfileId) {
+  await ensureStorageMigrationsComplete(chrome.storage.local);
+  return await resolveBackendProfile(chrome.storage.local, backendProfileId);
+}
+
+async function getApiBaseUrl(profile) {
+  return profile.endpoint;
 }
 
 function normalizeResolutionContext(context) {
@@ -41,15 +50,19 @@ function getClientVersion() {
   try {
     const version = chrome.runtime.getManifest()?.version;
     return version ? `frontend-${version}` : null;
-  } catch (error) {
-    console.warn('[API Module] Unable to resolve clientVersion:', error);
+  } catch {
+    console.warn('[API Module] Unable to resolve clientVersion');
     return null;
   }
 }
 
+function normalizeErrorCode(value) {
+  return typeof value === 'string' && /^[A-Z0-9_]{1,64}$/.test(value) ? value : null;
+}
+
 // ==================== 底層 HTTP 通信 ====================
 
-let jwtRefreshPromise = null;
+const jwtRefreshPromises = new Map();
 
 /**
  * 通用發送 API 請求函數
@@ -59,7 +72,7 @@ let jwtRefreshPromise = null;
  * @returns {Promise<Object>} - API 響應 JSON
  * @throws {Error} - 包含 status, code, details 屬性的錯誤
  */
-async function sendToAPI(url, body, method = 'POST') {
+async function sendToAPI(url, body, method = 'POST', profile) {
   // 添加超時控制
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超時
@@ -70,10 +83,8 @@ async function sendToAPI(url, body, method = 'POST') {
       'Accept': 'application/json'
     };
 
-    // 從 chrome.storage.local 中獲取 JWT
-    const { jwt } = await chrome.storage.local.get('jwt');
-    if (jwt) {
-      headers['Authorization'] = `Bearer ${jwt}`;
+    if (profile.jwt) {
+      headers['Authorization'] = `Bearer ${profile.jwt}`;
     }
 
     const fetchOptions = {
@@ -90,65 +101,56 @@ async function sendToAPI(url, body, method = 'POST') {
     clearTimeout(timeoutId);
 
     if (!res.ok) {
-      let errorMsg = `API request failed with status ${res.status}`;
-      let errorDetails = {};
+      let errorCode = null;
       try {
         const errJson = await res.json();
-        // 正確處理錯誤訊息格式
-        if (errJson.error && typeof errJson.error === 'object' && errJson.error.message) {
-          errorMsg = errJson.error.message;
-        } else if (typeof errJson.error === 'string') {
-          errorMsg = errJson.error;
-        }
-        errorDetails = errJson;
-      } catch (e) {
+        errorCode = normalizeErrorCode(errJson?.error?.code);
+      } catch {
         // 無法解析 JSON 錯誤響應
       }
-      console.error('[API Module] API Error:', errorMsg, errorDetails);
-      const error = new Error(errorMsg);
+      console.error('[API Module] API Error:', { method, status: res.status, code: errorCode });
+      const error = new Error(`API request failed with status ${res.status}`);
       error.status = res.status;
-      error.details = errorDetails;
-      Object.defineProperty(error, 'jwtUsedForRequest', { value: jwt, enumerable: false });
+      error.details = { status: res.status, code: errorCode };
       // 提取統一錯誤格式中的 error code
-      if (errorDetails.error && errorDetails.error.code) {
-        error.code = errorDetails.error.code;
-      }
+      if (errorCode) error.code = errorCode;
       throw error;
     }
 
     try {
       const jsonResponse = await res.json();
       return jsonResponse;
-    } catch (e) {
-      console.error('[API Module] Error parsing successful API response as JSON:', e);
+    } catch {
+      console.error('[API Module] Error parsing successful API response as JSON');
       return { success: true, message: 'Response received but could not be parsed as JSON.' };
     }
   } catch (error) {
     clearTimeout(timeoutId);
     if (error.name === 'AbortError') {
-      console.error('[API Module] Send API request timed out:', url);
+      console.error('[API Module] Send API request timed out:', { method });
       throw new Error('發送 API 請求超時');
     } else {
-      console.error('[API Module] Error during send API request:', error.details);
+      console.error('[API Module] Error during send API request:', {
+        method,
+        status: error.status ?? null,
+        code: error.code ?? null
+      });
       throw error;
     }
   }
 }
 
-async function sendToAPIWithAutoRefresh(url, body, method, autoRetryOn401 = true) {
-  if (!autoRetryOn401) return await sendToAPI(url, body, method);
+async function sendToAPIWithAutoRefresh(url, body, method, autoRetryOn401 = true, profile) {
+  if (!autoRetryOn401) return await sendToAPI(url, body, method, profile);
 
   try {
-    return await sendToAPI(url, body, method);
+    return await sendToAPI(url, body, method, profile);
   } catch (error) {
     if (error.status !== 401) throw error;
 
     try {
-      const { jwt: currentJwt } = await chrome.storage.local.get('jwt');
-      if (error.jwtUsedForRequest === currentJwt) {
-        await refreshJwtTokenOnce();
-      }
-      return await sendToAPI(url, body, method);
+      const refreshedProfile = await refreshJwtTokenOnce(profile);
+      return await sendToAPI(url, body, method, refreshedProfile);
     } catch (refreshError) {
       console.error('[API Module] JWT refresh failed.');
       throw new Error('認證已過期且刷新失敗，請重新啟動擴展。');
@@ -172,13 +174,14 @@ async function sendToAPIWithAutoRefresh(url, body, method, autoRetryOn401 = true
  * @throws {Error} - 錯誤包含 status, code, details 屬性
  */
 export async function submitVote(voteData) {
-  const { translationID, videoID, originalSubtitle, timestamp, voteType, slotKey, clientVersion, resolutionContext } = voteData;
+  const { translationID, videoID, originalSubtitle, timestamp, voteType, slotKey, clientVersion, resolutionContext, backendProfileId } = voteData;
 
   if (!videoID || typeof timestamp !== 'number' || !['upvote', 'downvote'].includes(voteType)) {
     throw new Error('Missing or invalid parameters for vote submission');
   }
 
-  const apiBaseUrl = await getApiBaseUrl();
+  const profile = await resolveApiProfile(backendProfileId);
+  const apiBaseUrl = await getApiBaseUrl(profile);
   const url = `${apiBaseUrl}/votes`;
   const body = {
     videoID,
@@ -198,7 +201,7 @@ export async function submitVote(voteData) {
     console.warn("[API Module] Missing originalSubtitle for vote submission. API call might fail.");
   }
 
-  const response = await sendToAPIWithAutoRefresh(url, body);
+  const response = await sendToAPIWithAutoRefresh(url, body, undefined, true, profile);
   return response.data || response;
 }
 
@@ -211,7 +214,7 @@ export async function submitVote(voteData) {
  * @returns {Promise<Object>} - API 響應
  * @throws {Error} - 參數驗證失敗或 API 錯誤
  */
-export async function setVoteState({ translationID, voteState, clientVersion, resolutionContext }) {
+export async function setVoteState({ translationID, voteState, clientVersion, resolutionContext, backendProfileId }) {
   if (!translationID || typeof translationID !== 'string') {
     throw new Error('Missing or invalid parameter: translationID must be a non-empty string');
   }
@@ -219,7 +222,8 @@ export async function setVoteState({ translationID, voteState, clientVersion, re
     throw new Error("Missing or invalid parameter: voteState must be one of 'like', 'dislike', 'none'");
   }
 
-  const apiBaseUrl = await getApiBaseUrl();
+  const profile = await resolveApiProfile(backendProfileId);
+  const apiBaseUrl = await getApiBaseUrl(profile);
   const url = `${apiBaseUrl}/votes/state`;
   const body = {
     translationID,
@@ -231,7 +235,7 @@ export async function setVoteState({ translationID, voteState, clientVersion, re
     body.resolutionContext = normalizeResolutionContext(resolutionContext);
   }
 
-  const response = await sendToAPIWithAutoRefresh(url, body, 'PUT');
+  const response = await sendToAPIWithAutoRefresh(url, body, 'PUT', true, profile);
   return response.data || response;
 }
 
@@ -263,14 +267,16 @@ export async function submitTranslation(translationData) {
     clientVersion,
     translationID,
     sourceTranslationID,
-    resolutionContext
+    resolutionContext,
+    backendProfileId
   } = translationData;
 
   if (!videoId || typeof timestamp !== 'number' || !original || !translation || !languageCode) {
     throw new Error('Missing or invalid parameters for translation submission');
   }
 
-  const apiBaseUrl = await getApiBaseUrl();
+  const profile = await resolveApiProfile(backendProfileId);
+  const apiBaseUrl = await getApiBaseUrl(profile);
   const url = `${apiBaseUrl}/translations`;
   const body = {
     videoID: videoId,
@@ -291,7 +297,7 @@ export async function submitTranslation(translationData) {
   const resolvedClientVersion = clientVersion || getClientVersion();
   if (resolvedClientVersion) body.clientVersion = resolvedClientVersion;
 
-  const response = await sendToAPIWithAutoRefresh(url, body);
+  const response = await sendToAPIWithAutoRefresh(url, body, undefined, true, profile);
   return response.data || response;
 }
 
@@ -308,16 +314,17 @@ export async function submitTranslation(translationData) {
  * @throws {Error} - 錯誤包含 status, code, details 屬性
  */
 export async function fetchSubtitles(options) {
-  const { videoId, startTime, duration, autoRetryOn401 = true } = options;
+  const { videoId, startTime, duration, autoRetryOn401 = true, backendProfileId } = options;
 
   if (!videoId || typeof startTime !== 'number' || typeof duration !== 'number') {
     throw new Error('Missing or invalid parameters for fetching subtitles');
   }
 
-  const apiBaseUrl = await getApiBaseUrl();
+  const profile = await resolveApiProfile(backendProfileId);
+  const apiBaseUrl = await getApiBaseUrl(profile);
   const url = `${apiBaseUrl}/translations?videoID=${encodeURIComponent(videoId)}&startTime=${startTime}&duration=${duration}`;
 
-  const jsonResponse = await sendToAPIWithAutoRefresh(url, null, 'GET', autoRetryOn401);
+  const jsonResponse = await sendToAPIWithAutoRefresh(url, null, 'GET', autoRetryOn401, profile);
   return parseSubtitlesResponse(jsonResponse);
 }
 
@@ -346,12 +353,14 @@ function parseSubtitlesResponse(response) {
       status: sub.status
     }));
   } else {
-    console.error('[API Module] API response indicates failure or invalid format:', response);
+    console.error('[API Module] API response indicates failure or invalid format:', {
+      success: response?.success === true
+    });
     throw new Error(response.error || 'API 回傳失敗或字幕數據格式不正確');
   }
 }
 
-export async function fetchCrowdsourcingTasks({ videoID, languageCode, limit }) {
+export async function fetchCrowdsourcingTasks({ videoID, languageCode, limit, backendProfileId }) {
   if (!videoID || typeof videoID !== 'string' || !videoID.trim()) {
     throw new Error('Missing or invalid parameter: videoID must be a non-empty string');
   }
@@ -363,14 +372,15 @@ export async function fetchCrowdsourcingTasks({ videoID, languageCode, limit }) 
     throw new Error('Missing or invalid parameter: limit must be an integer from 1 to 20');
   }
 
-  const apiBaseUrl = await getApiBaseUrl();
+  const profile = await resolveApiProfile(backendProfileId);
+  const apiBaseUrl = await getApiBaseUrl(profile);
   const query = new URLSearchParams({
     videoID: videoID.trim(),
     languageCode: normalizedLanguageCode
   });
   if (limit !== undefined) query.set('limit', String(limit));
 
-  const response = await sendToAPIWithAutoRefresh(`${apiBaseUrl}/crowdsourcing-tasks?${query.toString()}`, null, 'GET');
+  const response = await sendToAPIWithAutoRefresh(`${apiBaseUrl}/crowdsourcing-tasks?${query.toString()}`, null, 'GET', true, profile);
   if (response && response.success === true && Array.isArray(response.data?.tasks)) {
     return response.data;
   }
@@ -390,10 +400,15 @@ export async function fetchCrowdsourcingTasks({ videoID, languageCode, limit }) 
  * @param {string} userID - 用戶 ID
  * @returns {Promise<Object>} - 包含 success 和 token 的響應
  */
-export async function registerUser(userID) {
-  const apiBaseUrl = await getApiBaseUrl();
+async function registerUserForProfile(userID, profile) {
+  const apiBaseUrl = await getApiBaseUrl(profile);
   const url = `${apiBaseUrl}/users`;
-  return await sendToAPI(url, { userID }, 'POST');
+  return await sendToAPI(url, { userID }, 'POST', profile);
+}
+
+export async function registerUser(userID, backendProfileId) {
+  const profile = await resolveApiProfile(backendProfileId);
+  return await registerUserForProfile(userID, profile);
 }
 
 /**
@@ -402,11 +417,12 @@ export async function registerUser(userID) {
  * @param {boolean} [autoRetryOn401=true] - 401 錯誤時自動重試
  * @returns {Promise<Object>} - 包含用戶統計數據的響應
  */
-export async function fetchUserStats(userID, autoRetryOn401 = true) {
-  const apiBaseUrl = await getApiBaseUrl();
-  const url = `${apiBaseUrl}/users/${userID}`;
+export async function fetchUserStats(userID, autoRetryOn401 = true, backendProfileId) {
+  const profile = await resolveApiProfile(backendProfileId);
+  const apiBaseUrl = await getApiBaseUrl(profile);
+  const url = `${apiBaseUrl}/users/${encodeURIComponent(userID)}`;
 
-  return await sendToAPIWithAutoRefresh(url, null, 'GET', autoRetryOn401);
+  return await sendToAPIWithAutoRefresh(url, null, 'GET', autoRetryOn401, profile);
 }
 
 // ==================== 替換事件 API ====================
@@ -417,11 +433,18 @@ export async function fetchUserStats(userID, autoRetryOn401 = true) {
  * @param {boolean} [autoRetryOn401=true] - 401 錯誤時自動重試
  * @returns {Promise<Object>} - API 回應結果
  */
-export async function submitReplacementEvents(events, autoRetryOn401 = true) {
-  const apiBaseUrl = await getApiBaseUrl();
+export async function submitReplacementEvents(events, autoRetryOn401 = true, backendProfileId) {
+  const profile = await resolveApiProfile(backendProfileId);
+  const apiBaseUrl = await getApiBaseUrl(profile);
   const url = `${apiBaseUrl}/replacement-events`;
+  const serializedEvents = events.map(({ translationID, contributorUserID, beneficiaryUserID, occurredAt }) => ({
+    translationID,
+    contributorUserID,
+    beneficiaryUserID,
+    occurredAt
+  }));
 
-  return await sendToAPIWithAutoRefresh(url, { events }, 'POST', autoRetryOn401);
+  return await sendToAPIWithAutoRefresh(url, { events: serializedEvents }, 'POST', autoRetryOn401, profile);
 }
 
 // ==================== JWT 管理 ====================
@@ -430,53 +453,34 @@ export async function submitReplacementEvents(events, autoRetryOn401 = true) {
  * 刷新 JWT Token - 重新註冊用戶獲取新的 JWT
  * @returns {Promise<void>} - 成功刷新或拋出錯誤
  */
-async function refreshJwtToken() {
+async function refreshJwtToken(profile) {
   console.log('[API Module] Starting JWT token refresh...');
 
   try {
-    // 獲取當前的 userId（新格式：user.userId）
-    const { user } = await chrome.storage.local.get(['user']);
-    const userId = user?.userId || '';
-
-    if (!userId) {
-      // 如果沒有 userId，生成一個新的
-      const newUserId = crypto.randomUUID();
-      await chrome.storage.local.set({ user: { userId: newUserId } });
-      console.log('[API Module] Generated new userId for JWT refresh:', newUserId);
-
-      // 使用新的 userId 註冊
-      const response = await registerUser(newUserId);
-      if (response.token) {
-        await chrome.storage.local.set({ jwt: response.token });
-        console.log('[API Module] JWT refreshed successfully with new userId.');
-      } else {
-        throw new Error(response.error || 'Failed to get new JWT token');
-      }
-    } else {
-      // 使用現有 userId 重新註冊
-      console.log('[API Module] Re-registering existing userId for JWT refresh:', userId);
-      const response = await registerUser(userId);
-
-      if (response.token) {
-        await chrome.storage.local.set({ jwt: response.token });
-        console.log('[API Module] JWT refreshed successfully for existing userId.');
-      } else {
-        throw new Error(response.error || 'Failed to refresh JWT token');
-      }
+    const response = await registerUserForProfile(profile.userId, profile);
+    if (!response.token) {
+      throw new Error(response.error || 'Failed to refresh JWT token');
     }
+    await setBackendProfileCredentials(chrome.storage.local, profile.id, { jwt: response.token });
+    console.log('[API Module] JWT refreshed successfully.');
+    return { ...profile, jwt: response.token };
   } catch (error) {
-    console.error('[API Module] Error during JWT token refresh:', error);
+    console.error('[API Module] Error during JWT token refresh');
     throw error;
   }
 }
 
-function refreshJwtTokenOnce() {
-  if (!jwtRefreshPromise) {
-    jwtRefreshPromise = refreshJwtToken().finally(() => {
-      jwtRefreshPromise = null;
-    });
-  }
-  return jwtRefreshPromise;
+function refreshJwtTokenOnce(profile) {
+  const currentRefresh = jwtRefreshPromises.get(profile.id);
+  if (currentRefresh) return currentRefresh;
+
+  const refresh = refreshJwtToken(profile).finally(() => {
+    if (jwtRefreshPromises.get(profile.id) === refresh) {
+      jwtRefreshPromises.delete(profile.id);
+    }
+  });
+  jwtRefreshPromises.set(profile.id, refresh);
+  return refresh;
 }
 
 // ==================== 錯誤輔助函數 ====================
@@ -499,32 +503,6 @@ export function isPermanentError(error) {
 
     if (permanentErrorCodes.includes(error.code)) {
       return true;
-    }
-  }
-
-  // 備用：檢查錯誤訊息（包含特定的業務邏輯錯誤）
-  const permanentErrorMessages = [
-    'Cannot vote on your own translation',
-    'User not authorized to perform this action',
-    'Invalid translation ID format',
-    'Translation does not exist',
-    'Invalid vote type'
-  ];
-
-  if (error.message) {
-    for (const permanentMsg of permanentErrorMessages) {
-      if (error.message.includes(permanentMsg)) {
-        return true;
-      }
-    }
-  }
-
-  // 檢查錯誤詳情中的訊息
-  if (error.details && error.details.error && error.details.error.message) {
-    for (const permanentMsg of permanentErrorMessages) {
-      if (error.details.error.message.includes(permanentMsg)) {
-        return true;
-      }
     }
   }
 
