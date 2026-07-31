@@ -20,7 +20,8 @@ test('Given a stale queued translation When translation sync retries it Then API
     createdAt: 0,
     syncStartedAt: 0,
     retryCount: 1,
-    error: null
+    error: null,
+    backendProfileId: 'default'
   }];
 
   await module.namespace.triggerTranslationSync();
@@ -43,7 +44,8 @@ test('Given a stale queued translation When translation sync retries it Then API
         action: contextWithExtraKey.action,
         slotKey: contextWithExtraKey.slotKey,
         timestamp: contextWithExtraKey.timestamp
-      }
+      },
+      backendProfileId: 'default'
     }
   }]);
   assert.equal(state.translationQueue.length, 0);
@@ -65,7 +67,8 @@ test('Given a stale queued candidate vote When vote sync retries it Then setVote
     createdAt: 0,
     syncStartedAt: 0,
     retryCount: 1,
-    error: null
+    error: null,
+    backendProfileId: 'default'
   }];
 
   await module.namespace.triggerVoteSync();
@@ -82,7 +85,8 @@ test('Given a stale queued candidate vote When vote sync retries it Then setVote
         action: contextWithExtraKey.action,
         slotKey: contextWithExtraKey.slotKey,
         timestamp: contextWithExtraKey.timestamp
-      }
+      },
+      backendProfileId: 'default'
     }
   }]);
   assert.equal(state.voteQueue.length, 0);
@@ -105,7 +109,8 @@ test('Given a stale queued legacy vote When vote sync retries it Then submitVote
     createdAt: 0,
     syncStartedAt: 0,
     retryCount: 1,
-    error: null
+    error: null,
+    backendProfileId: 'default'
   }];
 
   await module.namespace.triggerVoteSync();
@@ -125,7 +130,8 @@ test('Given a stale queued legacy vote When vote sync retries it Then submitVote
         action: contextWithExtraKey.action,
         slotKey: contextWithExtraKey.slotKey,
         timestamp: contextWithExtraKey.timestamp
-      }
+      },
+      backendProfileId: 'default'
     }
   }]);
   assert.equal(state.voteQueue.length, 0);

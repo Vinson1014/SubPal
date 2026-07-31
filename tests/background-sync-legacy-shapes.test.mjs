@@ -8,7 +8,7 @@ test('Given a stale metadata-free translation When translation sync retries it T
     id: 'legacy-translation-stale-1', videoId: 'netflix-81234567', timestamp: 12.5,
     original: 'Original subtitle', translation: 'Improved subtitle', languageCode: 'zh-TW',
     submissionReason: 'normal subtitle hover submission', slotKey: null, status: 'syncing',
-    createdAt: 0, syncStartedAt: 0, retryCount: 1, error: null
+    createdAt: 0, syncStartedAt: 0, retryCount: 1, error: null, backendProfileId: 'default'
   }];
 
   await module.namespace.triggerTranslationSync();
@@ -18,7 +18,7 @@ test('Given a stale metadata-free translation When translation sync retries it T
     payload: {
       videoId: 'netflix-81234567', timestamp: 12.5, original: 'Original subtitle',
       translation: 'Improved subtitle', submissionReason: 'normal subtitle hover submission',
-      languageCode: 'zh-TW', slotKey: null
+      languageCode: 'zh-TW', slotKey: null, backendProfileId: 'default'
     }
   }]);
   assert.equal(state.translationQueue.length, 0);
@@ -33,7 +33,7 @@ test('Given a stale metadata-free vote When vote sync retries it Then legacy API
   state.voteQueue = [{
     id: 'legacy-vote-stale-1', videoId: 'netflix-81234567', timestamp: 12.5,
     voteType: 'upvote', translationID: null, originalSubtitle: 'Original subtitle', slotKey: null,
-    status: 'syncing', createdAt: 0, syncStartedAt: 0, retryCount: 1, error: null
+    status: 'syncing', createdAt: 0, syncStartedAt: 0, retryCount: 1, error: null, backendProfileId: 'default'
   }];
 
   await module.namespace.triggerVoteSync();
@@ -42,7 +42,7 @@ test('Given a stale metadata-free vote When vote sync retries it Then legacy API
     kind: 'submitVote',
     payload: {
       videoID: 'netflix-81234567', timestamp: 12.5, voteType: 'upvote',
-      translationID: null, originalSubtitle: 'Original subtitle', slotKey: null
+      translationID: null, originalSubtitle: 'Original subtitle', slotKey: null, backendProfileId: 'default'
     }
   }]);
   assert.equal(state.voteQueue.length, 0);

@@ -2,6 +2,8 @@
 // 負責處理資料同步相關操作的模組 - Queue 系統版本
 
 import * as apiModule from './api.js';
+import { resolveBackendProfile } from './backend-profiles.js';
+import { ensureStorageMigrationsComplete } from './storage-migrations.js';
 
 // 常量定義
 const MAX_RETRIES = 3;
@@ -39,6 +41,12 @@ let isSyncingVotes = false;
 let isSyncingTranslations = false;
 let isSyncingReplacementEvents = false;
 
+async function resolveSyncProfileId(profileId) {
+  await ensureStorageMigrationsComplete();
+  if (profileId !== undefined) return profileId;
+  return (await resolveBackendProfile()).id;
+}
+
 // ==================== Storage 輔助函數 ====================
 
 /**
@@ -46,10 +54,10 @@ let isSyncingReplacementEvents = false;
  * @param {string} queueType - 隊列類型 (voteQueue 或 translationQueue)
  * @returns {Promise<Array>} - pending 狀態的項目列表
  */
-async function getPendingItems(queueType) {
+async function getPendingItems(queueType, profileId) {
   const result = await chrome.storage.local.get(queueType);
   const queue = result[queueType] || [];
-  return queue.filter(item => item.status === 'pending');
+  return queue.filter(item => item.status === 'pending' && item.backendProfileId === profileId);
 }
 
 /**
@@ -59,11 +67,11 @@ async function getPendingItems(queueType) {
  * @param {Object} updater - 要寫入的欄位
  * @returns {Promise<Object|null>} - 更新後的項目
  */
-async function updateQueueItem(queueType, itemId, updater) {
+async function updateQueueItem(queueType, itemId, profileId, updater) {
   const result = await chrome.storage.local.get(queueType);
   const queue = result[queueType] || [];
   const updatedQueue = queue.map(item => {
-    if (item.id !== itemId) {
+    if (item.id !== itemId || item.backendProfileId !== profileId) {
       return item;
     }
 
@@ -80,7 +88,7 @@ async function updateQueueItem(queueType, itemId, updater) {
   });
 
   await chrome.storage.local.set({ [queueType]: updatedQueue });
-  return updatedQueue.find(item => item.id === itemId) || null;
+  return updatedQueue.find(item => item.id === itemId && item.backendProfileId === profileId) || null;
 }
 
 /**
@@ -91,7 +99,7 @@ async function updateQueueItem(queueType, itemId, updater) {
  * @param {string|null} error - 錯誤訊息
  * @returns {Promise<Object|null>} - 更新後的項目
  */
-async function updateItemStatus(queueType, itemId, status, error = null) {
+async function updateItemStatus(queueType, itemId, profileId, status, error = null) {
   const updates = {
     status,
     error,
@@ -102,7 +110,7 @@ async function updateItemStatus(queueType, itemId, status, error = null) {
     updates.syncStartedAt = null;
   }
 
-  return await updateQueueItem(queueType, itemId, updates);
+  return await updateQueueItem(queueType, itemId, profileId, updates);
 }
 
 /**
@@ -111,8 +119,8 @@ async function updateItemStatus(queueType, itemId, status, error = null) {
  * @param {string} itemId - 項目 ID
  * @returns {Promise<Object|null>} - 更新後的項目
  */
-async function markItemAsSyncing(queueType, itemId) {
-  return await updateQueueItem(queueType, itemId, {
+async function markItemAsSyncing(queueType, itemId, profileId) {
+  return await updateQueueItem(queueType, itemId, profileId, {
     status: 'syncing',
     error: null,
     syncedAt: null,
@@ -126,8 +134,8 @@ async function markItemAsSyncing(queueType, itemId) {
  * @param {string} itemId - 項目 ID
  * @param {number} retryCount - 重試次數
  */
-async function updateQueueItemRetryCount(queueType, itemId, retryCount) {
-  await updateQueueItem(queueType, itemId, { retryCount });
+async function updateQueueItemRetryCount(queueType, itemId, profileId, retryCount) {
+  await updateQueueItem(queueType, itemId, profileId, { retryCount });
 }
 
 /**
@@ -137,14 +145,14 @@ async function updateQueueItemRetryCount(queueType, itemId, retryCount) {
  * @param {string} queueType - 隊列類型
  * @returns {Promise<number>} - 回收的項目數量
  */
-async function recoverStaleSyncingItems(queueType) {
+async function recoverStaleSyncingItems(queueType, profileId) {
   const result = await chrome.storage.local.get(queueType);
   const queue = result[queueType] || [];
   const now = Date.now();
   const recoveredIds = [];
 
   const updatedQueue = queue.map(item => {
-    if (item.status !== 'syncing') {
+    if (item.status !== 'syncing' || item.backendProfileId !== profileId) {
       return item;
     }
 
@@ -194,12 +202,12 @@ function isDuplicateSubmissionError(error) {
  * @param {string} itemId - 項目 ID
  * @param {string} historyType - 歷史記錄類型
  */
-async function moveToHistory(queueType, itemId, historyType) {
+async function moveToHistory(queueType, itemId, historyType, profileId) {
   const storageData = await chrome.storage.local.get([queueType, historyType]);
   const queue = storageData[queueType] || [];
   const history = storageData[historyType] || [];
 
-  const itemIndex = queue.findIndex(item => item.id === itemId);
+  const itemIndex = queue.findIndex(item => item.id === itemId && item.backendProfileId === profileId);
   if (itemIndex === -1) return;
 
   const [item] = queue.splice(itemIndex, 1);
@@ -218,17 +226,23 @@ async function moveToHistory(queueType, itemId, historyType) {
   delete completedItem.error;
   delete completedItem.syncStartedAt;
 
-  // 加到歷史記錄開頭
-  history.unshift(completedItem);
+  const nextHistory = history.filter((historyItem) => (
+    historyItem.id !== itemId || historyItem.backendProfileId !== profileId
+  ));
 
-  // 限制歷史記錄長度
-  if (history.length > MAX_HISTORY_LENGTH) {
-    history.splice(MAX_HISTORY_LENGTH);
-  }
+  // 加到歷史記錄開頭
+  nextHistory.unshift(completedItem);
+
+  let retainedProfileEntries = 0;
+  const boundedHistory = nextHistory.filter((historyItem) => {
+    if (historyItem.backendProfileId !== profileId) return true;
+    retainedProfileEntries += 1;
+    return retainedProfileEntries <= MAX_HISTORY_LENGTH;
+  });
 
   await chrome.storage.local.set({
     [queueType]: queue,
-    [historyType]: history
+    [historyType]: boundedHistory
   });
 }
 
@@ -236,7 +250,7 @@ async function moveToHistory(queueType, itemId, historyType) {
  * 獲取同步狀態統計
  * @returns {Promise<Object>} - 同步狀態資訊
  */
-async function getSyncStatus() {
+async function getSyncStatus(profileId) {
   const storageData = await chrome.storage.local.get([
     VOTE_QUEUE_KEY,
     TRANSLATION_QUEUE_KEY,
@@ -248,15 +262,15 @@ async function getSyncStatus() {
   const replacementEventQueue = storageData[REPLACEMENT_EVENT_QUEUE_KEY] || [];
 
   return {
-    pendingVotes: voteQueue.filter(item => item.status === 'pending').length,
-    syncingVotes: voteQueue.filter(item => item.status === 'syncing').length,
-    failedVotes: voteQueue.filter(item => item.status === 'failed').length,
-    pendingTranslations: translationQueue.filter(item => item.status === 'pending').length,
-    syncingTranslations: translationQueue.filter(item => item.status === 'syncing').length,
-    failedTranslations: translationQueue.filter(item => item.status === 'failed').length,
-    pendingReplacementEvents: replacementEventQueue.filter(item => item.status === 'pending').length,
-    syncingReplacementEvents: replacementEventQueue.filter(item => item.status === 'syncing').length,
-    failedReplacementEvents: replacementEventQueue.filter(item => item.status === 'failed').length,
+    pendingVotes: voteQueue.filter(item => item.status === 'pending' && item.backendProfileId === profileId).length,
+    syncingVotes: voteQueue.filter(item => item.status === 'syncing' && item.backendProfileId === profileId).length,
+    failedVotes: voteQueue.filter(item => item.status === 'failed' && item.backendProfileId === profileId).length,
+    pendingTranslations: translationQueue.filter(item => item.status === 'pending' && item.backendProfileId === profileId).length,
+    syncingTranslations: translationQueue.filter(item => item.status === 'syncing' && item.backendProfileId === profileId).length,
+    failedTranslations: translationQueue.filter(item => item.status === 'failed' && item.backendProfileId === profileId).length,
+    pendingReplacementEvents: replacementEventQueue.filter(item => item.status === 'pending' && item.backendProfileId === profileId).length,
+    syncingReplacementEvents: replacementEventQueue.filter(item => item.status === 'syncing' && item.backendProfileId === profileId).length,
+    failedReplacementEvents: replacementEventQueue.filter(item => item.status === 'failed' && item.backendProfileId === profileId).length,
     isSyncingVotes,
     isSyncingTranslations,
     isSyncingReplacementEvents
@@ -268,14 +282,14 @@ async function getSyncStatus() {
 /**
  * 同步待處理的投票隊列
  */
-async function syncPendingVotes() {
+async function syncPendingVotes(profileId) {
   if (isSyncingVotes) return;
   isSyncingVotes = true;
   console.log('[Sync] Starting vote sync...');
 
   try {
-    await recoverStaleSyncingItems(VOTE_QUEUE_KEY);
-    const pendingItems = await getPendingItems(VOTE_QUEUE_KEY);
+    await recoverStaleSyncingItems(VOTE_QUEUE_KEY, profileId);
+    const pendingItems = await getPendingItems(VOTE_QUEUE_KEY, profileId);
 
     if (pendingItems.length === 0) {
       console.log('[Sync] Vote queue is empty.');
@@ -286,23 +300,24 @@ async function syncPendingVotes() {
 
     for (const item of pendingItems) {
       try {
-        await markItemAsSyncing(VOTE_QUEUE_KEY, item.id);
-        const result = await sendVoteToAPI(item);
+        const syncingItem = await markItemAsSyncing(VOTE_QUEUE_KEY, item.id, profileId);
+        if (!syncingItem) continue;
+        const result = await sendVoteToAPI(syncingItem, profileId);
 
         // 如果有權威投票數據，先寫入隊列項目再移動到歷史記錄
         if (result.data && result.data._authoritativeVoteState) {
-          await updateQueueItem(VOTE_QUEUE_KEY, item.id, {
+          await updateQueueItem(VOTE_QUEUE_KEY, item.id, profileId, {
             authoritativeVoteState: result.data._authoritativeVoteState
           });
         }
 
-        await moveToHistory(VOTE_QUEUE_KEY, item.id, VOTE_HISTORY_KEY);
+        await moveToHistory(VOTE_QUEUE_KEY, item.id, VOTE_HISTORY_KEY, profileId);
         console.log(`[Sync] Vote ${item.id} synced successfully`);
       } catch (error) {
         // 對於新 voteState API，不將 409 視為成功（idempotent PUT 不應返回 409）
         // 僅對舊版 submitVote 路徑保留 409-as-completed 行為
         if (isDuplicateSubmissionError(error) && !item.voteState) {
-          await moveToHistory(VOTE_QUEUE_KEY, item.id, VOTE_HISTORY_KEY);
+          await moveToHistory(VOTE_QUEUE_KEY, item.id, VOTE_HISTORY_KEY, profileId);
           console.warn(`[Sync] Vote ${item.id} already exists on backend (409), moved to history`);
           continue;
         }
@@ -316,8 +331,8 @@ async function syncPendingVotes() {
             isPermanent: true,
             failedAt: Date.now()
           };
-          await updateItemStatus(VOTE_QUEUE_KEY, item.id, 'failed', error.message);
-          await updateQueueItem(VOTE_QUEUE_KEY, item.id, { errorMetadata });
+          await updateItemStatus(VOTE_QUEUE_KEY, item.id, profileId, 'failed', error.message);
+          await updateQueueItem(VOTE_QUEUE_KEY, item.id, profileId, { errorMetadata });
           console.error(`[Sync] Vote ${item.id} failed permanently: ${error.message}`);
           continue;
         }
@@ -325,11 +340,11 @@ async function syncPendingVotes() {
         const retryCount = item.retryCount || 0;
 
         if (retryCount < MAX_RETRIES) {
-          await updateItemStatus(VOTE_QUEUE_KEY, item.id, 'pending', null);
-          await updateQueueItemRetryCount(VOTE_QUEUE_KEY, item.id, retryCount + 1);
+          await updateItemStatus(VOTE_QUEUE_KEY, item.id, profileId, 'pending', null);
+          await updateQueueItemRetryCount(VOTE_QUEUE_KEY, item.id, profileId, retryCount + 1);
           console.warn(`[Sync] Vote ${item.id} retry ${retryCount + 1}/${MAX_RETRIES}: ${error.message}`);
         } else {
-          await updateItemStatus(VOTE_QUEUE_KEY, item.id, 'failed', error.message);
+          await updateItemStatus(VOTE_QUEUE_KEY, item.id, profileId, 'failed', error.message);
           console.error(`[Sync] Vote ${item.id} failed after ${MAX_RETRIES} retries: ${error.message}`);
         }
       }
@@ -344,14 +359,14 @@ async function syncPendingVotes() {
 /**
  * 同步待處理的翻譯隊列
  */
-async function syncPendingTranslations() {
+async function syncPendingTranslations(profileId) {
   if (isSyncingTranslations) return;
   isSyncingTranslations = true;
   console.log('[Sync] Starting translation sync...');
 
   try {
-    await recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY);
-    const pendingItems = await getPendingItems(TRANSLATION_QUEUE_KEY);
+    await recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY, profileId);
+    const pendingItems = await getPendingItems(TRANSLATION_QUEUE_KEY, profileId);
 
     if (pendingItems.length === 0) {
       console.log('[Sync] Translation queue is empty.');
@@ -362,13 +377,14 @@ async function syncPendingTranslations() {
 
     for (const item of pendingItems) {
       try {
-        await markItemAsSyncing(TRANSLATION_QUEUE_KEY, item.id);
-        await sendTranslationToAPI(item);
-        await moveToHistory(TRANSLATION_QUEUE_KEY, item.id, TRANSLATION_HISTORY_KEY);
+        const syncingItem = await markItemAsSyncing(TRANSLATION_QUEUE_KEY, item.id, profileId);
+        if (!syncingItem) continue;
+        await sendTranslationToAPI(syncingItem, profileId);
+        await moveToHistory(TRANSLATION_QUEUE_KEY, item.id, TRANSLATION_HISTORY_KEY, profileId);
         console.log(`[Sync] Translation ${item.id} synced successfully`);
       } catch (error) {
         if (isDuplicateSubmissionError(error)) {
-          await moveToHistory(TRANSLATION_QUEUE_KEY, item.id, TRANSLATION_HISTORY_KEY);
+          await moveToHistory(TRANSLATION_QUEUE_KEY, item.id, TRANSLATION_HISTORY_KEY, profileId);
           console.warn(`[Sync] Translation ${item.id} already exists on backend (409), moved to history`);
           continue;
         }
@@ -383,8 +399,8 @@ async function syncPendingTranslations() {
             terminal: true,
             failedAt: Date.now()
           };
-          await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'failed', error.message);
-          await updateQueueItem(TRANSLATION_QUEUE_KEY, item.id, { errorMetadata });
+          await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, profileId, 'failed', error.message);
+          await updateQueueItem(TRANSLATION_QUEUE_KEY, item.id, profileId, { errorMetadata });
           console.error(`[Sync] Translation ${item.id} failed permanently: ${error.message}`);
           continue;
         }
@@ -392,8 +408,8 @@ async function syncPendingTranslations() {
         const retryCount = item.retryCount || 0;
 
         if (retryCount < MAX_RETRIES) {
-          await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'pending', null);
-          await updateQueueItemRetryCount(TRANSLATION_QUEUE_KEY, item.id, retryCount + 1);
+          await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, profileId, 'pending', null);
+          await updateQueueItemRetryCount(TRANSLATION_QUEUE_KEY, item.id, profileId, retryCount + 1);
           console.warn(`[Sync] Translation ${item.id} retry ${retryCount + 1}/${MAX_RETRIES}: ${error.message}`);
         } else {
           const errorMetadata = {
@@ -405,8 +421,8 @@ async function syncPendingTranslations() {
             terminal: true,
             failedAt: Date.now()
           };
-          await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'failed', error.message);
-          await updateQueueItem(TRANSLATION_QUEUE_KEY, item.id, { errorMetadata });
+          await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, profileId, 'failed', error.message);
+          await updateQueueItem(TRANSLATION_QUEUE_KEY, item.id, profileId, { errorMetadata });
           console.error(`[Sync] Translation ${item.id} failed after ${MAX_RETRIES} retries: ${error.message}`);
         }
       }
@@ -421,37 +437,39 @@ async function syncPendingTranslations() {
 /**
  * 重試所有失敗的投票
  */
-async function retryFailedVotes() {
-  await recoverStaleSyncingItems(VOTE_QUEUE_KEY);
+async function retryFailedVotes(profileId) {
+  const pinnedProfileId = await resolveSyncProfileId(profileId);
+  await recoverStaleSyncingItems(VOTE_QUEUE_KEY, pinnedProfileId);
   const result = await chrome.storage.local.get(VOTE_QUEUE_KEY);
   const queue = result[VOTE_QUEUE_KEY] || [];
-  const failedItems = queue.filter(item => item.status === 'failed');
+  const failedItems = queue.filter(item => item.status === 'failed' && item.backendProfileId === pinnedProfileId);
 
   for (const item of failedItems) {
-    await updateItemStatus(VOTE_QUEUE_KEY, item.id, 'pending', null);
-    await updateQueueItemRetryCount(VOTE_QUEUE_KEY, item.id, 0);
+    await updateItemStatus(VOTE_QUEUE_KEY, item.id, pinnedProfileId, 'pending', null);
+    await updateQueueItemRetryCount(VOTE_QUEUE_KEY, item.id, pinnedProfileId, 0);
   }
 
   console.log(`[Sync] Retrying ${failedItems.length} failed votes`);
-  await syncPendingVotes();
+  await syncPendingVotes(pinnedProfileId);
 }
 
 /**
  * 重試所有失敗的翻譯
  */
-async function retryFailedTranslations() {
-  await recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY);
+async function retryFailedTranslations(profileId) {
+  const pinnedProfileId = await resolveSyncProfileId(profileId);
+  await recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY, pinnedProfileId);
   const result = await chrome.storage.local.get(TRANSLATION_QUEUE_KEY);
   const queue = result[TRANSLATION_QUEUE_KEY] || [];
-  const failedItems = queue.filter(item => item.status === 'failed');
+  const failedItems = queue.filter(item => item.status === 'failed' && item.backendProfileId === pinnedProfileId);
 
   for (const item of failedItems) {
-    await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, 'pending', null);
-    await updateQueueItemRetryCount(TRANSLATION_QUEUE_KEY, item.id, 0);
+    await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, pinnedProfileId, 'pending', null);
+    await updateQueueItemRetryCount(TRANSLATION_QUEUE_KEY, item.id, pinnedProfileId, 0);
   }
 
   console.log(`[Sync] Retrying ${failedItems.length} failed translations`);
-  await syncPendingTranslations();
+  await syncPendingTranslations(pinnedProfileId);
 }
 
 // ==================== API 調用函數 ====================
@@ -460,7 +478,7 @@ async function retryFailedTranslations() {
  * 發送單個投票到後端 API
  * @param {object} voteData - 投票數據
  */
-async function sendVoteToAPI(voteData) {
+async function sendVoteToAPI(voteData, profileId) {
   try {
     let result;
 
@@ -469,7 +487,8 @@ async function sendVoteToAPI(voteData) {
       const payload = {
         translationID: voteData.translationID,
         voteState: voteData.voteState,
-        clientVersion: voteData.clientVersion || null
+        clientVersion: voteData.clientVersion || null,
+        backendProfileId: profileId
       };
       if (voteData.resolutionContext !== undefined && voteData.resolutionContext !== null) {
         payload.resolutionContext = normalizeResolutionContext(voteData.resolutionContext);
@@ -478,17 +497,22 @@ async function sendVoteToAPI(voteData) {
 
       // 儲存權威響應數據到 voteStateByTranslation
       if (result && voteData.translationID) {
+        const storageData = await chrome.storage.local.get(VOTE_STATE_BY_TRANSLATION_KEY);
+        const voteStateByTranslation = storageData[VOTE_STATE_BY_TRANSLATION_KEY] || {};
+        const existingVoteState = voteStateByTranslation[voteData.translationID];
+        if (existingVoteState?.backendProfileId && existingVoteState.backendProfileId !== profileId) {
+          return { success: true, data: result };
+        }
         const voteStateRecord = {
           myVote: result.myVote ?? null,
           upvotes: result.upvotes ?? 0,
           downvotes: result.downvotes ?? 0,
           pending: false,
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
+          backendProfileId: profileId
         };
 
         // 更新 storage map
-        const storageData = await chrome.storage.local.get(VOTE_STATE_BY_TRANSLATION_KEY);
-        const voteStateByTranslation = storageData[VOTE_STATE_BY_TRANSLATION_KEY] || {};
         voteStateByTranslation[voteData.translationID] = voteStateRecord;
         await chrome.storage.local.set({ [VOTE_STATE_BY_TRANSLATION_KEY]: voteStateByTranslation });
 
@@ -503,7 +527,8 @@ async function sendVoteToAPI(voteData) {
         voteType: voteData.voteType,
         translationID: voteData.translationID || null,
         originalSubtitle: voteData.originalSubtitle || null,
-        slotKey: voteData.slotKey || null
+        slotKey: voteData.slotKey || null,
+        backendProfileId: profileId
       };
       if (voteData.resolutionContext !== undefined && voteData.resolutionContext !== null) {
         payload.resolutionContext = normalizeResolutionContext(voteData.resolutionContext);
@@ -522,7 +547,7 @@ async function sendVoteToAPI(voteData) {
  * 發送單個翻譯提交到後端 API
  * @param {object} translationData - 翻譯數據
  */
-async function sendTranslationToAPI(translationData) {
+async function sendTranslationToAPI(translationData, profileId) {
   console.log('[Sync] Sending translation to API:', translationData.id);
 
   try {
@@ -534,7 +559,8 @@ async function sendTranslationToAPI(translationData) {
       translation: translationData.translation,
       submissionReason: translationData.submissionReason || '',
       languageCode: translationData.languageCode,
-      slotKey: translationData.slotKey || null
+      slotKey: translationData.slotKey || null,
+      backendProfileId: profileId
     };
     if (translationData.resolutionContext !== undefined && translationData.resolutionContext !== null) {
       payload.translationID = translationData.translationID ?? null;
@@ -560,11 +586,11 @@ async function sendTranslationToAPI(translationData) {
 /**
  * 觸發投票同步
  */
-export async function triggerVoteSync() {
+export async function triggerVoteSync(profileId) {
   if (!isSyncingVotes) {
+    const pinnedProfileId = await resolveSyncProfileId(profileId);
     console.log('[Sync] Triggering vote sync');
-    await recoverStaleSyncingItems(VOTE_QUEUE_KEY);
-    await syncPendingVotes();
+    await syncPendingVotes(pinnedProfileId);
   } else {
     console.log('[Sync] Vote sync already in progress');
   }
@@ -573,11 +599,11 @@ export async function triggerVoteSync() {
 /**
  * 觸發翻譯同步
  */
-export async function triggerTranslationSync() {
+export async function triggerTranslationSync(profileId) {
   if (!isSyncingTranslations) {
+    const pinnedProfileId = await resolveSyncProfileId(profileId);
     console.log('[Sync] Triggering translation sync');
-    await recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY);
-    await syncPendingTranslations();
+    await syncPendingTranslations(pinnedProfileId);
   } else {
     console.log('[Sync] Translation sync already in progress');
   }
@@ -632,14 +658,14 @@ export function handleMessage(request, sender, portSendResponse) {
  * 同步待處理的替換事件隊列
  * 使用批量 API 提交（最多100個）
  */
-async function syncPendingReplacementEvents() {
+async function syncPendingReplacementEvents(profileId) {
   if (isSyncingReplacementEvents) return;
   isSyncingReplacementEvents = true;
   console.log('[Sync] Starting replacement event sync...');
 
   try {
-    await recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY);
-    const pendingItems = await getPendingItems(REPLACEMENT_EVENT_QUEUE_KEY);
+    await recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY, profileId);
+    const pendingItems = await getPendingItems(REPLACEMENT_EVENT_QUEUE_KEY, profileId);
 
     if (pendingItems.length === 0) {
       console.log('[Sync] Replacement event queue is empty.');
@@ -656,35 +682,50 @@ async function syncPendingReplacementEvents() {
     }
 
     for (const batch of batches) {
+      const syncingItems = [];
       try {
         // 標記所有項目為 syncing
-        await Promise.all(
-          batch.map(item => markItemAsSyncing(REPLACEMENT_EVENT_QUEUE_KEY, item.id))
-        );
+        for (const item of batch) {
+          const syncingItem = await markItemAsSyncing(REPLACEMENT_EVENT_QUEUE_KEY, item.id, profileId);
+          if (syncingItem) syncingItems.push(syncingItem);
+        }
+        if (syncingItems.length === 0) continue;
 
         // 批量發送
-        await sendReplacementEventsToAPI(batch);
+        await sendReplacementEventsToAPI(syncingItems, profileId);
 
         // 移動到歷史記錄
-        await Promise.all(
-          batch.map(item => moveToHistory(REPLACEMENT_EVENT_QUEUE_KEY, item.id, REPLACEMENT_EVENT_HISTORY_KEY))
-        );
+        for (const item of syncingItems) {
+          await moveToHistory(REPLACEMENT_EVENT_QUEUE_KEY, item.id, REPLACEMENT_EVENT_HISTORY_KEY, profileId);
+        }
 
         console.log(`[Sync] Replacement event batch of ${batch.length} synced successfully`);
 
       } catch (error) {
         console.error('[Sync] Error syncing replacement event batch:', error);
 
-        // 處理批次中的每個項目
-        for (const item of batch) {
-          const retryCount = item.retryCount || 0;
+        if (isDuplicateSubmissionError(error)) {
+          for (const item of syncingItems) {
+            await moveToHistory(REPLACEMENT_EVENT_QUEUE_KEY, item.id, REPLACEMENT_EVENT_HISTORY_KEY, profileId);
+          }
+          continue;
+        }
 
+        // 處理批次中的每個項目
+        for (const item of syncingItems) {
+          if (apiModule.isPermanentError(error)) {
+            await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, profileId, 'failed', error.message);
+            console.error(`[Sync] Replacement event ${item.id} failed permanently: ${error.message}`);
+            continue;
+          }
+
+          const retryCount = item.retryCount || 0;
           if (retryCount < MAX_RETRIES) {
-            await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, 'pending', null);
-            await updateQueueItemRetryCount(REPLACEMENT_EVENT_QUEUE_KEY, item.id, retryCount + 1);
+            await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, profileId, 'pending', null);
+            await updateQueueItemRetryCount(REPLACEMENT_EVENT_QUEUE_KEY, item.id, profileId, retryCount + 1);
             console.warn(`[Sync] Replacement event ${item.id} retry ${retryCount + 1}/${MAX_RETRIES}: ${error.message}`);
           } else {
-            await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, 'failed', error.message);
+            await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, profileId, 'failed', error.message);
             console.error(`[Sync] Replacement event ${item.id} failed after ${MAX_RETRIES} retries: ${error.message}`);
           }
         }
@@ -700,29 +741,33 @@ async function syncPendingReplacementEvents() {
 /**
  * 重試所有失敗的替換事件
  */
-async function retryFailedReplacementEvents() {
-  await recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY);
+async function retryFailedReplacementEvents(profileId) {
+  const pinnedProfileId = await resolveSyncProfileId(profileId);
+  await recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY, pinnedProfileId);
   const result = await chrome.storage.local.get(REPLACEMENT_EVENT_QUEUE_KEY);
   const queue = result[REPLACEMENT_EVENT_QUEUE_KEY] || [];
-  const failedItems = queue.filter(item => item.status === 'failed');
+  const failedItems = queue.filter(item => item.status === 'failed' && item.backendProfileId === pinnedProfileId);
 
   for (const item of failedItems) {
-    await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, 'pending', null);
-    await updateQueueItemRetryCount(REPLACEMENT_EVENT_QUEUE_KEY, item.id, 0);
+    await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, pinnedProfileId, 'pending', null);
+    await updateQueueItemRetryCount(REPLACEMENT_EVENT_QUEUE_KEY, item.id, pinnedProfileId, 0);
   }
 
   console.log(`[Sync] Retrying ${failedItems.length} failed replacement events`);
-  await syncPendingReplacementEvents();
+  await syncPendingReplacementEvents(pinnedProfileId);
 }
 
 /**
  * 發送替換事件批次到後端 API
  * @param {Array} items - 替換事件項目陣列
  */
-async function sendReplacementEventsToAPI(items) {
+async function sendReplacementEventsToAPI(items, profileId) {
   console.log('[Sync] Sending replacement events to API:', items.length);
 
   try {
+    if (items.some(item => item.backendProfileId !== profileId)) {
+      throw new Error('Replacement event batch contains multiple profiles');
+    }
     // 轉換格式以符合後端 API 要求
     const events = items.map(item => ({
       translationID: item.translationID,
@@ -732,7 +777,7 @@ async function sendReplacementEventsToAPI(items) {
     }));
 
     // 調用 API 模組的 submitReplacementEvents 函數
-    const result = await apiModule.submitReplacementEvents(events);
+    const result = await apiModule.submitReplacementEvents(events, true, profileId);
 
     console.log('[Sync] Replacement events submitted successfully:', result);
     return { success: true };
@@ -745,11 +790,11 @@ async function sendReplacementEventsToAPI(items) {
 /**
  * 觸發替換事件同步
  */
-export async function triggerReplacementEventSync() {
+export async function triggerReplacementEventSync(profileId) {
   if (!isSyncingReplacementEvents) {
+    const pinnedProfileId = await resolveSyncProfileId(profileId);
     console.log('[Sync] Triggering replacement event sync');
-    await recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY);
-    await syncPendingReplacementEvents();
+    await syncPendingReplacementEvents(pinnedProfileId);
   } else {
     console.log('[Sync] Replacement event sync already in progress');
   }
@@ -760,32 +805,33 @@ export async function triggerReplacementEventSync() {
 /**
  * Service Worker 啟動時初始化同步
  */
-async function initializeSync() {
+export async function initializeSync() {
   console.log('[Sync] Initializing sync service...');
 
   try {
+    const profileId = await resolveSyncProfileId();
     await Promise.all([
-      recoverStaleSyncingItems(VOTE_QUEUE_KEY),
-      recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY),
-      recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY)
+      recoverStaleSyncingItems(VOTE_QUEUE_KEY, profileId),
+      recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY, profileId),
+      recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY, profileId)
     ]);
 
-    const status = await getSyncStatus();
+    const status = await getSyncStatus(profileId);
     console.log('[Sync] Current status:', status);
 
     // 使用 retryFailed* 系列函式：內部會將 failed 重設為 pending 後再呼叫
     // syncPending*，可同時處理 pending 與 failed 項目，避免 SW 啟動後失敗
     // 項目永遠卡住的問題
     if (status.pendingVotes > 0 || status.failedVotes > 0) {
-      await retryFailedVotes();
+      await retryFailedVotes(profileId);
     }
 
     if (status.pendingTranslations > 0 || status.failedTranslations > 0) {
-      await retryFailedTranslations();
+      await retryFailedTranslations(profileId);
     }
 
     if (status.pendingReplacementEvents > 0 || status.failedReplacementEvents > 0) {
-      await retryFailedReplacementEvents();
+      await retryFailedReplacementEvents(profileId);
     }
 
     console.log('[Sync] Initialization complete');
@@ -794,9 +840,6 @@ async function initializeSync() {
   }
 }
 
-// 模組載入時初始化
-initializeSync();
-
 // ==================== 定期同步（Alarms）====================
 
 // 創建三個獨立的 alarm（均為 5 分鐘）
@@ -804,23 +847,19 @@ chrome.alarms.create('syncVotesAlarm', { periodInMinutes: 5 });
 chrome.alarms.create('syncTranslationsAlarm', { periodInMinutes: 5 });
 chrome.alarms.create('syncReplacementEventsAlarm', { periodInMinutes: 5 });
 
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'syncVotesAlarm') {
-    console.log('[Sync] Periodic vote sync triggered by alarm');
-    triggerVoteSync();
-  } else if (alarm.name === 'syncTranslationsAlarm') {
-    console.log('[Sync] Periodic translation sync triggered by alarm');
-    triggerTranslationSync();
-  } else if (alarm.name === 'syncReplacementEventsAlarm') {
-    console.log('[Sync] Periodic replacement events sync triggered by alarm');
-    triggerReplacementEventSync();
-  }
-});
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  const alarmSyncs = {
+    syncVotesAlarm: ['[Sync] Periodic vote sync triggered by alarm', triggerVoteSync],
+    syncTranslationsAlarm: ['[Sync] Periodic translation sync triggered by alarm', triggerTranslationSync],
+    syncReplacementEventsAlarm: ['[Sync] Periodic replacement events sync triggered by alarm', triggerReplacementEventSync]
+  };
+  const alarmSync = alarmSyncs[alarm.name];
+  if (!alarmSync) return;
 
-// 擴充功能啟動時觸發所有同步（含失敗項目自動重試）
-chrome.runtime.onStartup.addListener(() => {
-  console.log('[Sync] Extension startup, triggering all syncs');
-  retryFailedVotes();
-  retryFailedTranslations();
-  retryFailedReplacementEvents();
+  try {
+    console.log(alarmSync[0]);
+    await alarmSync[1]();
+  } catch (error) {
+    console.error('[Sync] Alarm sync skipped because profile migration failed:', error);
+  }
 });

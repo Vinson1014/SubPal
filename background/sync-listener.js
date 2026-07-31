@@ -12,6 +12,8 @@
  */
 
 import * as syncModule from './sync.js';
+import { resolveBackendProfile } from './backend-profiles.js';
+import { ensureStorageMigrationsComplete } from './storage-migrations.js';
 
 // ==================== 配置常數 ====================
 
@@ -77,16 +79,16 @@ function debouncedTriggerSync(triggerFn, timerType) {
  */
 async function triggerVoteSync() {
   try {
+    await ensureStorageMigrationsComplete();
+    const activeProfile = await resolveBackendProfile();
     const { voteQueue = [] } = await chrome.storage.local.get('voteQueue');
-    const pendingItems = voteQueue.filter(item => item.status === 'pending');
+    const pendingItems = voteQueue.filter(item => item.status === 'pending' && item.backendProfileId === activeProfile.id);
 
     if (pendingItems.length > 0) {
       log(`發現 ${pendingItems.length} 個待同步的投票，觸發同步`);
 
       // 直接調用 sync 模組的同步函數（避免消息傳遞問題）
-      syncModule.triggerVoteSync().catch(error => {
-        logError('觸發投票同步失敗:', error);
-      });
+      await syncModule.triggerVoteSync(activeProfile.id);
     } else {
       log('投票隊列中沒有待同步項目');
     }
@@ -101,16 +103,16 @@ async function triggerVoteSync() {
  */
 async function triggerTranslationSync() {
   try {
+    await ensureStorageMigrationsComplete();
+    const activeProfile = await resolveBackendProfile();
     const { translationQueue = [] } = await chrome.storage.local.get('translationQueue');
-    const pendingItems = translationQueue.filter(item => item.status === 'pending');
+    const pendingItems = translationQueue.filter(item => item.status === 'pending' && item.backendProfileId === activeProfile.id);
 
     if (pendingItems.length > 0) {
       log(`發現 ${pendingItems.length} 個待同步的翻譯，觸發同步`);
 
       // 直接調用 sync 模組的同步函數（避免消息傳遞問題）
-      syncModule.triggerTranslationSync().catch(error => {
-        logError('觸發翻譯同步失敗:', error);
-      });
+      await syncModule.triggerTranslationSync(activeProfile.id);
     } else {
       log('翻譯隊列中沒有待同步項目');
     }
@@ -125,16 +127,16 @@ async function triggerTranslationSync() {
  */
 async function triggerReplacementEventSync() {
   try {
+    await ensureStorageMigrationsComplete();
+    const activeProfile = await resolveBackendProfile();
     const { replacementEventQueue = [] } = await chrome.storage.local.get('replacementEventQueue');
-    const pendingItems = replacementEventQueue.filter(item => item.status === 'pending');
+    const pendingItems = replacementEventQueue.filter(item => item.status === 'pending' && item.backendProfileId === activeProfile.id);
 
     if (pendingItems.length > 0) {
       log(`發現 ${pendingItems.length} 個待同步的替換事件，觸發同步`);
 
       // 直接調用 sync 模組的同步函數（避免消息傳遞問題）
-      syncModule.triggerReplacementEventSync().catch(error => {
-        logError('觸發替換事件同步失敗:', error);
-      });
+      await syncModule.triggerReplacementEventSync(activeProfile.id);
     } else {
       log('替換事件隊列中沒有待同步項目');
     }
@@ -204,40 +206,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
-// ==================== 初始化同步 ====================
-
-/**
- * Service Worker 啟動時檢查並同步待處理項目
- * 確保瀏覽器重啟後待處理項目不會丟失
- */
-async function initializeSync() {
-  log('初始化同步監聽器，檢查待處理項目...');
-
-  try {
-    // 檢查投票隊列
-    await triggerVoteSync();
-
-    // 檢查翻譯隊列
-    await triggerTranslationSync();
-
-    // 檢查替換事件隊列
-    await triggerReplacementEventSync();
-
-    log('同步監聽器初始化完成');
-  } catch (error) {
-    logError('初始化同步監聽器時發生錯誤:', error);
-  }
-}
-
-// Service Worker 啟動時執行初始化
-initializeSync();
-
-// 監聽 Service Worker 啟動事件
-chrome.runtime.onStartup.addListener(() => {
-  log('Service Worker 啟動，重新初始化同步監聽器');
-  initializeSync();
-});
-
 // ==================== 日誌工具函數 ====================
 
 /**
@@ -270,4 +238,4 @@ function logError(...args) {
 
 // ==================== 導出 ====================
 
-export { triggerVoteSync, triggerTranslationSync, triggerReplacementEventSync, initializeSync };
+export { triggerVoteSync, triggerTranslationSync, triggerReplacementEventSync };
