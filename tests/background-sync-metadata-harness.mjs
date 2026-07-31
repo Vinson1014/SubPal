@@ -45,6 +45,7 @@ export async function loadSync(options = {}) {
   };
   const submitReplacementEvents = options.submitReplacementEvents ?? (async () => ({ success: true }));
   const submitVote = options.submitVote ?? (async () => ({ success: true }));
+  const setVoteState = options.setVoteState ?? (async (payload) => ({ myVote: payload.voteState, upvotes: 3, downvotes: 1 }));
   const recordApiProfile = (profileId) => {
     if (options.captureActiveProfile) {
       apiProfileIds.push(profileId);
@@ -72,9 +73,9 @@ export async function loadSync(options = {}) {
             options.beforeStorageGet?.({ keys: requestedKeys, state });
             const result = Object.fromEntries(requestedKeys.map((key) => [
               key,
-              JSON.parse(JSON.stringify(state[key]))
+              state[key] === undefined ? undefined : JSON.parse(JSON.stringify(state[key]))
             ]));
-            options.afterStorageGet?.({ keys: requestedKeys, state });
+            await options.afterStorageGet?.({ keys: requestedKeys, state, result });
             return result;
           },
           async set(values) {
@@ -98,7 +99,7 @@ export async function loadSync(options = {}) {
     this.setExport('setVoteState', async (payload) => {
       recordApiProfile(payload.backendProfileId);
       apiCalls.push({ kind: 'setVoteState', payload });
-      return { myVote: payload.voteState, upvotes: 3, downvotes: 1 };
+      return await setVoteState(payload);
     });
     this.setExport('submitReplacementEvents', async (payload, _autoRetryOn401, backendProfileId) => {
       recordApiProfile(backendProfileId);
@@ -132,11 +133,21 @@ export async function loadSync(options = {}) {
   const storageMigrationsModule = new vm.SyntheticModule(['ensureStorageMigrationsComplete'], function initializeStorageMigrations() {
     this.setExport('ensureStorageMigrationsComplete', ensureStorageMigrationsComplete);
   }, { context, identifier: 'background/storage-migrations.js' });
+  const mutationChains = new WeakMap();
+  const storageMutationModule = new vm.SyntheticModule(['runStorageMutation'], function initializeStorageMutation() {
+    this.setExport('runStorageMutation', (storage, operation) => {
+      const previous = mutationChains.get(storage) || Promise.resolve();
+      const current = previous.catch(() => undefined).then(operation);
+      mutationChains.set(storage, current);
+      return current;
+    });
+  }, { context, identifier: 'background/storage-mutation-coordinator.js' });
   const module = new vm.SourceTextModule(source, { context, identifier: 'background/sync.js' });
   await module.link((specifier) => {
     if (specifier === './api.js') return apiModule;
     if (specifier === './backend-profiles.js') return profilesModule;
     if (specifier === './storage-migrations.js') return storageMigrationsModule;
+    if (specifier === './storage-mutation-coordinator.js') return storageMutationModule;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await module.evaluate();
@@ -151,6 +162,7 @@ export async function loadSync(options = {}) {
     get migrationCalls() { return migrationCalls; },
     get storageMigrationCalls() { return storageMigrationCalls; },
     storageCalls,
+    storage: context.chrome.storage.local,
     startupRegistered: onStartup.listener !== null,
     triggerAlarm: async (alarm) => await onAlarm.listener(alarm)
   };
@@ -221,11 +233,21 @@ export async function loadSyncListener(state, options = {}) {
       await migration;
     });
   }, { context, identifier: 'background/storage-migrations.js' });
+  const mutationChains = new WeakMap();
+  const storageMutationModule = new vm.SyntheticModule(['runStorageMutation'], function initializeStorageMutation() {
+    this.setExport('runStorageMutation', (storage, operation) => {
+      const previous = mutationChains.get(storage) || Promise.resolve();
+      const current = previous.catch(() => undefined).then(operation);
+      mutationChains.set(storage, current);
+      return current;
+    });
+  }, { context, identifier: 'background/storage-mutation-coordinator.js' });
   const module = new vm.SourceTextModule(source, { context, identifier: 'background/sync-listener.js' });
   await module.link((specifier) => {
     if (specifier === './sync.js') return syncModule;
     if (specifier === './backend-profiles.js') return profilesModule;
     if (specifier === './storage-migrations.js') return storageMigrationsModule;
+    if (specifier === './storage-mutation-coordinator.js') return storageMutationModule;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await module.evaluate();

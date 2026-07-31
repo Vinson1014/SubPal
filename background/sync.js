@@ -4,6 +4,7 @@
 import * as apiModule from './api.js';
 import { resolveBackendProfile } from './backend-profiles.js';
 import { ensureStorageMigrationsComplete } from './storage-migrations.js';
+import { runStorageMutation } from './storage-mutation-coordinator.js';
 
 // 常量定義
 const MAX_RETRIES = 3;
@@ -68,27 +69,18 @@ async function getPendingItems(queueType, profileId) {
  * @returns {Promise<Object|null>} - 更新後的項目
  */
 async function updateQueueItem(queueType, itemId, profileId, updater) {
-  const result = await chrome.storage.local.get(queueType);
-  const queue = result[queueType] || [];
-  const updatedQueue = queue.map(item => {
-    if (item.id !== itemId || item.backendProfileId !== profileId) {
-      return item;
-    }
-
-    const nextItem = {
-      ...item,
-      ...updater
-    };
-
-    if ('syncStartedAt' in nextItem && nextItem.syncStartedAt == null) {
-      delete nextItem.syncStartedAt;
-    }
-
-    return nextItem;
+  return await runStorageMutation(chrome.storage.local, async () => {
+    const result = await chrome.storage.local.get(queueType);
+    const queue = result[queueType] || [];
+    const updatedQueue = queue.map(item => {
+      if (item.id !== itemId || item.backendProfileId !== profileId) return item;
+      const nextItem = { ...item, ...updater };
+      if ('syncStartedAt' in nextItem && nextItem.syncStartedAt == null) delete nextItem.syncStartedAt;
+      return nextItem;
+    });
+    await chrome.storage.local.set({ [queueType]: updatedQueue });
+    return updatedQueue.find(item => item.id === itemId && item.backendProfileId === profileId) || null;
   });
-
-  await chrome.storage.local.set({ [queueType]: updatedQueue });
-  return updatedQueue.find(item => item.id === itemId && item.backendProfileId === profileId) || null;
 }
 
 /**
@@ -146,12 +138,12 @@ async function updateQueueItemRetryCount(queueType, itemId, profileId, retryCoun
  * @returns {Promise<number>} - 回收的項目數量
  */
 async function recoverStaleSyncingItems(queueType, profileId) {
-  const result = await chrome.storage.local.get(queueType);
-  const queue = result[queueType] || [];
-  const now = Date.now();
-  const recoveredIds = [];
-
-  const updatedQueue = queue.map(item => {
+  return await runStorageMutation(chrome.storage.local, async () => {
+    const result = await chrome.storage.local.get(queueType);
+    const queue = result[queueType] || [];
+    const now = Date.now();
+    const recoveredIds = [];
+    const updatedQueue = queue.map(item => {
     if (item.status !== 'syncing' || item.backendProfileId !== profileId) {
       return item;
     }
@@ -178,13 +170,11 @@ async function recoverStaleSyncingItems(queueType, profileId) {
     return item;
   });
 
-  if (recoveredIds.length === 0) {
-    return 0;
-  }
-
-  await chrome.storage.local.set({ [queueType]: updatedQueue });
-  console.warn(`[Sync] Recovered ${recoveredIds.length} stale syncing items from ${queueType}:`, recoveredIds);
-  return recoveredIds.length;
+    if (recoveredIds.length === 0) return 0;
+    await chrome.storage.local.set({ [queueType]: updatedQueue });
+    console.warn(`[Sync] Recovered ${recoveredIds.length} stale syncing items from ${queueType}:`, recoveredIds);
+    return recoveredIds.length;
+  });
 }
 
 /**
@@ -203,12 +193,13 @@ function isDuplicateSubmissionError(error) {
  * @param {string} historyType - 歷史記錄類型
  */
 async function moveToHistory(queueType, itemId, historyType, profileId) {
-  const storageData = await chrome.storage.local.get([queueType, historyType]);
-  const queue = storageData[queueType] || [];
-  const history = storageData[historyType] || [];
+  return await runStorageMutation(chrome.storage.local, async () => {
+    const storageData = await chrome.storage.local.get([queueType, historyType]);
+    const queue = storageData[queueType] || [];
+    const history = storageData[historyType] || [];
 
   const itemIndex = queue.findIndex(item => item.id === itemId && item.backendProfileId === profileId);
-  if (itemIndex === -1) return;
+    if (itemIndex === -1) return;
 
   const [item] = queue.splice(itemIndex, 1);
   const completedItem = {
@@ -240,9 +231,10 @@ async function moveToHistory(queueType, itemId, historyType, profileId) {
     return retainedProfileEntries <= MAX_HISTORY_LENGTH;
   });
 
-  await chrome.storage.local.set({
-    [queueType]: queue,
-    [historyType]: boundedHistory
+    await chrome.storage.local.set({
+      [queueType]: queue,
+      [historyType]: boundedHistory
+    });
   });
 }
 
@@ -299,8 +291,9 @@ async function syncPendingVotes(profileId) {
     console.log(`[Sync] Syncing ${pendingItems.length} pending votes...`);
 
     for (const item of pendingItems) {
+      let syncingItem;
       try {
-        const syncingItem = await markItemAsSyncing(VOTE_QUEUE_KEY, item.id, profileId);
+        syncingItem = await markItemAsSyncing(VOTE_QUEUE_KEY, item.id, profileId);
         if (!syncingItem) continue;
         const result = await sendVoteToAPI(syncingItem, profileId);
 
@@ -316,7 +309,7 @@ async function syncPendingVotes(profileId) {
       } catch (error) {
         // 對於新 voteState API，不將 409 視為成功（idempotent PUT 不應返回 409）
         // 僅對舊版 submitVote 路徑保留 409-as-completed 行為
-        if (isDuplicateSubmissionError(error) && !item.voteState) {
+        if (isDuplicateSubmissionError(error) && !syncingItem.voteState) {
           await moveToHistory(VOTE_QUEUE_KEY, item.id, VOTE_HISTORY_KEY, profileId);
           console.warn(`[Sync] Vote ${item.id} already exists on backend (409), moved to history`);
           continue;
@@ -497,27 +490,23 @@ async function sendVoteToAPI(voteData, profileId) {
 
       // 儲存權威響應數據到 voteStateByTranslation
       if (result && voteData.translationID) {
-        const storageData = await chrome.storage.local.get(VOTE_STATE_BY_TRANSLATION_KEY);
-        const voteStateByTranslation = storageData[VOTE_STATE_BY_TRANSLATION_KEY] || {};
-        const existingVoteState = voteStateByTranslation[voteData.translationID];
-        if (existingVoteState?.backendProfileId && existingVoteState.backendProfileId !== profileId) {
-          return { success: true, data: result };
-        }
-        const voteStateRecord = {
-          myVote: result.myVote ?? null,
-          upvotes: result.upvotes ?? 0,
-          downvotes: result.downvotes ?? 0,
-          pending: false,
-          updatedAt: Date.now(),
-          backendProfileId: profileId
-        };
-
-        // 更新 storage map
-        voteStateByTranslation[voteData.translationID] = voteStateRecord;
-        await chrome.storage.local.set({ [VOTE_STATE_BY_TRANSLATION_KEY]: voteStateByTranslation });
-
-        // 將權威數據附加到結果供歷史記錄使用
-        result._authoritativeVoteState = voteStateRecord;
+        const voteStateRecord = await runStorageMutation(chrome.storage.local, async () => {
+          const storageData = await chrome.storage.local.get(VOTE_STATE_BY_TRANSLATION_KEY);
+          const voteStateByTranslation = storageData[VOTE_STATE_BY_TRANSLATION_KEY] || {};
+          const existingVoteState = voteStateByTranslation[voteData.translationID];
+          if (existingVoteState?.backendProfileId && existingVoteState.backendProfileId !== profileId) return null;
+          const nextVoteState = {
+            myVote: result.myVote ?? null,
+            upvotes: result.upvotes ?? 0,
+            downvotes: result.downvotes ?? 0,
+            pending: false,
+            updatedAt: Date.now(),
+            backendProfileId: profileId
+          };
+          await chrome.storage.local.set({ [VOTE_STATE_BY_TRANSLATION_KEY]: { ...voteStateByTranslation, [voteData.translationID]: nextVoteState } });
+          return nextVoteState;
+        });
+        if (voteStateRecord) result._authoritativeVoteState = voteStateRecord;
       }
     } else {
       // 舊版投票 API：使用 submitVote 處理 legacy 項目
@@ -563,10 +552,10 @@ async function sendTranslationToAPI(translationData, profileId) {
       backendProfileId: profileId
     };
     if (translationData.resolutionContext !== undefined && translationData.resolutionContext !== null) {
-      payload.translationID = translationData.translationID ?? null;
+        payload.translationID = translationData.translationID ?? null;
       payload.resolutionContext = normalizeResolutionContext(translationData.resolutionContext);
     } else if (Object.hasOwn(translationData, 'translationID')) {
-      payload.translationID = translationData.translationID ?? null;
+        payload.translationID = translationData.translationID ?? null;
     }
     if (translationData.sourceTranslationID !== undefined) {
       payload.sourceTranslationID = translationData.sourceTranslationID;

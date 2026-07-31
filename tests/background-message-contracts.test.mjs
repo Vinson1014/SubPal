@@ -141,7 +141,8 @@ function pendingVote(id) {
     createdAt: 0,
     retryCount: 0,
     error: null,
-    backendProfileId: 'default'
+    backendProfileId: 'default',
+    operationId: `vote-operation-${id}`
   };
 }
 
@@ -157,7 +158,8 @@ function pendingTranslation(id) {
     createdAt: 0,
     retryCount: 0,
     error: null,
-    backendProfileId: 'default'
+    backendProfileId: 'default',
+    operationId: `translation-operation-${id}`
   };
 }
 
@@ -172,7 +174,8 @@ function pendingReplacementEvent(id) {
     createdAt: 0,
     retryCount: 0,
     error: null,
-    backendProfileId: 'default'
+    backendProfileId: 'default',
+    operationId: `replacement-operation-${id}`
   };
 }
 
@@ -1156,6 +1159,58 @@ test('Given a migrated vote binding When vote-state sync succeeds Then storage p
   assert.equal(state.voteStateByTranslation['translation-profile-binding'].backendProfileId, 'migrated-profile');
 });
 
+test('Given records bound to active A and inactive B When the active profile switches Then each sync moves only the selected profile records with stable local IDs', async () => {
+  const { apiProfileIds, module, state } = await loadSync({
+    captureActiveProfile: true,
+    state: {
+      backendProfiles: {
+        activeProfileId: 'active-a',
+        byId: { 'active-a': { id: 'active-a' }, 'inactive-b': { id: 'inactive-b' } }
+      }
+    }
+  });
+  const queueTypes = [
+    ['voteQueue', 'voteHistory', 'triggerVoteSync', pendingVote, 'vote'],
+    ['translationQueue', 'translationHistory', 'triggerTranslationSync', pendingTranslation, 'translation'],
+    ['replacementEventQueue', 'replacementEventHistory', 'triggerReplacementEventSync', pendingReplacementEvent, 'replacement']
+  ];
+
+  for (const [queueKey, , , createItem, prefix] of queueTypes) {
+    state[queueKey] = [
+      { ...createItem(`${prefix}-a`), backendProfileId: 'active-a', operationId: `${prefix}-operation-a` },
+      { ...createItem(`${prefix}-b`), backendProfileId: 'inactive-b', operationId: `${prefix}-operation-b` }
+    ];
+  }
+
+  for (const [, , trigger] of queueTypes) await module.namespace[trigger]();
+
+  for (const [queueKey, , , , prefix] of queueTypes) {
+    assert.deepEqual(state[queueKey].map(({ operationId, backendProfileId, status }) => ({ operationId, backendProfileId, status })), [
+      { operationId: `${prefix}-operation-b`, backendProfileId: 'inactive-b', status: 'pending' }
+    ], queueKey);
+  }
+
+  state.backendProfiles.activeProfileId = 'inactive-b';
+  for (const [, , trigger] of queueTypes) await module.namespace[trigger]();
+
+  assert.deepEqual(apiProfileIds, [
+    'active-a', 'active-a', 'active-a', 'inactive-b', 'inactive-b', 'inactive-b'
+  ]);
+  for (const [queueKey, historyKey, , , prefix] of queueTypes) {
+    assert.deepEqual(state[queueKey], [], queueKey);
+    assert.deepEqual(
+      state[historyKey]
+        .map(({ operationId, backendProfileId }) => ({ operationId, backendProfileId }))
+        .sort((left, right) => left.operationId.localeCompare(right.operationId)),
+      [
+        { operationId: `${prefix}-operation-a`, backendProfileId: 'active-a' },
+        { operationId: `${prefix}-operation-b`, backendProfileId: 'inactive-b' }
+      ],
+      historyKey
+    );
+  }
+});
+
 test('Given activation changes from A to B while initialization recovers stale work When initialization selects work Then recovery and delivery remain pinned to A', async () => {
   let activated = false;
   const { apiCalls, module, resolvedProfileIds, state } = await loadSync({
@@ -1173,8 +1228,8 @@ test('Given activation changes from A to B while initialization recovers stale w
     }
   });
   state.voteQueue = [
-    { ...pendingVote('stale-a'), backendProfileId: 'active-a', status: 'syncing' },
-    { ...pendingVote('failed-b'), backendProfileId: 'inactive-b', status: 'failed' }
+    { ...pendingVote('stale-a'), backendProfileId: 'active-a', operationId: 'stale-a-operation', status: 'syncing' },
+    { ...pendingVote('failed-b'), backendProfileId: 'inactive-b', operationId: 'failed-b-operation', status: 'failed' }
   ];
 
   await module.namespace.initializeSync();
@@ -1183,11 +1238,11 @@ test('Given activation changes from A to B while initialization recovers stale w
   assert.deepEqual(apiCalls.map(({ kind, payload }) => [kind, payload.backendProfileId]), [
     ['submitVote', 'active-a']
   ]);
-  assert.deepEqual(state.voteQueue.map(({ id, backendProfileId, status }) => ({ id, backendProfileId, status })), [
-    { id: 'failed-b', backendProfileId: 'inactive-b', status: 'failed' }
+  assert.deepEqual(state.voteQueue.map(({ id, operationId, backendProfileId, status }) => ({ id, operationId, backendProfileId, status })), [
+    { id: 'failed-b', operationId: 'failed-b-operation', backendProfileId: 'inactive-b', status: 'failed' }
   ]);
-  assert.deepEqual(state.voteHistory.map(({ id, backendProfileId }) => ({ id, backendProfileId })), [
-    { id: 'stale-a', backendProfileId: 'active-a' }
+  assert.deepEqual(state.voteHistory.map(({ id, operationId, backendProfileId }) => ({ id, operationId, backendProfileId })), [
+    { id: 'stale-a', operationId: 'stale-a-operation', backendProfileId: 'active-a' }
   ]);
 });
 
@@ -1248,8 +1303,16 @@ test('Given 101 active and 101 inactive replacement events When replacement sync
   assert.equal(replacementCalls.flatMap(({ payload }) => payload).every((event) => event.translationID.startsWith('active-')), true);
   assert.equal(state.replacementEventQueue.length, 101);
   assert.equal(state.replacementEventQueue.every(({ backendProfileId, status }) => backendProfileId === 'inactive-b' && status === 'pending'), true);
+  assert.deepEqual(
+    state.replacementEventQueue.map(({ operationId, backendProfileId }) => ({ operationId, backendProfileId })),
+    inactiveEvents.map(({ operationId, backendProfileId }) => ({ operationId, backendProfileId }))
+  );
   assert.equal(state.replacementEventHistory.length, 100);
   assert.equal(state.replacementEventHistory.every(({ backendProfileId }) => backendProfileId === 'active-a'), true);
+  assert.deepEqual(
+    state.replacementEventHistory.map(({ operationId, backendProfileId }) => ({ operationId, backendProfileId })).sort((left, right) => left.operationId.localeCompare(right.operationId)),
+    activeEvents.slice(1).map(({ operationId, backendProfileId }) => ({ operationId, backendProfileId })).sort((left, right) => left.operationId.localeCompare(right.operationId))
+  );
 });
 
 test('Given an active replacement batch rejects transiently When it is synchronized Then every active item returns to pending without leaving syncing records', async () => {
@@ -1264,20 +1327,20 @@ test('Given an active replacement batch rejects transiently When it is synchroni
     }
   });
   state.replacementEventQueue = [
-    { ...pendingReplacementEvent('active-b-1'), backendProfileId: 'active-b' },
-    { ...pendingReplacementEvent('active-b-2'), backendProfileId: 'active-b' },
-    { ...pendingReplacementEvent('inactive-a-1'), backendProfileId: 'inactive-a' }
+    { ...pendingReplacementEvent('active-b-1'), backendProfileId: 'active-b', operationId: 'active-b-operation-1' },
+    { ...pendingReplacementEvent('active-b-2'), backendProfileId: 'active-b', operationId: 'active-b-operation-2' },
+    { ...pendingReplacementEvent('inactive-a-1'), backendProfileId: 'inactive-a', operationId: 'inactive-a-operation-1' }
   ];
 
   await module.namespace.triggerReplacementEventSync();
 
   assert.deepEqual(apiCalls.map(({ backendProfileId, payload }) => [backendProfileId, payload.length]), [['active-b', 2]]);
-  assert.deepEqual(state.replacementEventQueue.map(({ id, backendProfileId, status, retryCount, error, syncStartedAt }) => ({
-    id, backendProfileId, status, retryCount, error, syncStartedAt
+  assert.deepEqual(state.replacementEventQueue.map(({ id, operationId, backendProfileId, status, retryCount, error, syncStartedAt }) => ({
+    id, operationId, backendProfileId, status, retryCount, error, syncStartedAt
   })), [
-    { id: 'active-b-1', backendProfileId: 'active-b', status: 'pending', retryCount: 1, error: null, syncStartedAt: undefined },
-    { id: 'active-b-2', backendProfileId: 'active-b', status: 'pending', retryCount: 1, error: null, syncStartedAt: undefined },
-    { id: 'inactive-a-1', backendProfileId: 'inactive-a', status: 'pending', retryCount: 0, error: null, syncStartedAt: undefined }
+    { id: 'active-b-1', operationId: 'active-b-operation-1', backendProfileId: 'active-b', status: 'pending', retryCount: 1, error: null, syncStartedAt: undefined },
+    { id: 'active-b-2', operationId: 'active-b-operation-2', backendProfileId: 'active-b', status: 'pending', retryCount: 1, error: null, syncStartedAt: undefined },
+    { id: 'inactive-a-1', operationId: 'inactive-a-operation-1', backendProfileId: 'inactive-a', status: 'pending', retryCount: 0, error: null, syncStartedAt: undefined }
   ]);
   assert.deepEqual(state.replacementEventHistory, []);
 });
@@ -1488,9 +1551,18 @@ test('Given pending queues and unresolved profile migration When the three 5-min
     { name: 'syncReplacementEventsAlarm', alarmInfo: { periodInMinutes: 5 } }
   ]);
 
-  state.voteQueue = [{ ...pendingVote('vote-alarm'), backendProfileId: 'active-a' }];
-  state.translationQueue = [{ ...pendingTranslation('translation-alarm'), backendProfileId: 'active-a' }];
-  state.replacementEventQueue = [{ ...pendingReplacementEvent('replacement-alarm'), backendProfileId: 'active-a' }];
+  state.voteQueue = [
+    { ...pendingVote('vote-alarm'), backendProfileId: 'active-a', operationId: 'vote-alarm-operation-a' },
+    { ...pendingVote('vote-alarm-inactive'), backendProfileId: 'inactive-b', operationId: 'vote-alarm-operation-b' }
+  ];
+  state.translationQueue = [
+    { ...pendingTranslation('translation-alarm'), backendProfileId: 'active-a', operationId: 'translation-alarm-operation-a' },
+    { ...pendingTranslation('translation-alarm-inactive'), backendProfileId: 'inactive-b', operationId: 'translation-alarm-operation-b' }
+  ];
+  state.replacementEventQueue = [
+    { ...pendingReplacementEvent('replacement-alarm'), backendProfileId: 'active-a', operationId: 'replacement-alarm-operation-a' },
+    { ...pendingReplacementEvent('replacement-alarm-inactive'), backendProfileId: 'inactive-b', operationId: 'replacement-alarm-operation-b' }
+  ];
   const alarms = [
     triggerAlarm({ name: 'syncVotesAlarm' }),
     triggerAlarm({ name: 'syncTranslationsAlarm' }),
@@ -1509,6 +1581,18 @@ test('Given pending queues and unresolved profile migration When the three 5-min
     'submitReplacementEvents'
   ]);
   assert.deepEqual(apiProfileIds, ['active-a', 'active-a', 'active-a']);
+  for (const [queueKey, historyKey, operationPrefix] of [
+    ['voteQueue', 'voteHistory', 'vote'],
+    ['translationQueue', 'translationHistory', 'translation'],
+    ['replacementEventQueue', 'replacementEventHistory', 'replacement']
+  ]) {
+    assert.deepEqual(state[queueKey].map(({ operationId, backendProfileId, status }) => ({ operationId, backendProfileId, status })), [
+      { operationId: `${operationPrefix}-alarm-operation-b`, backendProfileId: 'inactive-b', status: 'pending' }
+    ], queueKey);
+    assert.deepEqual(state[historyKey].map(({ operationId, backendProfileId }) => ({ operationId, backendProfileId })), [
+      { operationId: `${operationPrefix}-alarm-operation-a`, backendProfileId: 'active-a' }
+    ], historyKey);
+  }
 });
 
 test('Given pending queues and unresolved profile migration When the storage listener evaluates and observes changes Then registration is global and only active A syncs after readiness', async () => {
@@ -1544,6 +1628,38 @@ test('Given pending queues and unresolved profile migration When the storage lis
   await waitForCallCount(listener.syncCalls, 3);
   assert.deepEqual(listener.syncCalls, ['vote', 'translation', 'replacement-event']);
   assert.deepEqual(listener.syncProfileIds, ['active-a', 'active-a', 'active-a']);
+});
+
+test('Given only inactive-profile queue additions When the storage listener observes them Then it leaves their local IDs untouched and triggers no active-profile sync', async () => {
+  const state = {
+    backendProfiles: {
+      activeProfileId: 'active-a',
+      byId: { 'active-a': { id: 'active-a' }, 'inactive-b': { id: 'inactive-b' } }
+    },
+    voteQueue: [{ ...pendingVote('listener-vote-b'), backendProfileId: 'inactive-b', operationId: 'listener-vote-operation-b' }],
+    translationQueue: [{ ...pendingTranslation('listener-translation-b'), backendProfileId: 'inactive-b', operationId: 'listener-translation-operation-b' }],
+    replacementEventQueue: [{ ...pendingReplacementEvent('listener-replacement-b'), backendProfileId: 'inactive-b', operationId: 'listener-replacement-operation-b' }]
+  };
+  const listener = await loadSyncListener(state, { captureActiveProfile: true });
+
+  listener.triggerStorageChange({
+    voteQueue: { oldValue: [], newValue: state.voteQueue },
+    translationQueue: { oldValue: [], newValue: state.translationQueue },
+    replacementEventQueue: { oldValue: [], newValue: state.replacementEventQueue }
+  });
+  await new Promise(setImmediate);
+
+  assert.deepEqual(listener.syncCalls, []);
+  assert.deepEqual(listener.syncProfileIds, []);
+  assert.deepEqual([
+    ...state.voteQueue,
+    ...state.translationQueue,
+    ...state.replacementEventQueue
+  ].map(({ operationId, backendProfileId, status }) => ({ operationId, backendProfileId, status })), [
+    { operationId: 'listener-vote-operation-b', backendProfileId: 'inactive-b', status: 'pending' },
+    { operationId: 'listener-translation-operation-b', backendProfileId: 'inactive-b', status: 'pending' },
+    { operationId: 'listener-replacement-operation-b', backendProfileId: 'inactive-b', status: 'pending' }
+  ]);
 });
 
 test('Given profile migration rejects When a storage event is observed Then no sync trigger is called', async () => {
