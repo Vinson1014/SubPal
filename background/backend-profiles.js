@@ -1,3 +1,5 @@
+import { runStorageMutation } from './storage-mutation-coordinator.js';
+
 export const DEFAULT_BACKEND_PROFILE_ID = 'default';
 export const DEFAULT_BACKEND_ENDPOINT = 'https://subnfbackend.zeabur.app';
 export const BACKEND_PROFILE_SCHEMA_VERSION = 1;
@@ -25,7 +27,6 @@ const EXPORT_RECORD_FIELDS = [
   'targetLanguage', 'clientVersion'
 ];
 const migrationReadiness = new WeakMap();
-const profileMutationChains = new WeakMap();
 
 function getStorage(storage) {
   const local = storage || globalThis.chrome?.storage?.local;
@@ -35,13 +36,6 @@ function getStorage(storage) {
 
 function assertProfileOptions(options) {
   if (!isRecord(options)) throw new Error('Invalid backend profile input');
-}
-
-function runProfileMutation(storage, mutate) {
-  const previous = profileMutationChains.get(storage) || Promise.resolve();
-  const current = previous.catch(() => undefined).then(mutate);
-  profileMutationChains.set(storage, current);
-  return current;
 }
 
 function isRecord(value) {
@@ -285,7 +279,8 @@ export async function listBackendProfiles(storage) {
 
 export async function createBackendProfile(storage, options = {}) {
   const local = getStorage(storage);
-  return runProfileMutation(local, async () => {
+  await ensureBackendProfilesMigrated(local);
+  return await runStorageMutation(local, async () => {
     assertProfileOptions(options);
     const { data } = await getMigratedData(local);
     const endpoint = normalizeBackendEndpoint(options.endpoint);
@@ -304,7 +299,8 @@ export async function createBackendProfile(storage, options = {}) {
 
 export async function setBackendProfileCredentials(storage, profileId, credentials) {
   const local = getStorage(storage);
-  return runProfileMutation(local, async () => {
+  await ensureBackendProfilesMigrated(local);
+  return await runStorageMutation(local, async () => {
     if (!isRecord(credentials)) throw new Error('Backend profile credentials must be an object');
     const { data } = await getMigratedData(local);
     const store = data[PROFILE_STORE_KEY];
@@ -336,7 +332,8 @@ export async function setBackendProfileCredentials(storage, profileId, credentia
 
 export async function activateBackendProfile(storage, profileId) {
   const local = getStorage(storage);
-  return runProfileMutation(local, async () => {
+  await ensureBackendProfilesMigrated(local);
+  return await runStorageMutation(local, async () => {
     const { data } = await getMigratedData(local);
     const store = data[PROFILE_STORE_KEY];
     const profile = getProfile(store, profileId);
@@ -357,7 +354,8 @@ function hasBlockingRecords(data, profileId) {
 
 export async function deleteBackendProfile(storage, profileId, options = {}) {
   const local = getStorage(storage);
-  return runProfileMutation(local, async () => {
+  await ensureBackendProfilesMigrated(local);
+  return await runStorageMutation(local, async () => {
     assertProfileOptions(options);
     const { data } = await getMigratedData(local);
     const store = data[PROFILE_STORE_KEY];

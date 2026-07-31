@@ -537,6 +537,13 @@ test('Given an active profile export and deletion request When records include s
   });
 });
 
+test('Given eight sequential VM API module loads When coordinator dependencies are linked Then every context evaluates without a process crash', async () => {
+  for (let loadCount = 0; loadCount < 8; loadCount += 1) {
+    const api = await loadApiModule(async () => apiResponse({}));
+    assert.equal(typeof api, 'object');
+  }
+});
+
 test('Given active and explicit backend profiles When API calls are made Then existing URL body and response shapes use only the resolved profile', async () => {
   const storage = apiStorage();
   const requests = [];
@@ -568,7 +575,7 @@ test('Given active and explicit backend profiles When API calls are made Then ex
   assert.equal(Object.hasOwn(storage, 'user'), false);
 });
 
-test('Given an explicit profile When contribution APIs serialize requests Then every URL and JWT stays on that profile without local record metadata', async () => {
+test('Given an explicit profile and stable local IDs When contribution APIs serialize requests Then every URL and JWT stays on that profile while bodies omit operationId and backendProfileId', async () => {
   const requests = [];
   const api = await loadApiModule(async (url, options) => {
     requests.push({ url, options });

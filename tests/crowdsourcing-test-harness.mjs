@@ -42,8 +42,14 @@ async function loadRealApiModule(context) {
 
 async function loadBackendProfilesModule(context) {
   const source = await readFile(new URL('../background/backend-profiles.js', import.meta.url), 'utf8');
+  const coordinatorSource = await readFile(new URL('../background/storage-mutation-coordinator.js', import.meta.url), 'utf8');
+  const coordinator = new vm.SourceTextModule(coordinatorSource, {
+    context,
+    identifier: 'background/storage-mutation-coordinator.js'
+  });
   const module = new vm.SourceTextModule(source, { context, identifier: 'background/backend-profiles.js' });
   await module.link((specifier) => {
+    if (specifier === './storage-mutation-coordinator.js') return coordinator;
     throw new Error(`Unexpected background/backend-profiles.js import: ${specifier}`);
   });
   return module;
@@ -158,6 +164,13 @@ async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
     async initializeSync() { lifecycleEvents.push('sync-initialize'); },
     ...options.syncModule
   };
+  const contributionQueue = {
+    enqueueContribution: async () => { throw new Error('Unexpected contribution enqueue'); },
+    parseContributionIntent: () => null,
+    readVoteAuthority: async () => { throw new Error('Unexpected contribution authority request'); },
+    retryContribution: async () => { throw new Error('Unexpected contribution retry'); },
+    ...options.contributionQueue
+  };
   const context = vm.createContext({
     AbortController,
     console: createConsole(logs),
@@ -248,6 +261,11 @@ async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
       return profileModule;
     }
     if (specifier === './background/storage-migrations.js') return storageMigrationsModule;
+    if (specifier === './background/contribution-queue.js') {
+      return new vm.SyntheticModule(Object.keys(contributionQueue), function init() {
+        for (const [name, value] of Object.entries(contributionQueue)) this.setExport(name, value);
+      }, { context, identifier: 'contribution-queue.js' });
+    }
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await module.evaluate();
