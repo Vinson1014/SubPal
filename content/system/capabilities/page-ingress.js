@@ -1,7 +1,10 @@
 import { fail, fromThrown, ok } from './result.js';
+import { parseSubtitleQuery } from './subtitles.js';
 
 const PAGE_OBSERVATION_CATEGORY = 'page-observation';
 const VIDEO_CONTEXT_CHANGED_VARIANT = 'video-context-changed';
+const SUBTITLE_QUERY_CATEGORY = 'subtitle-query';
+const REPLACEMENT_SUBTITLE_QUERY_VARIANT = 'replacement-subtitle-query';
 const PAYLOAD_KEYS = new Set(['oldVideoId', 'newVideoId', 'videoId']);
 const ENVELOPE_KEYS = new Set(['category', 'variant', 'payload']);
 const AUTHORITY_KEYS = new Set([
@@ -34,7 +37,7 @@ function normalizedVideoChange(payload) {
   return ok(event);
 }
 
-function parseVideoContextChanged(input, options) {
+function parseIngress(input, options) {
   if (!isRecord(input) || options?.authorityEscalated === true) {
     return options?.authorityEscalated === true
       ? fail('forbidden', 'page-ingress-variant', false)
@@ -44,11 +47,14 @@ function parseVideoContextChanged(input, options) {
   if (typeof input.category !== 'string' || typeof input.variant !== 'string' || !isRecord(input.payload)) {
     return fail('invalid', 'malformed-page-observation', false);
   }
-  if (input.category !== PAGE_OBSERVATION_CATEGORY || input.variant !== VIDEO_CONTEXT_CHANGED_VARIANT) {
-    return fail('forbidden', 'page-ingress-variant', false);
-  }
   if (Object.keys(input).some((key) => !ENVELOPE_KEYS.has(key))) {
     return fail('invalid', 'malformed-page-observation', false);
+  }
+  if (input.category === SUBTITLE_QUERY_CATEGORY && input.variant === REPLACEMENT_SUBTITLE_QUERY_VARIANT) {
+    return parseSubtitleQuery(input.payload);
+  }
+  if (input.category !== PAGE_OBSERVATION_CATEGORY || input.variant !== VIDEO_CONTEXT_CHANGED_VARIANT) {
+    return fail('forbidden', 'page-ingress-variant', false);
   }
   if (hasForbiddenAuthority(input.payload) || Object.keys(input.payload).some((key) => !PAYLOAD_KEYS.has(key))) {
     return hasForbiddenAuthority(input.payload)
@@ -59,8 +65,16 @@ function parseVideoContextChanged(input, options) {
 }
 
 function accept(input, options = {}) {
-  const parsed = parseVideoContextChanged(input, options);
+  const parsed = parseIngress(input, options);
   if (!parsed.ok) return parsed;
+  if (input.category === SUBTITLE_QUERY_CATEGORY) {
+    if (typeof options.query !== 'function') return fail('disconnected', 'background-port-disconnected', true);
+    try {
+      return options.query(parsed.value);
+    } catch (error) {
+      return fromThrown(error, 'subtitle-fetch-failed');
+    }
+  }
   try {
     options.dispatch?.(parsed.value);
   } catch (error) {

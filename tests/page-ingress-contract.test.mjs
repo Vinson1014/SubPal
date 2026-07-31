@@ -21,7 +21,8 @@ async function createModule(context, identifier, exports) {
 }
 
 async function createPrivateTransportModule(context) {
-  const module = new vm.SyntheticModule(['createEnvelope', 'createPortTransport'], function initializePrivateTransports() {
+  const module = new vm.SyntheticModule(['createDomTransport', 'createEnvelope', 'createPortTransport'], function initializePrivateTransports() {
+    this.setExport('createDomTransport', () => ({ request: async () => ({ ok: false, error: { kind: 'disconnected', code: 'background-port-disconnected', retryable: true } }) }));
     this.setExport('createEnvelope', ({ requestId, kind, payload, context: contextValue }) => ({ protocolVersion: 1, requestId, kind, payload, ...(contextValue === undefined ? {} : { context: contextValue }) }));
     this.setExport('createPortTransport', ({ connect }) => {
       let port = null;
@@ -37,19 +38,28 @@ async function createPrivateTransportModule(context) {
 }
 
 async function loadPageIngressModule(context = vm.createContext({})) {
-  const [resultSource, ingressSource] = await Promise.all([
+  const [resultSource, subtitlesSource, ingressSource] = await Promise.all([
     sourceOrNull('content/system/capabilities/result.js'),
+    sourceOrNull('content/system/capabilities/subtitles.js'),
     sourceOrNull('content/system/capabilities/page-ingress.js')
   ]);
-  if (!resultSource || !ingressSource) return null;
+  if (!resultSource || !subtitlesSource || !ingressSource) return null;
   const result = new vm.SourceTextModule(resultSource, { context, identifier: 'content/system/capabilities/result.js' });
+  const privateTransports = await createPrivateTransportModule(context);
+  const subtitles = new vm.SourceTextModule(subtitlesSource, { context, identifier: 'content/system/capabilities/subtitles.js' });
   const ingress = new vm.SourceTextModule(ingressSource, { context, identifier: 'content/system/capabilities/page-ingress.js' });
   await result.link(() => { throw new Error('result.js must not import dependencies'); });
-  await ingress.link((specifier) => {
-    assert.equal(specifier, './result.js');
-    return result;
+  await subtitles.link((specifier) => {
+    if (specifier === './result.js') return result;
+    if (specifier === './private-transports.js') return privateTransports;
+    throw new Error(`Unexpected subtitles dependency: ${specifier}`);
   });
-  await result.evaluate(); await ingress.evaluate();
+  await ingress.link((specifier) => {
+    if (specifier === './result.js') return result;
+    if (specifier === './subtitles.js') return subtitles;
+    throw new Error(`Unexpected PageIngress dependency: ${specifier}`);
+  });
+  await result.evaluate(); await subtitles.evaluate(); await ingress.evaluate();
   return ingress;
 }
 

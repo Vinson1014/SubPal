@@ -26,6 +26,7 @@
   let pageContextStartAttempted = false;
   let isolatedEndscreenStartPromise = null;
   let pageIngressPromise = null;
+  let subtitleQueryCapabilityPromise = null;
 
   const PAGE_SCRIPT_READY_EVENT = 'subpal-page-script-ready';
   const PAGE_SCRIPT_READY_REQUEST_EVENT = 'subpal-request-page-script-ready';
@@ -475,9 +476,14 @@
     ].some((key) => Object.prototype.hasOwnProperty.call(message, key));
   }
 
-  function adaptPageVideoObservation(message) {
+  function adaptPageIngressMessage(message) {
     if (!message || typeof message !== 'object') return null;
-    if (message.category === 'page-observation') return { input: message, authorityEscalated: false };
+    if (message.category === 'page-observation' || message.category === 'subtitle-query') {
+      return { input: message, authorityEscalated: hasAuthorityBearingKey(message) };
+    }
+    if (message.type === 'CHECK_SUBTITLE') {
+      return { input: message, authorityEscalated: false };
+    }
     if (message.type !== 'VIDEO_ID_CHANGED') return null;
 
     const payload = {};
@@ -502,11 +508,32 @@
     return pageIngressPromise;
   }
 
-  function acceptPageVideoObservation(messageId, observation) {
-    getPageIngress().then((pageIngress) => {
-      const result = pageIngress.accept(observation.input, {
+  function getSubtitleQueryCapability() {
+    if (!subtitleQueryCapabilityPromise) {
+      subtitleQueryCapabilityPromise = Promise.all([
+        getBackgroundPortTransport(),
+        import(chrome.runtime.getURL('content/system/capabilities/subtitles.js')),
+        import(chrome.runtime.getURL('content/core/playback-context-manager.js'))
+      ]).then(([{ createEnvelope, transport }, { createSubtitles }, { playbackContextManager }]) => createSubtitles({
+        getCurrentContext: () => playbackContextManager.getCurrentContext(),
+        request({ requestId, query, signal }) {
+          return transport.request(createEnvelope({
+            requestId,
+            kind: 'subtitle-query',
+            payload: { type: 'SUBTITLE_QUERY', query }
+          }), { signal });
+        }
+      }));
+    }
+    return subtitleQueryCapabilityPromise;
+  }
+
+  function acceptPageIngress(messageId, observation) {
+    getPageIngress().then(async (pageIngress) => {
+      const result = await pageIngress.accept(observation.input, {
         authorityEscalated: observation.authorityEscalated,
-        dispatch: (message) => dispatchInternalMessage(messageId, message)
+        dispatch: (message) => dispatchInternalMessage(messageId, message),
+        query: (subtitleQuery) => getSubtitleQueryCapability().then((subtitles) => subtitles.query(subtitleQuery))
       });
       respondToPageObservation(messageId, result);
     });
@@ -520,9 +547,9 @@
     if (message?.type === 'GET_CROWDSOURCING_TASKS') return;
     if (message?.type === 'RAW_TTML_INTERCEPTED') return;
 
-    const pageVideoObservation = adaptPageVideoObservation(message);
-    if (pageVideoObservation) {
-      acceptPageVideoObservation(messageId, pageVideoObservation);
+    const pageIngressMessage = adaptPageIngressMessage(message);
+    if (pageIngressMessage) {
+      acceptPageIngress(messageId, pageIngressMessage);
       return;
     }
 
