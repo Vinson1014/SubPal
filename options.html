@@ -421,7 +421,6 @@
           </div>
         </section>
 
-        <!-- API Settings Card -->
         <section class="settings-card">
           <div class="card-header">
             <div class="card-icon warning">
@@ -430,25 +429,36 @@
               </svg>
             </div>
             <div class="card-title">
-              <h2>API 設定</h2>
-              <p>後端伺服器連線設定</p>
+              <h2>後端設定檔</h2>
+              <p>選擇連線端點並管理該端點的待同步資料</p>
             </div>
           </div>
 
           <div class="card-body">
-            <div class="input-setting">
-              <label for="apiBaseUrlInput">API Base URL</label>
-              <div class="input-with-warning">
-                <input type="text" id="apiBaseUrlInput" placeholder="https://example.com">
-                <div class="warning-badge">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                    <circle cx="12" cy="12" r="10"/>
-                    <line x1="12" y1="8" x2="12" y2="12"/>
-                    <line x1="12" y1="16" x2="12.01" y2="16"/>
-                  </svg>
-                  <span>除非您清楚知道這項設定的作用，否則請勿修改</span>
+            <div class="backend-profile-controls">
+              <div class="input-setting">
+                <label for="backendProfileSelect">設定檔清單</label>
+                <select id="backendProfileSelect" aria-describedby="backendProfileStatus backendProfileIdentity backendProfileQueueCounts"></select>
+              </div>
+              <div class="backend-profile-summary" aria-live="polite">
+                <p id="backendProfileStatus"></p>
+                <p id="backendProfileIdentity"></p>
+                <p id="backendProfileQueueCounts"></p>
+              </div>
+              <p id="backendProfileError" class="backend-profile-error" role="alert" hidden></p>
+              <div class="backend-profile-actions">
+                <button type="button" id="activateBackendProfileButton" class="btn btn-primary">啟用設定檔</button>
+                <button type="button" id="exportBackendProfileButton" class="btn btn-secondary">匯出待同步資料</button>
+                <button type="button" id="deleteBackendProfileButton" class="btn btn-danger">刪除設定檔</button>
+              </div>
+              <div class="input-setting backend-profile-create">
+                <label for="backendProfileEndpoint">新增後端端點</label>
+                <div class="backend-profile-create-row">
+                  <input type="url" id="backendProfileEndpoint" placeholder="https://example.com" inputmode="url">
+                  <button type="button" id="createBackendProfileButton" class="btn btn-secondary">新增設定檔</button>
                 </div>
               </div>
+              <p class="backend-profile-disclosure">自訂後端會收到匿名身分、字幕、投票與貢獻資料。</p>
             </div>
           </div>
         </section>

@@ -196,12 +196,6 @@ async function restoreOptionsUI() {
         : DEFAULT_CONFIG['crowdsourcing.endscreenTasksEnabled'];
     }
 
-    // API URL
-    const apiBaseUrlInput = document.getElementById('apiBaseUrlInput');
-    if (apiBaseUrlInput) {
-      apiBaseUrlInput.value = config['api.baseUrl'];
-    }
-
     // 字幕模式
     const isDualMode = config['subtitle.dualModeEnabled'];
     const singleModeRadio = document.getElementById('singleMode');
@@ -543,14 +537,6 @@ function setupEventListeners() {
     });
   }
 
-  // API URL
-  const apiBaseUrlInput = document.getElementById('apiBaseUrlInput');
-  if (apiBaseUrlInput) {
-    apiBaseUrlInput.addEventListener('change', async (e) => {
-      await saveConfig('api.baseUrl', e.target.value);
-    });
-  }
-
   // 字幕模式切換
   const singleModeRadio = document.getElementById('singleMode');
   const dualModeRadio = document.getElementById('dualMode');
@@ -666,6 +652,8 @@ function setupEventListeners() {
 
   // 重試同步按鈕
   setupRetrySyncButton();
+
+  setupBackendProfileControls();
 }
 
 /**
@@ -837,6 +825,309 @@ function sendToBackground(message) {
       resolve({ success: false, error: error.message });
     }
   });
+}
+
+const BACKEND_PROFILE_DEADLINE_MS = 10000;
+let backendProfilesPort = null;
+const pendingBackendProfileRequests = new Map();
+
+function backendProfileFailure(kind, code, retryable) {
+  return { ok: false, error: { kind, code, retryable } };
+}
+
+function isBackendProfileResult(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.ok !== 'boolean') return false;
+  if (value.ok) return Object.hasOwn(value, 'value');
+  const error = value.error;
+  return Object.keys(value).length === 2 && error && typeof error === 'object' && !Array.isArray(error)
+    && typeof error.kind === 'string' && typeof error.code === 'string' && typeof error.retryable === 'boolean';
+}
+
+function settleBackendProfileRequests(result) {
+  for (const entry of [...pendingBackendProfileRequests.values()]) entry.settle(result);
+}
+
+function getBackendProfilesPort() {
+  if (backendProfilesPort) return backendProfilesPort;
+  try {
+    const port = chrome.runtime.connect({ name: 'options-page-channel' });
+    backendProfilesPort = port;
+    port.onMessage.addListener(({ messageId, response }) => {
+      if (backendProfilesPort !== port) return;
+      const entry = pendingBackendProfileRequests.get(messageId);
+      if (!entry) return;
+      entry.settle(isBackendProfileResult(response)
+        ? response
+        : backendProfileFailure('domain-rejected', 'backend-profiles-request-failed', false));
+    });
+    port.onDisconnect.addListener(() => {
+      if (backendProfilesPort !== port) return;
+      backendProfilesPort = null;
+      settleBackendProfileRequests(backendProfileFailure('disconnected', 'background-port-disconnected', true));
+    });
+    return port;
+  } catch {
+    return null;
+  }
+}
+
+function sendBackendProfileRequest({ requestId, message }) {
+  if (typeof requestId !== 'string' || !requestId || !message || typeof message !== 'object') {
+    return Promise.resolve(backendProfileFailure('invalid', 'profile-input', false));
+  }
+  const port = getBackendProfilesPort();
+  if (!port) return Promise.resolve(backendProfileFailure('disconnected', 'background-port-disconnected', true));
+  if (pendingBackendProfileRequests.has(requestId)) {
+    return Promise.resolve(backendProfileFailure('invalid', 'duplicate-request-id', false));
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let timerId;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      pendingBackendProfileRequests.delete(requestId);
+      clearTimeout(timerId);
+      resolve(result);
+    };
+    pendingBackendProfileRequests.set(requestId, { settle });
+    timerId = setTimeout(() => {
+      settle(backendProfileFailure('timeout', 'options-profile-timeout', true));
+    }, BACKEND_PROFILE_DEADLINE_MS);
+    try {
+      port.postMessage({ messageId: requestId, message });
+    } catch {
+      settle(backendProfileFailure('disconnected', 'background-port-disconnected', true));
+    }
+  });
+}
+
+let backendProfiles = null;
+let backendProfileSnapshots = [];
+let selectedBackendProfileId = null;
+let backendProfileBusy = false;
+
+async function getBackendProfiles() {
+  if (backendProfiles) return backendProfiles;
+  const { createBackendProfiles } = await import('./content/system/capabilities/backend-profiles.js');
+  backendProfiles = createBackendProfiles({ request: sendBackendProfileRequest });
+  return backendProfiles;
+}
+
+function safeQueueTotal(queueCounts, status) {
+  const total = queueCounts?.[status]?.total;
+  return Number.isInteger(total) && total >= 0 ? total : 0;
+}
+
+function toSafeBackendProfileSnapshot(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    if (typeof value.id !== 'string' || !value.id || typeof value.endpoint !== 'string' || !value.endpoint) return null;
+    if (typeof value.userIdMasked !== 'string' && value.userIdMasked !== null) return null;
+    if (typeof value.hasJwt !== 'boolean' || typeof value.isActive !== 'boolean') return null;
+    return {
+      id: value.id,
+      endpoint: value.endpoint,
+      userIdMasked: value.userIdMasked,
+      hasJwt: value.hasJwt,
+      isActive: value.isActive,
+      queueCounts: {
+        pending: safeQueueTotal(value.queueCounts, 'pending'),
+        syncing: safeQueueTotal(value.queueCounts, 'syncing'),
+        failed: safeQueueTotal(value.queueCounts, 'failed')
+      }
+    };
+  } catch {
+    return null;
+  }
+}
+
+function selectedBackendProfile() {
+  return backendProfileSnapshots.find(profile => profile.id === selectedBackendProfileId) || null;
+}
+
+function setBackendProfileError(message = '') {
+  const errorElement = document.getElementById('backendProfileError');
+  if (!errorElement) return;
+  errorElement.textContent = message;
+  errorElement.hidden = !message;
+}
+
+function renderBackendProfiles() {
+  const select = document.getElementById('backendProfileSelect');
+  const status = document.getElementById('backendProfileStatus');
+  const identity = document.getElementById('backendProfileIdentity');
+  const queueCounts = document.getElementById('backendProfileQueueCounts');
+  const activateButton = document.getElementById('activateBackendProfileButton');
+  const exportButton = document.getElementById('exportBackendProfileButton');
+  const deleteButton = document.getElementById('deleteBackendProfileButton');
+  const createButton = document.getElementById('createBackendProfileButton');
+  const activeProfile = backendProfileSnapshots.find(profile => profile.isActive) || null;
+
+  if (!backendProfileSnapshots.some(profile => profile.id === selectedBackendProfileId)) {
+    selectedBackendProfileId = activeProfile?.id || backendProfileSnapshots[0]?.id || null;
+  }
+  const selectedProfile = selectedBackendProfile();
+
+  if (select) {
+    select.replaceChildren();
+    for (const profile of backendProfileSnapshots) {
+      const option = document.createElement('option');
+      option.value = profile.id;
+      option.textContent = profile.endpoint;
+      select.add(option);
+    }
+    select.value = selectedBackendProfileId || '';
+    select.disabled = backendProfileBusy || !selectedProfile;
+  }
+  if (status) {
+    status.textContent = activeProfile
+      ? `使用中的端點：${activeProfile.endpoint}`
+      : '沒有可用的後端設定檔。';
+  }
+  if (identity) {
+    identity.textContent = selectedProfile
+      ? `身分：${selectedProfile.userIdMasked || '未提供'}；${selectedProfile.hasJwt ? '已設定憑證' : '未設定憑證'}`
+      : '身分：未提供；未設定憑證';
+  }
+  if (queueCounts) {
+    queueCounts.textContent = selectedProfile
+      ? `待處理：${selectedProfile.queueCounts.pending}；同步中：${selectedProfile.queueCounts.syncing}；失敗：${selectedProfile.queueCounts.failed}`
+      : '待處理：0；同步中：0；失敗：0';
+  }
+  if (activateButton) activateButton.disabled = backendProfileBusy || !selectedProfile || selectedProfile.isActive;
+  if (exportButton) exportButton.disabled = backendProfileBusy || !selectedProfile?.isActive;
+  if (deleteButton) deleteButton.disabled = backendProfileBusy || !selectedProfile;
+  if (createButton) createButton.disabled = backendProfileBusy;
+}
+
+async function refreshBackendProfiles() {
+  let result;
+  try {
+    result = await (await getBackendProfiles()).list();
+  } catch {
+    backendProfileSnapshots = [];
+    selectedBackendProfileId = null;
+    setBackendProfileError('無法載入後端設定檔。請稍後再試。');
+    renderBackendProfiles();
+    return false;
+  }
+  if (!result?.ok || !Array.isArray(result.value)) {
+    backendProfileSnapshots = [];
+    selectedBackendProfileId = null;
+    setBackendProfileError('無法載入後端設定檔。請稍後再試。');
+    renderBackendProfiles();
+    return false;
+  }
+  backendProfileSnapshots = result.value.map(toSafeBackendProfileSnapshot).filter(Boolean);
+  renderBackendProfiles();
+  return true;
+}
+
+async function runBackendProfileOperation(operation) {
+  if (backendProfileBusy) return;
+  backendProfileBusy = true;
+  renderBackendProfiles();
+  try {
+    await operation();
+  } catch {
+    setBackendProfileError('無法完成後端設定檔操作。請稍後再試。');
+  } finally {
+    backendProfileBusy = false;
+    renderBackendProfiles();
+  }
+}
+
+function setupBackendProfileControls() {
+  const select = document.getElementById('backendProfileSelect');
+  const endpointInput = document.getElementById('backendProfileEndpoint');
+  const createButton = document.getElementById('createBackendProfileButton');
+  const activateButton = document.getElementById('activateBackendProfileButton');
+  const exportButton = document.getElementById('exportBackendProfileButton');
+  const deleteButton = document.getElementById('deleteBackendProfileButton');
+
+  select?.addEventListener('change', () => {
+    selectedBackendProfileId = select.value;
+    setBackendProfileError();
+    renderBackendProfiles();
+  });
+  createButton?.addEventListener('click', () => runBackendProfileOperation(async () => {
+    const endpoint = endpointInput?.value.trim() || '';
+    if (!endpoint) {
+      setBackendProfileError('請輸入後端端點。');
+      return;
+    }
+    const result = await (await getBackendProfiles()).create({ endpoint });
+    if (!result?.ok) {
+      setBackendProfileError('無法新增後端設定檔。請確認端點後再試。');
+      return;
+    }
+    selectedBackendProfileId = typeof result.value?.id === 'string' ? result.value.id : null;
+    if (endpointInput) endpointInput.value = '';
+    setBackendProfileError();
+    await refreshBackendProfiles();
+  }));
+  activateButton?.addEventListener('click', () => runBackendProfileOperation(async () => {
+    const profile = selectedBackendProfile();
+    if (!profile) return;
+    const result = await (await getBackendProfiles()).activate(profile.id);
+    if (!result?.ok) {
+      setBackendProfileError('無法啟用後端設定檔。請稍後再試。');
+      return;
+    }
+    selectedBackendProfileId = profile.id;
+    setBackendProfileError();
+    await refreshBackendProfiles();
+  }));
+  exportButton?.addEventListener('click', () => runBackendProfileOperation(async () => {
+    const profile = selectedBackendProfile();
+    if (!profile?.isActive) return;
+    const result = await (await getBackendProfiles()).exportQueue(profile.id);
+    if (!result?.ok) {
+      setBackendProfileError('無法匯出使用中的後端設定檔資料。請稍後再試。');
+      return;
+    }
+    const blob = new Blob([JSON.stringify(result.value, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const filenameProfileId = profile.id.replace(/[^a-z0-9_-]+/gi, '-');
+    link.href = url;
+    link.download = `subpal_backend_profile_${filenameProfileId}_queue.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setBackendProfileError();
+  }));
+  deleteButton?.addEventListener('click', () => runBackendProfileOperation(async () => {
+    const profile = selectedBackendProfile();
+    if (!profile) return;
+    if (profile.isActive) {
+      setBackendProfileError('使用中的設定檔無法刪除。');
+      return;
+    }
+    if (!confirm('確定要刪除此後端設定檔嗎？此操作不可撤銷。')) return;
+    const result = await (await getBackendProfiles()).deleteProfile(profile.id);
+    if (result?.ok) {
+      setBackendProfileError();
+      await refreshBackendProfiles();
+      return;
+    }
+    if (result?.error?.code !== 'profile-delete-blocked') {
+      setBackendProfileError('無法刪除後端設定檔。請稍後再試。');
+      return;
+    }
+    const counts = profile.queueCounts;
+    setBackendProfileError(`此設定檔仍有待處理、同步中或失敗的資料（待處理：${counts.pending}；同步中：${counts.syncing}；失敗：${counts.failed}）。`);
+    if (!confirm('刪除會永久捨棄這些資料。確定要繼續嗎？')) return;
+    const discardResult = await (await getBackendProfiles()).deleteProfile(profile.id, { discard: true });
+    if (!discardResult?.ok) {
+      setBackendProfileError('無法刪除後端設定檔。請稍後再試。');
+      return;
+    }
+    setBackendProfileError();
+    await refreshBackendProfiles();
+  }));
 }
 
 /**
@@ -1134,6 +1425,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 更新待同步數據 UI
   await updatePendingDataUI();
+
+  await refreshBackendProfiles();
 
   console.log('[Options] 頁面初始化完成');
 });

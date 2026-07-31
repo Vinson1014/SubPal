@@ -954,6 +954,90 @@ input[type="color"]::-webkit-color-swatch {
   flex-shrink: 0;
 }
 
+.backend-profile-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.backend-profile-controls select,
+.backend-profile-create-row input {
+  width: 100%;
+  padding: var(--spacing-md);
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: inherit;
+  font-size: 0.95rem;
+}
+
+.backend-profile-controls select:focus,
+.backend-profile-create-row input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-glow);
+}
+
+.backend-profile-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-md);
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.backend-profile-summary p:first-child {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.backend-profile-actions,
+.backend-profile-create-row {
+  display: flex;
+  gap: var(--spacing-sm);
+}
+
+.backend-profile-actions .btn,
+.backend-profile-create-row input {
+  min-width: 0;
+}
+
+.backend-profile-create-row input {
+  flex: 1 1 auto;
+}
+
+.backend-profile-create-row .btn {
+  flex: 0 0 auto;
+}
+
+.backend-profile-error {
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--color-danger-bg);
+  border-radius: var(--radius-sm);
+  color: var(--color-danger);
+  overflow-wrap: anywhere;
+}
+
+.backend-profile-disclosure {
+  color: var(--color-text-tertiary);
+  font-size: 0.8rem;
+}
+
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-bg-deep), 0 0 0 5px var(--color-accent);
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 /* ============================================
    Queue List
    ============================================ */
@@ -1066,6 +1150,16 @@ input[type="color"]::-webkit-color-swatch {
   }
 
   .queue-item .btn {
+    width: 100%;
+  }
+
+  .backend-profile-actions,
+  .backend-profile-create-row {
+    flex-direction: column;
+  }
+
+  .backend-profile-actions .btn,
+  .backend-profile-create-row .btn {
     width: 100%;
   }
 }
