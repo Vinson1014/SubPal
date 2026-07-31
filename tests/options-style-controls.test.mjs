@@ -6,7 +6,6 @@ import vm from 'node:vm';
 const DEFAULT_CONFIG = {
   debugMode: false,
   'crowdsourcing.endscreenTasksEnabled': true,
-  'api.baseUrl': 'https://api.subpal.test',
   'subtitle.dualModeEnabled': true,
   'subtitle.primaryLanguage': 'zh-Hant',
   'subtitle.secondaryLanguage': 'en',

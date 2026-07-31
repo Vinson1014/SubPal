@@ -7,7 +7,6 @@ import { getDefaultValues, validateConfigValue } from '../content/system/config/
 
 const CONFIG_DEFAULTS = {
   debugMode: false,
-  'api.baseUrl': 'https://api.example.test',
   'subtitle.dualModeEnabled': false,
   'crowdsourcing.endscreenTasksEnabled': true
 };
@@ -16,6 +15,7 @@ test('Given the config schema When defaults and validation are queried Then ends
   const defaults = getDefaultValues();
 
   assert.equal(defaults['crowdsourcing.endscreenTasksEnabled'], true);
+  assert.equal(Object.hasOwn(defaults, 'api.baseUrl'), false);
   assert.deepEqual(validateConfigValue('crowdsourcing.endscreenTasksEnabled', true), { valid: true });
   assert.equal(validateConfigValue('crowdsourcing.endscreenTasksEnabled', 'false').valid, false);
 });
@@ -94,7 +94,19 @@ async function loadOptions({ config = {} } = {}) {
     }
   });
   const source = await readFile(new URL('../options.js', import.meta.url), 'utf8');
-  const module = new vm.SourceTextModule(source, { context, identifier: 'options.js' });
+  const backendProfilesModule = new vm.SyntheticModule(['createBackendProfiles'], function initialize() {
+    this.setExport('createBackendProfiles', () => ({ list: async () => ({ ok: true, value: [] }) }));
+  }, { context, identifier: 'backend-profiles.js' });
+  await backendProfilesModule.link(() => { throw new Error('backend profiles has no dependencies'); });
+  await backendProfilesModule.evaluate();
+  const module = new vm.SourceTextModule(source, {
+    context,
+    identifier: 'options.js',
+    importModuleDynamically: async (specifier) => {
+      assert.equal(specifier, './content/system/capabilities/backend-profiles.js');
+      return backendProfilesModule;
+    }
+  });
 
   await module.link(specifier => {
     if (specifier === './content/system/config/config-schema.js') {

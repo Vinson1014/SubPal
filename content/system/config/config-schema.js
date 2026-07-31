@@ -530,29 +530,7 @@ export const CONFIG_SCHEMA = {
     }
   },
 
-  // ==================== API 設定 ====================
-
-  /**
-   * API 基礎 URL
-   */
-  api: {
-    baseUrl: {
-      type: 'string',
-      default: 'https://subnfbackend.zeabur.app',
-      description: 'API 基礎 URL',
-      category: 'api',
-      validation: (value) => {
-        if (typeof value !== 'string') return false;
-        try {
-          new URL(value);
-          return true;
-        } catch {
-          return false;
-        }
-      },
-      validationError: '必須為有效的 URL'
-    }
-  },
+  api: {},
 
   // ==================== 用戶資料 ====================
 
