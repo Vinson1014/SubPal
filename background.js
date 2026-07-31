@@ -17,16 +17,42 @@ console.log(`[Background] Service Worker script executing. Current Instance ID: 
 import * as apiModule from './background/api.js';
 import * as syncModule from './background/sync.js';
 import './background/sync-listener.js'; // 載入同步監聽器，自動註冊 storage 變化監聽
+import {
+  activateBackendProfile,
+  createBackendProfile,
+  deleteBackendProfile,
+  exportBackendProfileQueue,
+  listBackendProfiles,
+  resolveBackendProfile,
+  setBackendProfileCredentials
+} from './background/backend-profiles.js';
+import { ensureStorageMigrationsComplete } from './background/storage-migrations.js';
+
+let lifecycleInitialization;
+
+function initializeLifecycle() {
+  if (!lifecycleInitialization) {
+    lifecycleInitialization = (async () => {
+      await ensureStorageMigrationsComplete();
+      await ensureUserRegisteredAndJwtPresent();
+      await syncModule.initializeSync();
+    })().finally(() => {
+      lifecycleInitialization = null;
+    });
+  }
+  return lifecycleInitialization;
+}
 
 // 擴充功能安裝/更新事件
 chrome.runtime.onInstalled.addListener(async (details) => {
   console.log(`[Background] onInstalled event. Instance ID: ${serviceWorkerInstanceId}. 字幕助手擴充功能已安裝或更新`);
 
-  // 先執行配置遷移（舊鍵名 -> 新鍵名）
-  await migrateOldConfigKeys();
-
-  // 執行用戶註冊/JWT獲取邏輯
-  await ensureUserRegisteredAndJwtPresent();
+  try {
+    await initializeLifecycle();
+  } catch (error) {
+    console.error('[Background] Lifecycle initialization failed:', error);
+    throw error;
+  }
   
   // 檢查是否需要顯示教學頁面
   if (details.reason === 'install') {
@@ -61,115 +87,176 @@ async function showTutorialIfNeeded() {
 chrome.runtime.onStartup.addListener(async () => {
   console.log(`[Background] onStartup event. Instance ID: ${serviceWorkerInstanceId}. Extension startup, triggering initialization.`);
 
-  // 先執行配置遷移（舊鍵名 -> 新鍵名）
-  await migrateOldConfigKeys();
-
-  // 執行用戶註冊/JWT獲取邏輯
-  await ensureUserRegisteredAndJwtPresent();
+  try {
+    await initializeLifecycle();
+  } catch (error) {
+    console.error('[Background] Lifecycle initialization failed:', error);
+    throw error;
+  }
 });
-
-/**
- * 遷移舊配置鍵名到新鍵名
- * 處理 userID -> user.userId, currentVideoId -> video.currentVideoId 的遷移
- * 遷移成功後會移除舊鍵名
- */
-async function migrateOldConfigKeys() {
-  const migrations = [
-    { oldKey: 'userID', newKey: 'user', newSubKey: 'userId' },
-    { oldKey: 'currentVideoId', newKey: 'video', newSubKey: 'currentVideoId' }
-  ];
-
-  const oldKeys = migrations.map(m => m.oldKey);
-  const oldData = await chrome.storage.local.get(oldKeys);
-
-  let migratedCount = 0;
-  const keysToRemove = [];
-
-  for (const { oldKey, newKey, newSubKey } of migrations) {
-    const oldValue = oldData[oldKey];
-    if (!oldValue) continue;
-
-    // 讀取新格式的現有值
-    const { [newKey]: existingObj = {} } = await chrome.storage.local.get([newKey]);
-
-    if (!existingObj[newSubKey]) {
-      // 新鍵為空，執行遷移
-      console.log(`[Background] 遷移配置: ${oldKey} -> ${newKey}.${newSubKey}`, oldValue);
-      await chrome.storage.local.set({ [newKey]: { ...existingObj, [newSubKey]: oldValue } });
-      migratedCount++;
-    }
-    keysToRemove.push(oldKey);
-  }
-
-  // 移除舊鍵名
-  if (keysToRemove.length > 0) {
-    await chrome.storage.local.remove(keysToRemove);
-    console.log(`[Background] 已移除舊鍵名:`, keysToRemove);
-  }
-
-  if (migratedCount > 0) {
-    console.log(`[Background] 已遷移 ${migratedCount} 個配置項`);
-  }
-}
 
 /**
  * 確保用戶已註冊並存在 JWT
  */
 async function ensureUserRegisteredAndJwtPresent() {
   console.log('[Background] Checking user registration and JWT presence...');
-  try {
-    // 使用新格式：user.userId
-    const { user, jwt } = await chrome.storage.local.get(['user', 'jwt']);
-    let userId = user?.userId || '';
-
-    if (!userId) {
-      // 如果沒有 userId，生成一個新的
-      userId = crypto.randomUUID();
-      await chrome.storage.local.set({ user: { userId } });
-      console.log('[Background] Generated new userId:', userId);
-    }
-
-    if (!jwt) {
-      console.log('[Background] No JWT found, attempting to register user and get JWT...');
-      // 調用後端 /users API 進行註冊並獲取 JWT
-      const response = await apiModule.registerUser(userId);
-
-      if (response.token) {
-        await chrome.storage.local.set({ jwt: response.token });
-        console.log('[Background] Successfully registered user and obtained JWT.');
-      } else {
-        // 處理 API 返回的明確錯誤
-        const errorMessage = response.error || '未知錯誤';
-        console.error('[Background] Failed to register user or obtain JWT:', errorMessage, response);
-      }
-    } else {
-      console.log('[Background] userId and JWT already present.');
-      // 可以選擇在這裡驗證 JWT 有效性，但通常由後續 API 請求的 401 響應觸發刷新
-    }
-  } catch (error) {
-    let errorMsg = error.message;
-    let errorDetails = error.details || {};
-    let errorStatus = error.status || 'N/A';
-
-    if (error.name === 'AbortError') {
-      errorMsg = 'API請求超時';
-    } else if (error.message.includes('Failed to fetch')) {
-      errorMsg = '無法連接後端服務，請檢查後端是否運行或網路連接';
-    }
-
-    console.error(
-      `[Background] Error in ensureUserRegisteredAndJwtPresent:`,
-      `類型: ${error.name || '未知'}`,
-      `訊息: ${errorMsg}`,
-      `狀態碼: ${errorStatus}`,
-      `詳細: ${JSON.stringify(errorDetails)}`,
-      error // 打印原始錯誤對象以獲取完整堆棧
-    );
-  }
+  const profile = await resolveBackendProfile(chrome.storage.local);
+  if (profile.jwt) return;
+  const response = await apiModule.registerUser(profile.userId, profile.id);
+  if (!response?.token) throw new Error(response?.error || 'User registration returned no token');
+  await setBackendProfileCredentials(chrome.storage.local, profile.id, { jwt: response.token });
+  console.log('[Background] Successfully registered user and obtained JWT.');
 }
 
 // 儲存 content script 的 port，以 tabId 為鍵
 const contentScriptPorts = new Map();
+const BACKEND_PROFILE_COMMANDS = new Set([
+  'BACKEND_PROFILES_LIST',
+  'BACKEND_PROFILES_CREATE',
+  'BACKEND_PROFILES_ACTIVATE',
+  'BACKEND_PROFILES_DELETE',
+  'BACKEND_PROFILES_EXPORT_QUEUE'
+]);
+
+function profileFailure(kind, code) {
+  return { ok: false, error: { kind, code, retryable: false } };
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readPortRequest(messageData) {
+  let messageId;
+  try {
+    if (!isRecord(messageData)) return { messageId, valid: false };
+    messageId = messageData.messageId;
+    const message = messageData.message;
+    if (!isRecord(message) || typeof message.type !== 'string') return { messageId, valid: false };
+    return { messageId, message, type: message.type, valid: true };
+  } catch {
+    return { messageId, valid: false };
+  }
+}
+
+function isBackendProfileCommand(type) {
+  return BACKEND_PROFILE_COMMANDS.has(type);
+}
+
+function isTrustedOptionsSender(port) {
+  try {
+    if (port?.name !== 'options-page-channel') return false;
+    const sender = port.sender;
+    const optionsUrl = chrome.runtime.getURL('options.html');
+    const parsedOptionsUrl = new URL(optionsUrl);
+    const optionsOrigin = parsedOptionsUrl.origin === 'null'
+      ? optionsUrl.slice(0, optionsUrl.indexOf('/', optionsUrl.indexOf('//') + 2))
+      : parsedOptionsUrl.origin;
+    const senderTab = sender.tab;
+    return isRecord(sender) &&
+      sender.id === chrome.runtime.id &&
+      (senderTab === undefined || (isRecord(senderTab) && senderTab.url === optionsUrl)) &&
+      sender.url === optionsUrl &&
+      (sender.origin === undefined || sender.origin === optionsOrigin);
+  } catch {
+    return false;
+  }
+}
+
+function parseBackendProfileRequest(request) {
+  try {
+    if (!isRecord(request) || !isBackendProfileCommand(request.type) || !Object.hasOwn(request, 'type')) return null;
+    const keys = Object.keys(request);
+    const hasOnly = (...allowed) => keys.every((key) => allowed.includes(key));
+    const profileId = request.profileId;
+    const validProfileId = typeof profileId === 'string' && profileId.length > 0;
+    switch (request.type) {
+      case 'BACKEND_PROFILES_LIST':
+        return hasOnly('type') ? { type: request.type } : null;
+      case 'BACKEND_PROFILES_CREATE':
+        return hasOnly('type', 'endpoint') && Object.hasOwn(request, 'endpoint') && typeof request.endpoint === 'string'
+          ? { type: request.type, endpoint: request.endpoint }
+          : null;
+      case 'BACKEND_PROFILES_ACTIVATE':
+      case 'BACKEND_PROFILES_EXPORT_QUEUE':
+        return hasOnly('type', 'profileId') && Object.hasOwn(request, 'profileId') && validProfileId
+          ? { type: request.type, profileId }
+          : null;
+      case 'BACKEND_PROFILES_DELETE':
+        return hasOnly('type', 'profileId', 'discard') && Object.hasOwn(request, 'profileId') && validProfileId &&
+          (!Object.hasOwn(request, 'discard') || typeof request.discard === 'boolean')
+          ? { type: request.type, profileId, discard: Object.hasOwn(request, 'discard') ? request.discard : false }
+          : null;
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+function profileOperationFailure(type, error) {
+  let message = '';
+  try {
+    message = typeof error?.message === 'string' ? error.message : '';
+  } catch {
+    return profileFailure('domain-rejected', 'profile-operation-failed');
+  }
+  if (type === 'BACKEND_PROFILES_CREATE' && message.includes('Invalid backend endpoint')) {
+    return profileFailure('domain-rejected', 'unsafe-endpoint');
+  }
+  if (type === 'BACKEND_PROFILES_DELETE' && message.startsWith('Cannot delete')) {
+    return profileFailure('domain-rejected', 'profile-delete-blocked');
+  }
+  if (message.startsWith('Unknown backend profile')) {
+    return profileFailure('domain-rejected', 'profile-unavailable');
+  }
+  if (type === 'BACKEND_PROFILES_EXPORT_QUEUE' && message.includes('active profile')) {
+    return profileFailure('forbidden', 'profile-export-not-active');
+  }
+  return profileFailure('domain-rejected', 'profile-operation-failed');
+}
+
+async function handleBackendProfilePortRequest(messageId, request, port) {
+  if (!isTrustedOptionsSender(port)) {
+    port.postMessage({ messageId, response: profileFailure('forbidden', 'options-profile-access') });
+    return;
+  }
+  const parsed = parseBackendProfileRequest(request);
+  if (!parsed) {
+    port.postMessage({ messageId, response: profileFailure('invalid', 'profile-input') });
+    return;
+  }
+  try {
+    await ensureStorageMigrationsComplete(chrome.storage.local);
+  } catch {
+    port.postMessage({ messageId, response: profileFailure('domain-rejected', 'profile-migration-failed') });
+    return;
+  }
+  try {
+    let value;
+    switch (parsed.type) {
+      case 'BACKEND_PROFILES_LIST':
+        value = await listBackendProfiles(chrome.storage.local);
+        break;
+      case 'BACKEND_PROFILES_CREATE':
+        value = await createBackendProfile(chrome.storage.local, { endpoint: parsed.endpoint });
+        break;
+      case 'BACKEND_PROFILES_ACTIVATE':
+        value = await activateBackendProfile(chrome.storage.local, parsed.profileId);
+        break;
+      case 'BACKEND_PROFILES_DELETE':
+        value = await deleteBackendProfile(chrome.storage.local, parsed.profileId, { discard: parsed.discard });
+        break;
+      case 'BACKEND_PROFILES_EXPORT_QUEUE':
+        value = await exportBackendProfileQueue(chrome.storage.local, parsed.profileId);
+        break;
+    }
+    port.postMessage({ messageId, response: { ok: true, value } });
+  } catch (error) {
+    port.postMessage({ messageId, response: profileOperationFailure(parsed.type, error) });
+  }
+}
 
 // 監聽來自 content script 的長連接
 chrome.runtime.onConnect.addListener((port) => {
@@ -187,17 +274,22 @@ chrome.runtime.onConnect.addListener((port) => {
     contentScriptPorts.set(tabId, port);
 
     port.onMessage.addListener((messageData) => {
-      console.log(`[Background] Message [${messageData.message?.type}] received by SW Instance ID: ${serviceWorkerInstanceId} via content script port from Tab ${tabId}`, messageData);
-      const { messageId, message } = messageData;
-      if (!message || !message.type) {
+      const request = readPortRequest(messageData);
+      console.log(`[Background] Message [${request?.type}] received by SW Instance ID: ${serviceWorkerInstanceId} via content script port from Tab ${tabId}`, messageData);
+      if (!request.valid) {
         console.error('[Background] Invalid message format received via content script port:', messageData);
-        port.postMessage({ messageId, response: { success: false, error: '無效的消息格式' } });
+        port.postMessage({ response: { success: false, error: '無效的消息格式' } });
+        return;
+      }
+      const { messageId, message, type } = request;
+      if (isBackendProfileCommand(type)) {
+        port.postMessage({ messageId, response: profileFailure('forbidden', 'page-profile-change') });
         return;
       }
       const handledCoreMessageTypes = [
         'CONTENT_SCRIPT_LOADED', 'CONTENT_SCRIPT_READY', 'TOGGLE_DEBUG_MODE', 'VIDEO_ID_CHANGED', 'UPDATE_STATS'
       ];
-      if (handledCoreMessageTypes.includes(message.type)) {
+      if (handledCoreMessageTypes.includes(type)) {
         handleCoreMessagePort(messageId, message, port);
       } else {
         routeMessageToModulePort(messageId, message, port);
@@ -217,14 +309,21 @@ chrome.runtime.onConnect.addListener((port) => {
     // 例如：optionsPagePort = port;
 
     port.onMessage.addListener((messageData) => {
-      console.log(`[Background] Message [${messageData.message?.type}] received by SW Instance ID: ${serviceWorkerInstanceId} via options page port`, messageData);
-      const { messageId, message } = messageData;
-      if (!message || !message.type) {
+      const request = readPortRequest(messageData);
+      console.log(`[Background] Message [${request?.type}] received by SW Instance ID: ${serviceWorkerInstanceId} via options page port`, messageData);
+      if (!request.valid) {
         console.error('[Background] Invalid message format received via options page port:', messageData);
-        port.postMessage({ messageId, response: { success: false, error: '無效的消息格式' } });
+        const response = isTrustedOptionsSender(port)
+          ? profileFailure('invalid', 'profile-input')
+          : profileFailure('forbidden', 'options-profile-access');
+        port.postMessage({ messageId: request.messageId, response });
         return;
       }
-      // 處理來自 options 頁面的消息，直接路由到模組
+      const { messageId, message, type } = request;
+      if (isBackendProfileCommand(type)) {
+        void handleBackendProfilePortRequest(messageId, message, port);
+        return;
+      }
       routeMessageToModulePort(messageId, message, port);
     });
 
@@ -244,10 +343,22 @@ chrome.runtime.onConnect.addListener((port) => {
  * 監聽來自 popup 或選項頁面的消息 (content script 消息現在通過 port 處理)
  */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  const requestType = (() => {
+    try {
+      return typeof request?.type === 'string' ? request.type : null;
+    } catch {
+      return null;
+    }
+  })();
   // 在 onMessage 中打印當前實例 ID
-  console.log(`[Background] Message [${request.type}] received by SW Instance ID: ${serviceWorkerInstanceId}`, request, 'from:', sender.tab ? `Tab ${sender.tab.id}` : 'Popup/Options/Other');
+  console.log(`[Background] Message [${requestType}] received by SW Instance ID: ${serviceWorkerInstanceId}`, 'from:', sender.tab ? `Tab ${sender.tab.id}` : 'Popup/Options/Other');
 
-  if (request?.type === 'GET_CROWDSOURCING_TASKS') {
+  if (isBackendProfileCommand(requestType)) {
+    sendResponse(profileFailure('forbidden', 'options-profile-access'));
+    return false;
+  }
+
+  if (requestType === 'GET_CROWDSOURCING_TASKS') {
     return handleRuntimeCrowdsourcingTasks(request, sender, sendResponse);
   }
 
@@ -260,7 +371,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false; // 同步回應
   }
 
-  if (!request || !request.type) {
+  if (!request || !requestType) {
     console.error('[Background] Invalid message format:', request); // 錯誤訊息總是顯示
     sendResponse({ success: false, error: '無效的消息格式' });
     return false; // 同步回應
@@ -351,24 +462,28 @@ function handlePopupMessage(request, sender, sendResponse) {
  * @param {function} sendResponse - 回應函數
  */
 async function handlePopupApiRequest(request, sendResponse) {
-    const { api, params } = request;
-    console.log(`[Background] Handling POPUP_API_REQUEST for API: ${api} with params:`, params);
+    const { api } = request;
+    console.log(`[Background] Handling POPUP_API_REQUEST for API: ${api}`);
 
     try {
+        const profile = await resolveBackendProfile(chrome.storage.local);
         let result;
         switch (api) {
             case 'registerUser':
-                result = await apiModule.registerUser(params.userId);
+                result = await apiModule.registerUser(profile.userId, profile.id);
+                if (!result?.token) throw new Error('User registration returned no token');
+                await setBackendProfileCredentials(chrome.storage.local, profile.id, { jwt: result.token });
+                result = { registered: true };
                 break;
             case 'fetchUserStats':
-                result = await apiModule.fetchUserStats(params.userId);
+                result = await apiModule.fetchUserStats(profile.userId, true, profile.id);
                 break;
             default:
                 throw new Error(`Unknown API request: ${api}`);
         }
         sendResponse({ success: true, data: result });
     } catch (error) {
-        console.error(`[Background] Error handling POPUP_API_REQUEST for ${api}:`, error);
+        console.error(`[Background] Error handling POPUP_API_REQUEST for ${api}`);
         sendResponse({ success: false, error: error.message });
     }
 }
