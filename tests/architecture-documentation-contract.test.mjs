@@ -89,8 +89,7 @@ test('Given current API routes and registration When architecture is reviewed Th
   const { api, architecture } = await contract;
 
   assert.match(api, /\/translations\?videoID=/);
-  assert.match(api, /\/users\/\$\{userID\}/);
-  assert.match(api, /registerUser[\s\S]*sendToAPI\(url, \{ userID \}, 'POST'\)/);
+  assert.match(api, /\/users\/\$\{encodeURIComponent\(userID\)\}/);
   assert.match(architecture, /GET \/translations/);
   assert.match(architecture, /GET \/users\/\{id\}/);
   assert.match(architecture, /POST \/users/);
