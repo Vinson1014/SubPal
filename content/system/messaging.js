@@ -16,7 +16,6 @@ let messagingInitializationPromise = null;
 
 // 根據訊息類型定義不同的超時時間
 const messageTimeouts = {
-  'CHECK_SUBTITLE': 30000, // 30秒，API相關操作
   'SUBMIT_TRANSLATION': 20000, // 20秒，API相關操作
   'PROCESS_VOTE': 15000, // 15秒，API相關操作
   'DEFAULT': 10000 // 默認10秒

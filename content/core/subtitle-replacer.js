@@ -9,8 +9,10 @@
  * 5. 支援測試模式和調試功能
  */
 
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
+import { registerInternalEventHandler } from '../system/messaging.js';
+import { createPageSubtitles } from '../system/capabilities/subtitles.js';
 import { buildSlotKey } from '../utils/slot-key.js';
+import { playbackContextManager } from './playback-context-manager.js';
 
 const LOCAL_REPLACEMENT_STATUSES = new Set([
   'pending',
@@ -22,6 +24,10 @@ const AUTHORITY_ATTEMPT_DELAYS_MS = [0, 5_000, 15_000];
 
 class SubtitleReplacer {
   constructor() {
+    this.subtitles = createPageSubtitles({
+      window,
+      getCurrentContext: () => playbackContextManager.getCurrentContext()
+    });
     this.isInitialized = false;
     this.isEnabled = true;
     this.currentVideoId = null;
@@ -555,41 +561,32 @@ class SubtitleReplacer {
       ? options.requestStartedAt
       : Date.now();
     
-    try {
-      const sendPromise = sendMessage({
-        type: 'CHECK_SUBTITLE',
-        videoId: videoId,
-        timestamp: startTimestamp
+    const currentContext = playbackContextManager.getCurrentContext();
+    const controller = Number.isFinite(options.timeout) ? new AbortController() : null;
+    const timeoutId = controller
+      ? setTimeout(() => controller.abort(), Math.max(0, options.timeout))
+      : null;
+    const result = await this.subtitles.query({
+      videoId,
+      timestamp: startTimestamp,
+      duration: this.FETCH_DURATION_SECONDS,
+      context: currentContext ? {
+        videoId: currentContext.videoId,
+        sessionId: currentContext.sessionId,
+        epoch: currentContext.epoch
+      } : null
+    }, controller?.signal);
+    if (timeoutId !== null) clearTimeout(timeoutId);
+
+    if (result.ok) {
+      await this.processSubtitleBatch(result.value.subtitles, {
+        requestStartedAt,
+        reconciliationItemId: options.reconciliationItemId || null
       });
-      
-      // 如果指定了超時，使用 Promise.race
-      const response = options.timeout
-        ? await Promise.race([
-            sendPromise,
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('timeout')), options.timeout)
-            )
-          ])
-        : await sendPromise;
-      
-      if (response && response.success && Array.isArray(response.subtitles)) {
-        await this.processSubtitleBatch(response.subtitles, {
-          requestStartedAt,
-          reconciliationItemId: options.reconciliationItemId || null
-        });
-        this.markIntervalComplete(start);
-        this.log(`成功處理 ${response.subtitles.length} 條字幕`);
-      } else {
-        console.warn('獲取字幕批次失敗或格式錯誤:', response);
-        this.markIntervalFailed(start);
-      }
-      
-    } catch (error) {
-      if (error.message === 'timeout') {
-        console.warn(`獲取字幕批次超時 (${options.timeout}ms)，使用原始字幕`);
-      } else {
-        console.error('獲取字幕批次時出錯:', error);
-      }
+      this.markIntervalComplete(start);
+      this.log(`成功處理 ${result.value.subtitles.length} 條字幕`);
+    } else {
+      console.warn('獲取字幕批次失敗，使用原始字幕:', result.error);
       this.markIntervalFailed(start);
     }
   }
