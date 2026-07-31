@@ -147,6 +147,44 @@ async function loadMessagingTimeoutHarness({ pageResponse } = {}) {
   };
 }
 
+async function loadMessagingRequestCaptureHarness() {
+  const source = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
+  const listeners = new Map();
+  const requests = [];
+  const timers = new Map();
+  let nextTimerId = 0;
+  const window = {
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(listener);
+    },
+    removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
+    dispatchEvent(event) {
+      if (event.type === 'messageToContentScript') requests.push(event.detail);
+      for (const listener of [...(listeners.get(event.type) ?? [])]) listener(event);
+      return true;
+    }
+  };
+  class CustomEvent {
+    constructor(type, options = {}) { this.type = type; this.detail = options.detail; }
+  }
+  const setTimeout = (callback, delay) => { const id = ++nextTimerId; timers.set(id, { callback, delay }); return id; };
+  const clearTimeout = (id) => timers.delete(id);
+  const context = vm.createContext({ console, window, CustomEvent, setTimeout, clearTimeout });
+  const module = new vm.SourceTextModule(source, { context, identifier: 'content/system/messaging.js' });
+  const transports = await loadPrivateTransportModule(context);
+  await module.link((specifier) => {
+    assert.equal(specifier, './capabilities/private-transports.js');
+    return transports;
+  });
+  await module.evaluate();
+  return {
+    messaging: module.namespace,
+    requests,
+    run(delay) { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.callback(); } }
+  };
+}
+
 test('Given an internal event handler When it is registered Then a disposer is returned and removes only that handler', async () => {
   const messaging = await loadMessagingModule();
   const events = [];
@@ -275,4 +313,23 @@ test('Given legacy DOM and page callers When private transports terminate Then t
   const partialResult = await partialPage.messaging.sendMessageToPageScript({ type: 'PING' });
   assert.equal(partialResult.status, partial.status);
   assert.equal(partialResult.reason, partial.reason);
+});
+
+test('Given current messaging and no DOM response When important messages are sent Then each send dispatches once and times out without replay', async () => {
+  const { messaging, requests, run } = await loadMessagingRequestCaptureHarness();
+
+  const first = messaging.sendMessage({ type: 'SUBMIT_TRANSLATION', text: 'first' });
+  const second = messaging.sendMessage({ type: 'PROCESS_VOTE', text: 'second' });
+
+  assert.equal(requests.length, 2);
+  assert.notEqual(requests[0].messageId, requests[1].messageId);
+  assert.equal(requests[0].message.type, 'SUBMIT_TRANSLATION');
+  assert.equal(requests[1].message.type, 'PROCESS_VOTE');
+
+  run(20000);
+  run(15000);
+
+  await assert.rejects(first, (error) => error?.kind === 'timeout' && error.code === 'dom-response-timeout' && error.retryable === true && error.message === 'dom-response-timeout');
+  await assert.rejects(second, (error) => error?.kind === 'timeout' && error.code === 'dom-response-timeout' && error.retryable === true && error.message === 'dom-response-timeout');
+  assert.equal(requests.length, 2);
 });

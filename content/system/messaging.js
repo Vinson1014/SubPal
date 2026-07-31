@@ -61,50 +61,6 @@ function unwrapLegacyResult(result, rejectRawError = true) {
   return result.value;
 }
 
-// 添加連接狀態檢查函數
-let isConnected = true; // 假設初始連接是正常的
-// let reconnectingPromise = null; // 用於處理重連中的 Promise (暫時不需要)
-
-// 添加訊息隊列，處理連接斷開時的請求
-const messageQueue = [];
-const MAX_QUEUE_SIZE = 50; // 最大隊列大小
-
-/**
- * 處理隊列中的消息
- */
-function processMessageQueue() {
-  if (!isConnected || messageQueue.length === 0) return;
-
-  debugLog(`處理隊列中消息，數量: ${messageQueue.length}`);
-
-  // 處理隊列中的消息
-  // 使用 for...of 循環並在循環內部檢查 isConnected 狀態
-  const queueCopy = [...messageQueue]; // 複製隊列，避免在循環中修改
-  messageQueue.length = 0; // 清空原隊列
-
-  for (const { message, resolve, reject, timestamp } of queueCopy) {
-    if (!isConnected) {
-      // 如果在處理過程中連接斷開，將剩餘消息放回隊列頭部
-      messageQueue.unshift({ message, resolve, reject, timestamp });
-      debugLog(`連接斷開，剩餘 ${messageQueue.length} 個消息放回隊列`);
-      break;
-    }
-
-    // 檢查消息是否過期 (例如 1 分鐘)
-    if (Date.now() - timestamp > 60000) {
-      debugLog(`隊列中消息過期: ${message.type}, ${message.messageId}`);
-      reject(new Error('Queued message expired'));
-      continue;
-    }
-
-    // 重新發送消息
-    debugLog(`重新發送隊列中消息: ${message.type}, ${message.messageId}`);
-    // 這裡需要確保 sendMessage 能夠處理隊列中的 Promise
-    // sendMessage 返回 Promise，直接鏈接 resolve/reject
-    sendMessage(message).then(resolve).catch(reject);
-  }
-}
-
 /**
  * 僅在 debugMode 開啟時輸出日誌
  */
@@ -148,7 +104,7 @@ async function initializeMessaging() {
 
   // 監聽來自 content.js 的消息事件 (用於接收 background 的回應或 content.js 的內部消息)
   window.addEventListener('messageFromContentScript', (event) => {
-    const { message, messageId, sender } = event.detail;
+    const { message, sender } = event.detail;
     debugLog('收到來自 content.js 的消息', message, sender);
 
     // 處理內部事件消息
@@ -189,16 +145,6 @@ async function initializeMessaging() {
 
   // debugMode 將通過 initMessaging() 初始化
 
-
-  // 請求初始連接狀態 (如果 content.js 提供了這個功能)
-  // sendMessage({ type: 'GET_CONNECTION_STATUS' }).then(res => {
-  //   if (res?.success && typeof res.connected === 'boolean') {
-  //     isConnected = res.connected;
-  //     debugLog('Initial connection status:', isConnected);
-  //   } else {
-  //      console.warn('Failed to get initial connection status:', res?.error);
-  //   }
-  // }).catch(err => console.warn('Failed to get initial connection status (catch):', err));
 
 
   debugLog('Messaging module initialized and listening for events.');
@@ -286,27 +232,6 @@ export function registerAutoForwardingToInternalEvent(messageType) {
  * @returns {Promise<any>}
  */
 export function sendMessage(message) {
-  // 檢查連接狀態，如果斷開且不是重要消息，則直接拒絕
-  const isImportantMessage = ['SUBMIT_TRANSLATION', 'PROCESS_VOTE'].includes(message.type);
-  if (!isConnected && !isImportantMessage) {
-     debugLog(`發送消息失敗: ${message.type}, 連接已斷開`);
-     return Promise.reject(new Error('Background connection is not available'));
-  }
-
-  // 如果連接斷開且是重要消息，則加入隊列
-  if (!isConnected && isImportantMessage) {
-     if (messageQueue.length < MAX_QUEUE_SIZE) {
-        debugLog(`連接斷開，將消息加入隊列: ${message.type}`);
-        return new Promise((resolve, reject) => {
-           messageQueue.push({ message, resolve, reject, timestamp: Date.now() });
-        });
-     } else {
-        debugLog(`消息隊列已滿，發送消息失敗: ${message.type}`);
-        return Promise.reject(new Error('Message queue is full'));
-     }
-  }
-
-
   const messageId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
   const timeoutMs = getTimeoutForMessageType(message.type);
   return getDomTransport().request(createEnvelope({
