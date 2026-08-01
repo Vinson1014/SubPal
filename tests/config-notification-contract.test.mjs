@@ -43,6 +43,8 @@ class ObservableStorage {
     this.roots = {};
     this.listeners = new Set();
     this.failNextWrite = false;
+    this.deferEvents = false;
+    this.pendingChanges = [];
   }
 
   async initialize() {}
@@ -77,7 +79,13 @@ class ObservableStorage {
       }
     }
 
-    if (Object.keys(changes).length > 0) this.emit(changes);
+    if (Object.keys(changes).length > 0) {
+      if (this.deferEvents) {
+        this.pendingChanges.push(changes);
+      } else {
+        this.emit(changes);
+      }
+    }
   }
 
   watch(callback) {
@@ -87,6 +95,16 @@ class ObservableStorage {
 
   emit(changes) {
     for (const listener of this.listeners) listener(changes);
+  }
+
+  setDeferredEventDelivery(deferEvents) {
+    this.deferEvents = deferEvents;
+  }
+
+  flushDeferredEvents() {
+    const pendingChanges = this.pendingChanges;
+    this.pendingChanges = [];
+    for (const changes of pendingChanges) this.emit(changes);
   }
 
   getStats() {
@@ -182,38 +200,73 @@ async function createConfigHarness() {
   return { bridge, manager, storage };
 }
 
-test('Given ConfigBridge local writes When values change or stay equal Then each successful key reaches MAIN once', async () => {
-  const { bridge } = await createConfigHarness();
+test('Given a deferred storage event When ConfigBridge sets a changed value Then subscribers stay quiet until it arrives once', async () => {
+  const { bridge, storage } = await createConfigHarness();
   const values = [];
+  const storageEvents = [];
   bridge.subscribe('debugMode', (value) => values.push(value));
+  storage.watch((changes) => storageEvents.push(changes));
 
-  await bridge.set('debugMode', true);
+  storage.setDeferredEventDelivery(true);
   await bridge.set('debugMode', true);
 
-  assert.deepEqual(values, [true, true]);
+  assert.deepEqual(values, []);
+  assert.deepEqual(storageEvents, []);
+
+  storage.flushDeferredEvents();
+
+  assert.deepEqual(values, [true]);
+  assert.equal(storageEvents.length, 1);
   assert.equal(bridge.get('debugMode'), true);
 });
 
-test('Given ConfigBridge batch writes When keys change or stay equal Then each successful key reaches MAIN once', async () => {
-  const { bridge } = await createConfigHarness();
+test('Given a same-value ConfigBridge write When storage emits no event Then it notifies once', async () => {
+  const { bridge, storage } = await createConfigHarness();
+  await bridge.set('debugMode', false);
+
+  const values = [];
+  const storageEvents = [];
+  bridge.subscribe('debugMode', (value) => values.push(value));
+  storage.watch((changes) => storageEvents.push(changes));
+
+  await bridge.set('debugMode', false);
+
+  assert.deepEqual(storageEvents, []);
+  assert.deepEqual(values, [false]);
+  assert.equal(bridge.get('debugMode'), false);
+});
+
+test('Given a deferred mixed ConfigBridge batch When one value changes and one stays equal Then each key notifies once', async () => {
+  const { bridge, storage } = await createConfigHarness();
+  await bridge.setMultiple({
+    'subtitle.primaryLanguage': 'ja',
+    'subtitle.secondaryLanguage': 'en'
+  });
+
   const primaryValues = [];
   const secondaryValues = [];
+  const storageEvents = [];
   bridge.subscribe('subtitle.primaryLanguage', (value) => primaryValues.push(value));
   bridge.subscribe('subtitle.secondaryLanguage', (value) => secondaryValues.push(value));
+  storage.watch((changes) => storageEvents.push(changes));
 
+  storage.setDeferredEventDelivery(true);
   await bridge.setMultiple({
-    'subtitle.primaryLanguage': 'ja',
-    'subtitle.secondaryLanguage': 'ko'
-  });
-  await bridge.setMultiple({
-    'subtitle.primaryLanguage': 'ja',
-    'subtitle.secondaryLanguage': 'ko'
+    'subtitle.primaryLanguage': 'ko',
+    'subtitle.secondaryLanguage': 'en'
   });
 
-  assert.deepEqual(primaryValues, ['ja', 'ja']);
-  assert.deepEqual(secondaryValues, ['ko', 'ko']);
-  assert.equal(bridge.get('subtitle.primaryLanguage'), 'ja');
-  assert.equal(bridge.get('subtitle.secondaryLanguage'), 'ko');
+  assert.deepEqual(primaryValues, []);
+  assert.deepEqual(secondaryValues, ['en']);
+  assert.deepEqual(storageEvents, []);
+
+  storage.flushDeferredEvents();
+
+  assert.equal(storageEvents.length, 1);
+  assert.deepEqual(primaryValues, ['ko']);
+  assert.deepEqual(secondaryValues, ['en']);
+  assert.equal(bridge.get('subtitle.primaryLanguage'), 'ko');
+  assert.equal(bridge.get('subtitle.secondaryLanguage'), 'en');
 });
 
 test('Given a storage root event When siblings change Then values and old values come from the event and unaffected siblings stay quiet', async () => {
@@ -282,6 +335,30 @@ test('Given validation or storage failures When ConfigManager rejects Then it pu
 
   assert.deepEqual(values, []);
   assert.equal(manager.get('subtitle.primaryLanguage'), 'zh-Hant');
+});
+
+test('Given a rejected mixed ConfigManager batch When optimistic cache entries roll back Then every prior value remains and subscribers stay quiet', async () => {
+  const { manager, storage } = await createConfigHarness();
+  await manager.setMultiple({
+    debugMode: true,
+    'subtitle.primaryLanguage': 'ja'
+  });
+
+  const values = [];
+  manager.subscribe(['debugMode', 'subtitle.primaryLanguage'], (key, value) => values.push([key, value]));
+  storage.failNextWrite = true;
+
+  await assert.rejects(
+    manager.setMultiple({
+      debugMode: false,
+      'subtitle.primaryLanguage': 'ja'
+    }),
+    /storage write failed/
+  );
+
+  assert.deepEqual(values, []);
+  assert.equal(manager.get('debugMode'), true);
+  assert.equal(manager.get('subtitle.primaryLanguage'), 'ja');
 });
 
 test('Given a throwing ConfigManager subscriber When another subscriber observes a change Then the observer still receives it', async () => {
