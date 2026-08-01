@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 
 const rootUrl = new URL('../', import.meta.url);
+const settingsModules = new WeakMap();
 
 function plain(value) { return value === undefined ? undefined : JSON.parse(JSON.stringify(value)); }
 
@@ -40,6 +41,32 @@ async function createPrivateTransportModule(context, { onRequest = () => {} } = 
   return module;
 }
 
+async function loadSettingsModule(context) {
+  if (!settingsModules.has(context)) {
+    settingsModules.set(context, (async () => {
+      const [resultSource, schemaSource, settingsSource] = await Promise.all([
+        sourceOrNull('content/system/capabilities/result.js'),
+        sourceOrNull('content/system/config/config-schema.js'),
+        sourceOrNull('content/system/capabilities/settings.js')
+      ]);
+      if (!resultSource || !schemaSource || !settingsSource) return null;
+      const result = new vm.SourceTextModule(resultSource, { context, identifier: 'content/system/capabilities/result.js' });
+      const schema = new vm.SourceTextModule(schemaSource, { context, identifier: 'content/system/config/config-schema.js' });
+      const settings = new vm.SourceTextModule(settingsSource, { context, identifier: 'content/system/capabilities/settings.js' });
+      await result.link(() => { throw new Error('result.js must not import dependencies'); });
+      await schema.link(() => { throw new Error('config-schema.js must not import dependencies'); });
+      await settings.link((specifier) => {
+        if (specifier === './result.js') return result;
+        if (specifier === '../config/config-schema.js') return schema;
+        throw new Error(`Unexpected settings dependency: ${specifier}`);
+      });
+      await result.evaluate(); await schema.evaluate(); await settings.evaluate();
+      return settings;
+    })());
+  }
+  return settingsModules.get(context);
+}
+
 async function loadPageIngressModule(context = vm.createContext({ structuredClone: globalThis.structuredClone })) {
   const [resultSource, subtitlesSource, ingressSource] = await Promise.all([
     sourceOrNull('content/system/capabilities/result.js'),
@@ -50,7 +77,14 @@ async function loadPageIngressModule(context = vm.createContext({ structuredClon
   const result = new vm.SourceTextModule(resultSource, { context, identifier: 'content/system/capabilities/result.js' });
   const privateTransports = await createPrivateTransportModule(context);
   const subtitles = new vm.SourceTextModule(subtitlesSource, { context, identifier: 'content/system/capabilities/subtitles.js' });
-  const ingress = new vm.SourceTextModule(ingressSource, { context, identifier: 'content/system/capabilities/page-ingress.js' });
+  const ingress = new vm.SourceTextModule(ingressSource, {
+    context,
+    identifier: 'content/system/capabilities/page-ingress.js',
+    importModuleDynamically(specifier) {
+      if (specifier === './settings.js') return loadSettingsModule(context);
+      throw new Error(`Unexpected PageIngress dynamic dependency: ${specifier}`);
+    }
+  });
   await result.link(() => { throw new Error('result.js must not import dependencies'); });
   await subtitles.link((specifier) => {
     if (specifier === './result.js') return result;
@@ -95,6 +129,8 @@ async function createContentHarness({ backendProfiles = {} } = {}) {
   const configCalls = [];
   let storageReads = 0;
   let portRequests = 0;
+  let runtimeConnects = 0;
+  let settingsImports = 0;
   const window = {
     location: { pathname: '/watch/81234567' },
     addEventListener(type, listener) {
@@ -139,6 +175,7 @@ async function createContentHarness({ backendProfiles = {} } = {}) {
     chrome: {
       runtime: {
         connect() {
+          runtimeConnects += 1;
           return { postMessage(message) { portMessages.push(message); }, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } };
         },
         getURL(path) { return `chrome-extension://test/${path}`; }
@@ -198,13 +235,19 @@ async function createContentHarness({ backendProfiles = {} } = {}) {
         return ingress;
       }
       if (specifier.endsWith('capabilities/contributions.js')) return loadContributionsModule(context);
+      if (specifier.endsWith('capabilities/settings.js')) {
+        settingsImports += 1;
+        const settings = await loadSettingsModule(context);
+        if (!settings) throw new Error('Settings capability is missing');
+        return settings;
+      }
       if (specifier.endsWith('capabilities/private-transports.js')) return privateTransports;
       throw new Error(`Unexpected import: ${specifier}`);
     }
   });
   script.runInContext(context);
   await settle();
-  const baseline = () => ({ storageReads, portMessages: portMessages.length, portRequests, configCalls: configCalls.length, errors: errors.length });
+  const baseline = () => ({ storageReads, portMessages: portMessages.length, portRequests, runtimeConnects, settingsImports, configCalls: configCalls.length, errors: errors.length });
   return {
     baseline,
     bridgeEvents,
@@ -233,6 +276,22 @@ async function createContentHarness({ backendProfiles = {} } = {}) {
 
 function acceptedInput(payload = { oldVideoId: 81234567, newVideoId: 87654321 }) {
   return { category: 'page-observation', variant: 'video-context-changed', payload };
+}
+
+function subtitleLanguages(primaryLanguage = 'en', secondaryLanguage = 'zh-Hant') {
+  return {
+    category: 'settings-change',
+    variant: 'subtitle-languages',
+    payload: { primaryLanguage, secondaryLanguage }
+  };
+}
+
+function dualSubtitles(enabled = true) {
+  return {
+    category: 'settings-change',
+    variant: 'dual-subtitles',
+    payload: { enabled }
+  };
 }
 
 test('Given an allowlisted page observation When accepted Then PageIngress dispatches one normalized internal event and returns accepted', async () => {
@@ -435,6 +494,31 @@ test('Given profile, authentication, endpoint, sync, or lifecycle authority in a
   assert.equal(queries, 0);
 });
 
+test('Given Settings proxies with self-returning prototype traps When PageIngress accepts them Then authoritative parsing terminates without Settings side effects', async () => {
+  const ingress = await loadPageIngress();
+  assert.ok(ingress, 'PageIngress capability is missing');
+  let prototypeReads = 0;
+  let selfProxy;
+  selfProxy = new Proxy(dualSubtitles(), {
+    getPrototypeOf() {
+      prototypeReads += 1;
+      return selfProxy;
+    }
+  });
+  let changes = 0;
+
+  const result = await ingress.PageIngress.accept(selfProxy, {
+    settings: { change() { changes += 1; return { ok: true, value: {} }; } }
+  });
+
+  assert.deepEqual(plain(result), {
+    ok: false,
+    error: { kind: 'invalid', code: 'settings-change', retryable: false }
+  });
+  assert.ok(prototypeReads > 0 && prototypeReads <= 2);
+  assert.equal(changes, 0);
+});
+
 test('Given an explicit backend-profile category When PageIngress receives it Then it returns the terminal profile-change denial without dispatching or querying', async () => {
   const ingress = await loadPageIngress();
   assert.ok(ingress, 'PageIngress capability is missing');
@@ -500,6 +584,115 @@ test('Given a non-coercible ID When PageIngress parses a page observation Then i
   assert.deepEqual(dispatched, []);
 });
 
+test('Given exact typed subtitle language and dual-subtitle requests When PageIngress accepts them Then it delegates each original envelope once and preserves Settings results exactly', async () => {
+  const ingress = await loadPageIngress();
+  assert.ok(ingress, 'PageIngress capability is missing');
+  const calls = [];
+  const expected = [
+    Object.freeze({ ok: true, value: Object.freeze({ variant: 'subtitle-languages', primaryLanguage: 'en', secondaryLanguage: 'zh-Hant' }) }),
+    Object.freeze({ ok: true, value: Object.freeze({ variant: 'dual-subtitles', enabled: true }) })
+  ];
+  const settings = {
+    change(input) {
+      calls.push(input);
+      return expected[calls.length - 1];
+    }
+  };
+  const inputs = [subtitleLanguages(), dualSubtitles()];
+
+  for (const [index, input] of inputs.entries()) {
+    const result = await ingress.PageIngress.accept(input, { settings });
+    assert.strictEqual(result, expected[index]);
+    assert.strictEqual(calls[index], input);
+  }
+  assert.equal(calls.length, 2);
+});
+
+test('Given missing, malformed, hostile, or authority-bearing settings requests When PageIngress accepts them Then it denies before Settings.change without dispatching or querying', async () => {
+  const ingress = await loadPageIngress();
+  assert.ok(ingress, 'PageIngress capability is missing');
+  const calls = [];
+  const dispatched = [];
+  let queries = 0;
+  const options = {
+    settings: { change(input) { calls.push(input); return { ok: true, value: { leaked: true } }; } },
+    dispatch(event) { dispatched.push(event); },
+    query() { queries += 1; return { ok: true, value: { subtitles: [] } }; }
+  };
+  const unavailable = await ingress.PageIngress.accept(dualSubtitles());
+  assert.deepEqual(plain(unavailable), {
+    ok: false,
+    error: { kind: 'disconnected', code: 'settings-unavailable', retryable: true }
+  });
+
+  const inherited = Object.assign(Object.create({ category: 'settings-change' }), {
+    variant: 'dual-subtitles', payload: { enabled: true }
+  });
+  let categoryAccessorReads = 0;
+  const categoryAccessor = dualSubtitles();
+  Object.defineProperty(categoryAccessor, 'category', {
+    enumerable: true,
+    get() { categoryAccessorReads += 1; return 'settings-change'; }
+  });
+  let payloadAccessorReads = 0;
+  const payloadAccessor = dualSubtitles();
+  Object.defineProperty(payloadAccessor, 'payload', {
+    enumerable: true,
+    get() { payloadAccessorReads += 1; return { enabled: true }; }
+  });
+  const symbolPayload = dualSubtitles();
+  symbolPayload.payload[Symbol('settings')] = 'ignored';
+  let benignProxyReads = 0;
+  const benignProxy = new Proxy(dualSubtitles(), {
+    get(target, key, receiver) {
+      if (key === 'category' || key === 'variant' || key === 'payload') benignProxyReads += 1;
+      return Reflect.get(target, key, receiver);
+    }
+  });
+  const opaqueProxy = new Proxy(dualSubtitles(), { ownKeys() { throw new Error('ownKeys trap'); } });
+  const revokedPayload = Proxy.revocable({ enabled: true }, {});
+  revokedPayload.revoke();
+  const inspectableAuthorityProxy = new Proxy({
+    ...dualSubtitles(), payload: new Proxy({ enabled: true, token: 'private-token' }, {})
+  }, {});
+  const forbidden = [
+    { ...dualSubtitles(), variant: 'subtitle-style' },
+    { ...dualSubtitles(), payload: { enabled: true, endpoint: 'https://private.example' } },
+    { ...dualSubtitles(), payload: { enabled: true, profile: { id: 'private' } } },
+    { ...dualSubtitles(), payload: { enabled: true, auth: 'private-token' } },
+    { ...dualSubtitles(), payload: { enabled: true, sync: true } },
+    { ...dualSubtitles(), payload: { enabled: true, lifecycle: 'restart' } },
+    { ...dualSubtitles(), payload: { enabled: true, debug: true } },
+    { ...dualSubtitles(), payload: { enabled: true, style: {} } },
+    { ...dualSubtitles(), payload: { enabled: true, video: '81234567' } },
+    { ...dualSubtitles(), payload: { enabled: true, playback: {} } },
+    { ...dualSubtitles(), payload: { enabled: true, storage: {} } },
+    new Proxy({ ...dualSubtitles(), destination: 'background' }, { has() { throw new Error('has trap'); } })
+  ];
+
+  for (const input of [inherited, categoryAccessor, payloadAccessor, symbolPayload, benignProxy, opaqueProxy, { ...dualSubtitles(), payload: revokedPayload.proxy }]) {
+    const result = await ingress.PageIngress.accept(input, options);
+    assert.equal(result.ok, false);
+    assert.equal(result.error.kind, 'invalid');
+  }
+  assert.equal(categoryAccessorReads, 0);
+  assert.equal(payloadAccessorReads, 0);
+  assert.equal(benignProxyReads, 0);
+  assert.deepEqual(plain(await ingress.PageIngress.accept(inspectableAuthorityProxy, options)), {
+    ok: false,
+    error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false }
+  });
+  for (const input of forbidden) {
+    assert.deepEqual(plain(await ingress.PageIngress.accept(input, options)), {
+      ok: false,
+      error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false }
+    });
+  }
+  assert.deepEqual(calls, []);
+  assert.deepEqual(dispatched, []);
+  assert.equal(queries, 0);
+});
+
 test('Given legacy and sealed page route envelopes When the content adapter accepts them Then it bridges each normalized internal event once and ACKs without waiting for business work', async () => {
   const harness = await createContentHarness();
   harness.listenForUnresolvedBusinessWork();
@@ -547,6 +740,92 @@ test('Given spoofed or legitimate video-info legacy envelopes When content recei
   assert.deepEqual(plain(harness.bridgeEvents), [{
     messageId: 'legitimate-video-info', message: { type: 'VIDEO_ID_CHANGED', oldVideoId: '81234567', newVideoId: '87654321' }
   }]);
+});
+
+test('Given typed settings changes from MAIN When the public content ingress accepts them Then one lazy Settings adapter reuses only ConfigManager.setMultiple and returns exact snapshots', async () => {
+  const harness = await createContentHarness();
+  const cases = [
+    {
+      id: 'subtitle-languages',
+      message: subtitleLanguages(),
+      response: { ok: true, value: { variant: 'subtitle-languages', primaryLanguage: 'en', secondaryLanguage: 'zh-Hant' } }
+    },
+    {
+      id: 'dual-subtitles',
+      message: dualSubtitles(),
+      response: { ok: true, value: { variant: 'dual-subtitles', enabled: true } }
+    }
+  ];
+  const before = { effects: harness.baseline(), events: harness.bridgeEvents.length, responses: harness.responses.length };
+
+  for (const [index, entry] of cases.entries()) {
+    const response = await harness.dispatchAndWait(entry.id, entry.message);
+    assert.deepEqual(plain(response), { messageId: entry.id, response: entry.response });
+    assert.equal(harness.bridgeEvents.length, before.events);
+    assert.equal(harness.responses.length, before.responses + index + 1);
+    assert.deepEqual(harness.baseline(), {
+      ...before.effects,
+      settingsImports: before.effects.settingsImports + 1,
+      configCalls: before.effects.configCalls + index + 1
+    });
+  }
+});
+
+test('Given invalid or forbidden typed settings requests from MAIN When the public content ingress receives them Then each returns one terminal response without settings, Port, runtime, or ConfigManager effects', async () => {
+  const harness = await createContentHarness();
+  const attempts = [
+    { id: 'unknown-settings-variant', message: { ...dualSubtitles(), variant: 'subtitle-style' }, kind: 'forbidden', code: 'page-ingress-variant' },
+    ...['endpoint', 'profile', 'auth', 'sync', 'lifecycle', 'debug', 'style', 'video', 'playback', 'storage'].map((key) => ({
+      id: `settings-${key}`,
+      message: { ...dualSubtitles(), payload: { enabled: true, [key]: { attempted: key } } },
+      kind: 'forbidden',
+      code: 'page-ingress-variant'
+    })),
+    { id: 'settings-generic-key', message: { ...dualSubtitles(), key: 'subtitle.primaryLanguage' }, kind: 'forbidden', code: 'page-ingress-variant' },
+    { id: 'settings-generic-items', message: { ...dualSubtitles(), items: { 'subtitle.primaryLanguage': 'en' } }, kind: 'forbidden', code: 'page-ingress-variant' },
+    { id: 'settings-symbol', message: (() => { const input = dualSubtitles(); input.payload[Symbol('settings')] = true; return input; })(), kind: 'invalid', code: 'settings-change' },
+    { id: 'settings-revoked-proxy', message: (() => { const input = Proxy.revocable(dualSubtitles(), {}); input.revoke(); return input.proxy; })(), kind: 'invalid', code: 'malformed-page-observation' }
+  ];
+
+  for (const attempt of attempts) {
+    const before = { effects: harness.baseline(), events: harness.bridgeEvents.length, responses: harness.responses.length };
+    const response = await harness.dispatchAndWait(attempt.id, attempt.message);
+    assert.deepEqual(plain(response), {
+      messageId: attempt.id,
+      response: { ok: false, error: { kind: attempt.kind, code: attempt.code, retryable: false } }
+    });
+    assert.equal(harness.bridgeEvents.length, before.events);
+    assert.equal(harness.responses.length, before.responses + 1);
+    assert.deepEqual(harness.baseline(), before.effects);
+  }
+});
+
+test('Given a transparent Settings Proxy whose category getter throws When content adapts it Then it emits one parser-controlled response without reading category or privileged effects', async () => {
+  const harness = await createContentHarness();
+  const target = dualSubtitles();
+  target.payload[Symbol('opaque')] = true;
+  let categoryGets = 0;
+  const message = new Proxy(target, {
+    get(targetValue, key, receiver) {
+      if (key === 'category') {
+        categoryGets += 1;
+        throw new Error('category getter must not run');
+      }
+      return Reflect.get(targetValue, key, receiver);
+    }
+  });
+  const before = { effects: harness.baseline(), events: harness.bridgeEvents.length, responses: harness.responses.length };
+
+  const response = await harness.dispatchAndWait('transparent-category-proxy', message);
+
+  assert.deepEqual(plain(response), {
+    messageId: 'transparent-category-proxy',
+    response: { ok: false, error: { kind: 'invalid', code: 'settings-change', retryable: false } }
+  });
+  assert.equal(categoryGets, 0);
+  assert.equal(harness.bridgeEvents.length, before.events);
+  assert.equal(harness.responses.length, before.responses + 1);
+  assert.deepEqual(harness.baseline(), before.effects);
 });
 
 test('Given malformed, unknown, or authority-bearing public page envelopes When content receives them Then it emits a failure ACK without storage, Port, runtime, or internal-event effects', async () => {

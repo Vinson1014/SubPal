@@ -11,13 +11,15 @@ const CONTRIBUTION_READ_CATEGORY = 'contribution-read';
 const CONTRIBUTION_ENQUEUE_VARIANTS = new Set(['enqueue-vote', 'enqueue-translation', 'enqueue-replacement-event']);
 const CONTRIBUTION_READ_VARIANTS = new Set(['vote-authority', 'translation-reconciliation']);
 const CONTRIBUTION_RETRY_VARIANT = 'retry-operation';
+const SETTINGS_CHANGE_CATEGORY = 'settings-change';
 const PAYLOAD_KEYS = new Set(['oldVideoId', 'newVideoId', 'videoId']);
 const ENVELOPE_KEYS = new Set(['category', 'variant', 'payload']);
 const AUTHORITY_KEYS = new Set([
   'destination', 'command', 'backgroundCommand', 'storage', 'storageKey',
   'endpoint', 'credential', 'credentials', 'sync', 'syncConfig', 'lifecycle', 'lifecycleConfig', 'config',
   'backendProfileId', 'backendProfiles', 'activeProfileId', 'profile',
-  'jwt', 'token', 'auth', 'user', 'userId'
+  'jwt', 'token', 'auth', 'authorization', 'user', 'userId',
+  'debug', 'style', 'video', 'playback'
 ]);
 
 function isRecord(value) {
@@ -31,6 +33,27 @@ function hasForbiddenAuthority(value) {
     }
   }
   return false;
+}
+
+function ownEnumerableDataProperty(value, key) {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value') || descriptor.enumerable !== true) return null;
+    return { value: descriptor.value };
+  } catch {
+    return null;
+  }
+}
+
+function parseSettingsIngress(input, parseSettingsChange) {
+  const parsed = parseSettingsChange(input);
+  if (!parsed.ok) {
+    return parsed.error.kind === 'forbidden'
+      ? fail('forbidden', 'page-ingress-variant', false)
+      : parsed;
+  }
+  if (parsed.value.uncloneable) return fail('invalid', 'settings-change', false);
+  return ok(input);
 }
 
 function normalizedVideoChange(payload) {
@@ -79,32 +102,40 @@ function parseRetryOperation(payload) {
 function parseIngress(input, options) {
   try {
     if (!isRecord(input)) return fail('invalid', 'malformed-page-observation', false);
-    if (input.category === BACKEND_PROFILE_CATEGORY) return fail('forbidden', 'page-profile-change', false);
-    if (options?.authorityEscalated === true || hasForbiddenAuthority(input)) {
+    const category = ownEnumerableDataProperty(input, 'category');
+    if (!category) return fail('invalid', 'malformed-page-observation', false);
+    if (category.value === BACKEND_PROFILE_CATEGORY) return fail('forbidden', 'page-profile-change', false);
+    if (options?.authorityEscalated === true) {
       return fail('forbidden', 'page-ingress-variant', false);
     }
-    if (typeof input.category !== 'string' || typeof input.variant !== 'string' || !isRecord(input.payload)) {
+    if (category.value === SETTINGS_CHANGE_CATEGORY) {
+      return ok(input);
+    }
+    if (hasForbiddenAuthority(input)) return fail('forbidden', 'page-ingress-variant', false);
+    const variant = ownEnumerableDataProperty(input, 'variant');
+    const payload = ownEnumerableDataProperty(input, 'payload');
+    if (typeof category.value !== 'string' || !variant || typeof variant.value !== 'string' || !payload || !isRecord(payload.value)) {
       return fail('invalid', 'malformed-page-observation', false);
     }
     if (Object.keys(input).some((key) => !ENVELOPE_KEYS.has(key))) {
       return fail('invalid', 'malformed-page-observation', false);
     }
-    if (hasForbiddenAuthority(input.payload)) return fail('forbidden', 'page-ingress-variant', false);
-    if (input.category === CONTRIBUTION_READ_CATEGORY && CONTRIBUTION_READ_VARIANTS.has(input.variant)) return ok(input);
-    if (input.category === CONTRIBUTION_INTENT_CATEGORY && input.variant === CONTRIBUTION_RETRY_VARIANT) {
-      return parseRetryOperation(input.payload);
+    if (hasForbiddenAuthority(payload.value)) return fail('forbidden', 'page-ingress-variant', false);
+    if (category.value === CONTRIBUTION_READ_CATEGORY && CONTRIBUTION_READ_VARIANTS.has(variant.value)) return ok(input);
+    if (category.value === CONTRIBUTION_INTENT_CATEGORY && variant.value === CONTRIBUTION_RETRY_VARIANT) {
+      return parseRetryOperation(payload.value);
     }
-    if (input.category === CONTRIBUTION_INTENT_CATEGORY && CONTRIBUTION_ENQUEUE_VARIANTS.has(input.variant)) return ok(input);
-    if (input.category === SUBTITLE_QUERY_CATEGORY && input.variant === REPLACEMENT_SUBTITLE_QUERY_VARIANT) {
-      return parseSubtitleQuery(input.payload);
+    if (category.value === CONTRIBUTION_INTENT_CATEGORY && CONTRIBUTION_ENQUEUE_VARIANTS.has(variant.value)) return ok(input);
+    if (category.value === SUBTITLE_QUERY_CATEGORY && variant.value === REPLACEMENT_SUBTITLE_QUERY_VARIANT) {
+      return parseSubtitleQuery(payload.value);
     }
-    if (input.category !== PAGE_OBSERVATION_CATEGORY || input.variant !== VIDEO_CONTEXT_CHANGED_VARIANT) {
+    if (category.value !== PAGE_OBSERVATION_CATEGORY || variant.value !== VIDEO_CONTEXT_CHANGED_VARIANT) {
       return fail('forbidden', 'page-ingress-variant', false);
     }
-    if (Object.keys(input.payload).some((key) => !PAYLOAD_KEYS.has(key))) {
+    if (Object.keys(payload.value).some((key) => !PAYLOAD_KEYS.has(key))) {
       return fail('invalid', 'malformed-page-observation', false);
     }
-    return normalizedVideoChange(input.payload);
+    return normalizedVideoChange(payload.value);
   } catch {
     return fail('invalid', 'malformed-page-observation', false);
   }
@@ -113,7 +144,8 @@ function parseIngress(input, options) {
 function accept(input, options = {}) {
   const parsed = parseIngress(input, options);
   if (!parsed.ok) return parsed;
-  if (input.category === CONTRIBUTION_READ_CATEGORY) {
+  const category = ownEnumerableDataProperty(input, 'category')?.value;
+  if (category === CONTRIBUTION_READ_CATEGORY) {
     if (typeof options.contributions?.getProjection !== 'function') {
       return fail('disconnected', 'contributions-unavailable', true);
     }
@@ -123,8 +155,8 @@ function accept(input, options = {}) {
       return fromThrown(error, 'contribution-read-failed');
     }
   }
-  if (input.category === CONTRIBUTION_INTENT_CATEGORY) {
-    if (input.variant === CONTRIBUTION_RETRY_VARIANT) {
+  if (category === CONTRIBUTION_INTENT_CATEGORY) {
+    if (ownEnumerableDataProperty(input, 'variant')?.value === CONTRIBUTION_RETRY_VARIANT) {
       if (typeof options.contributions?.retry !== 'function') return fail('disconnected', 'contributions-unavailable', true);
       try {
         return Promise.resolve(options.contributions.retry(parsed.value.operationId, options.cancellation));
@@ -141,13 +173,27 @@ function accept(input, options = {}) {
       return fromThrown(error, 'contribution-enqueue-failed');
     }
   }
-  if (input.category === SUBTITLE_QUERY_CATEGORY) {
+  if (category === SUBTITLE_QUERY_CATEGORY) {
     if (typeof options.query !== 'function') return fail('disconnected', 'background-port-disconnected', true);
     try {
       return options.query(parsed.value);
     } catch (error) {
       return fromThrown(error, 'subtitle-fetch-failed');
     }
+  }
+  if (category === SETTINGS_CHANGE_CATEGORY) {
+    return import('./settings.js').then(({ parseSettingsChange }) => {
+      const settings = parseSettingsIngress(input, parseSettingsChange);
+      if (!settings.ok) return settings;
+      if (typeof options.settings?.change !== 'function') {
+        return fail('disconnected', 'settings-unavailable', true);
+      }
+      try {
+        return options.settings.change(input);
+      } catch (error) {
+        return fromThrown(error, 'settings-change-failed');
+      }
+    });
   }
   try {
     options.dispatch?.(parsed.value);

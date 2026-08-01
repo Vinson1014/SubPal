@@ -27,6 +27,7 @@
   let pageIngressPromise = null;
   let contributionsCapabilityPromise = null;
   let subtitleQueryCapabilityPromise = null;
+  let settingsCapabilityPromise = null;
 
   const PAGE_SCRIPT_READY_EVENT = 'subpal-page-script-ready';
   const PAGE_SCRIPT_READY_REQUEST_EVENT = 'subpal-request-page-script-ready';
@@ -428,8 +429,9 @@
         return { terminal: { ok: false, error: { kind: 'forbidden', code: 'page-profile-change', retryable: false } } };
       }
       if (category?.value === 'page-observation' || category?.value === 'subtitle-query' ||
-          category?.value === 'contribution-intent' || category?.value === 'contribution-read') {
-        return { input: message, type: type.value, authorityEscalated };
+          category?.value === 'contribution-intent' || category?.value === 'contribution-read' ||
+          category?.value === 'settings-change') {
+        return { input: message, category: category.value, type: type.value, authorityEscalated };
       }
       if (type.value === 'CHECK_SUBTITLE') return { input: message, type: type.value, authorityEscalated: false };
       if (type.value !== 'VIDEO_ID_CHANGED') {
@@ -448,6 +450,7 @@
           variant: 'video-context-changed',
           payload
         },
+        category: 'page-observation',
         type: type.value,
         authorityEscalated
       };
@@ -462,6 +465,16 @@
         .then(({ PageIngress }) => PageIngress);
     }
     return pageIngressPromise;
+  }
+
+  function getSettingsCapability() {
+    if (!settingsCapabilityPromise) {
+      settingsCapabilityPromise = import(chrome.runtime.getURL('content/system/capabilities/settings.js'))
+        .then(({ createSettings }) => createSettings({
+          write: (items) => configManager.setMultiple(items)
+        }));
+    }
+    return settingsCapabilityPromise;
   }
 
   function getContributionsCapability() {
@@ -526,10 +539,15 @@
         dispatch: (message) => dispatchInternalMessage(messageId, message),
         query: (subtitleQuery) => getSubtitleQueryCapability().then((subtitles) => subtitles.query(subtitleQuery))
       };
-      if (observation.input.category === 'contribution-intent' || observation.input.category === 'contribution-read') {
+      if (observation.category === 'contribution-intent' || observation.category === 'contribution-read') {
         options.contributions = await getContributionsCapability();
       }
-      const result = await pageIngress.accept(observation.input, options);
+      let result = await pageIngress.accept(observation.input, options);
+      if (observation.category === 'settings-change' && !result.ok &&
+          result.error.code === 'settings-unavailable') {
+        options.settings = await getSettingsCapability();
+        result = await pageIngress.accept(observation.input, options);
+      }
       respondToPageObservation(messageId, result);
     });
   }
