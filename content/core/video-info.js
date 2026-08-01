@@ -253,9 +253,6 @@ class VideoInfoManager {
             this.currentVideoId = videoId;
             this.currentVideoTitle = videoTitle;
             
-            // 保存到存儲
-            await this.saveVideoInfo();
-            
             // 通知視頻變更
             if (oldVideoId !== null) {
                 try {
@@ -488,23 +485,6 @@ class VideoInfoManager {
         if (this.checkInterval) {
             clearInterval(this.checkInterval);
             this.checkInterval = null;
-        }
-    }
-
-    /**
-     * 保存視頻信息到存儲
-     */
-    async saveVideoInfo() {
-        try {
-            await this.configBridge.setMultiple({
-                'video.currentVideoId': this.currentVideoId,
-                'video.currentVideoTitle': this.currentVideoTitle,
-                'video.currentVideoLanguage': 'unknown'
-            });
-
-            this.log('視頻信息已保存到存儲');
-        } catch (error) {
-            console.error('保存視頻信息時出錯:', error);
         }
     }
 

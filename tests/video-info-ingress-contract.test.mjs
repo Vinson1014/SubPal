@@ -19,7 +19,8 @@ async function createModule(context, identifier, exports) {
 async function loadVideoInfoHarness() {
   const directEvents = [];
   const domEvents = [];
-  const window = { dispatchEvent(event) { domEvents.push(event.detail); return true; } };
+  const persistenceCalls = [];
+  const window = { dispatchEvent(event) { domEvents.push({ type: event.type, detail: event.detail }); return true; } };
   const context = vm.createContext({
     window,
     Date: class extends Date { static now() { return 1; } },
@@ -39,19 +40,39 @@ async function loadVideoInfoHarness() {
   manager.currentVideoId = '81234567';
   manager.extractVideoId = () => '87654321';
   manager.extractVideoTitle = async () => 'Episode B';
-  manager.saveVideoInfo = async () => {};
-  return { directEvents, domEvents, manager };
+  manager.configBridge = {
+    setMultiple(values) {
+      persistenceCalls.push(plain(values));
+    }
+  };
+  return { directEvents, domEvents, manager, persistenceCalls };
 }
 
-test('Given video-info observes a changed video When extraction completes Then it emits one DOM observation and no duplicate direct internal event', async () => {
+test('Given video-info observes a changed video When extraction completes Then it retains metadata in memory, emits one DOM observation, and persists nothing', async () => {
   const harness = await loadVideoInfoHarness();
 
   await harness.manager.extractVideoInfo();
 
   assert.deepEqual(harness.directEvents, []);
   assert.equal(harness.domEvents.length, 1);
-  const { type, oldVideoId, newVideoId } = plain(harness.domEvents[0].message);
-  assert.deepEqual({ type, oldVideoId, newVideoId }, {
-    type: 'VIDEO_ID_CHANGED', oldVideoId: '81234567', newVideoId: '87654321'
+  const event = plain(harness.domEvents[0]);
+  assert.equal(event.type, 'messageToContentScript');
+  assert.equal(typeof event.detail.messageId, 'string');
+  assert.ok(event.detail.messageId.startsWith('video-info-'));
+  assert.ok(event.detail.messageId.length > 'video-info-'.length);
+  const { type, oldVideoId, newVideoId, source } = event.detail.message;
+  assert.deepEqual({ type, oldVideoId, newVideoId, source }, {
+    type: 'VIDEO_ID_CHANGED',
+    oldVideoId: '81234567',
+    newVideoId: '87654321',
+    source: 'video-info-manager'
   });
+  assert.equal(harness.manager.getVideoId(), '87654321');
+  assert.equal(harness.manager.getVideoTitle(), 'Episode B');
+  assert.equal(harness.manager.getVideoLanguage(), 'unknown');
+
+  await harness.manager.extractVideoInfo();
+
+  assert.equal(harness.domEvents.length, 1);
+  assert.deepEqual(harness.persistenceCalls, []);
 });
