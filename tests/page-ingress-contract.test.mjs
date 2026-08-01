@@ -930,6 +930,36 @@ test('Given a retired generic contribution command When the isolated bridge rece
   }
 });
 
+test('Given a legacy generic config write When the isolated bridge receives benign or hostile payload forms Then it returns one terminal forbidden response without inspecting or forwarding the payload', async () => {
+  const harness = await createContentHarness();
+  let keyGets = 0;
+  let itemsGets = 0;
+  const revokedValue = Proxy.revocable({ attempted: 'revoked' }, {});
+  revokedValue.revoke();
+  const attempts = [
+    { id: 'legacy-set', message: { type: 'CONFIG_SET', key: 'debugMode', value: true } },
+    { id: 'legacy-set-multiple', message: { type: 'CONFIG_SET_MULTIPLE', items: { 'subtitle.primaryLanguage': 'ja' } } },
+    { id: 'legacy-inherited-key', message: Object.assign(Object.create({ key: 'debugMode' }), { type: 'CONFIG_SET', value: true }) },
+    { id: 'legacy-key-accessor', message: { type: 'CONFIG_SET', get key() { keyGets += 1; throw new Error('legacy key read'); } } },
+    { id: 'legacy-items-accessor', message: { type: 'CONFIG_SET_MULTIPLE', get items() { itemsGets += 1; throw new Error('legacy items read'); } } },
+    { id: 'legacy-inspectable-items', message: { type: 'CONFIG_SET_MULTIPLE', items: new Proxy({}, { has() { throw new Error('has trap'); }, ownKeys() { throw new Error('ownKeys trap'); } }) } },
+    { id: 'legacy-revoked-value', message: { type: 'CONFIG_SET', key: 'debugMode', value: revokedValue.proxy } }
+  ];
+  const forbidden = { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } };
+
+  for (const attempt of attempts) {
+    const before = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
+    const response = await harness.dispatchAndWait(attempt.id, attempt.message);
+    assert.deepEqual(plain(response), { messageId: attempt.id, response: forbidden });
+    assert.equal(harness.bridgeEvents.length, before.events);
+    assert.equal(harness.responses.length, before.responses + 1);
+    assert.deepEqual(harness.baseline(), before.effects);
+  }
+
+  assert.equal(keyGets, 0);
+  assert.equal(itemsGets, 0);
+});
+
 test('Given any content-local profile record When MAIN submits a contribution intent through PageIngress Then it reaches only the private durable queue command', async () => {
   const valid = { activeProfileId: 'profile-a', byId: { 'profile-a': { id: 'profile-a' } } };
   const intent = { category: 'contribution-intent', variant: 'enqueue-vote', payload: { videoId: 'netflix-81234567', timestamp: 12.5, voteType: 'upvote' } };
@@ -979,4 +1009,13 @@ test('Given MAIN CONFIG messages target identity fields When the isolated bridge
   assert.equal(harness.bridgeEvents.length, before.events);
   assert.equal(harness.responses.length, before.responses + 1);
   assert.deepEqual(harness.baseline(), { ...before.effects, configCalls: before.effects.configCalls + 1 });
+
+  const getBefore = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
+  const getResponse = await harness.dispatchAndWait('get-public-config', { type: 'CONFIG_GET', key: 'subtitle.primaryLanguage' });
+  assert.deepEqual(plain(getResponse), {
+    messageId: 'get-public-config', response: { success: true, value: 'zh-Hant' }
+  });
+  assert.equal(harness.bridgeEvents.length, getBefore.events);
+  assert.equal(harness.responses.length, getBefore.responses + 1);
+  assert.deepEqual(harness.baseline(), { ...getBefore.effects, configCalls: getBefore.effects.configCalls + 1 });
 });

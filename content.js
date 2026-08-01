@@ -50,6 +50,7 @@
     'GET_ALL_PENDING', 'GET_QUEUE_STATS',
     'RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS'
   ]);
+  const RETIRED_CONFIG_COMMANDS = new Set(['CONFIG_SET', 'CONFIG_SET_MULTIPLE']);
 
   // 初始化 ConfigManager
   async function initializeConfigManager() {
@@ -164,14 +165,6 @@
         handleConfigGet(messageId, message.key);
         break;
 
-      case 'CONFIG_SET':
-        handleConfigSet(messageId, message.key, message.value);
-        break;
-
-      case 'CONFIG_SET_MULTIPLE':
-        handleConfigSetMultiple(messageId, message.items);
-        break;
-
       default:
         debugLog('未知的配置訊息類型:', message.type);
         window.dispatchEvent(new CustomEvent('responseFromContentScript', {
@@ -228,62 +221,6 @@
       }));
     } catch (error) {
       debugLog('CONFIG_GET 失敗:', error);
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            success: false,
-            error: error.message
-          }
-        }
-      }));
-    }
-  }
-
-  // CONFIG_SET 處理
-  async function handleConfigSet(messageId, key, value) {
-    try {
-      await configManager.set(key, value);
-
-      // 回應成功
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            success: true
-          }
-        }
-      }));
-    } catch (error) {
-      debugLog('CONFIG_SET 失敗:', error);
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            success: false,
-            error: error.message
-          }
-        }
-      }));
-    }
-  }
-
-  // CONFIG_SET_MULTIPLE 處理
-  async function handleConfigSetMultiple(messageId, items) {
-    try {
-      await configManager.setMultiple(items);
-
-      // 回應成功
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            success: true
-          }
-        }
-      }));
-    } catch (error) {
-      debugLog('CONFIG_SET_MULTIPLE 失敗:', error);
       window.dispatchEvent(new CustomEvent('responseFromContentScript', {
         detail: {
           messageId: messageId,
@@ -387,11 +324,7 @@
       if (key === null || isIdentityConfigKey(key.value)) return terminalIngressFailure(key !== null);
       request.key = key.value;
       if (type.value === 'CONFIG_GET') return { request };
-      const value = dataProperty(message, type.value === 'CONFIG_SET' ? 'value' : 'items');
-      if (value === null || hasIdentityConfigField(value.value)) return terminalIngressFailure(value !== null);
-      if (type.value === 'CONFIG_SET') request.value = value.value;
-      if (type.value === 'CONFIG_SET_MULTIPLE') request.items = value.value;
-      return { request };
+      return terminalIngressFailure(false);
     } catch {
       return terminalIngressFailure(false);
     }
@@ -572,6 +505,11 @@
       return;
     }
 
+    if (RETIRED_CONFIG_COMMANDS.has(message.type)) {
+      respondToPageObservation(messageId, terminalIngressFailure(true).terminal);
+      return;
+    }
+
     if (pageIngressMessage) {
       if (pageIngressMessage.input) {
         acceptPageIngress(messageId, pageIngressMessage);
@@ -580,7 +518,7 @@
     }
 
     // 檢查是否為配置相關訊息（由 content script 處理，不轉發到 background）
-    const configMessages = ['CONFIG_GET_ALL', 'CONFIG_GET', 'CONFIG_SET', 'CONFIG_SET_MULTIPLE'];
+    const configMessages = ['CONFIG_GET_ALL', 'CONFIG_GET'];
 
     if (configMessages.includes(message.type)) {
       debugLog('處理配置訊息:', message.type);

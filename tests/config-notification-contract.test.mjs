@@ -8,6 +8,8 @@ const configManagerUrl = new URL('../content/system/config/config-manager.js', i
 const configBridgeUrl = new URL('../content/system/config/config-bridge.js', import.meta.url);
 const configSchemaUrl = new URL('../content/system/config/config-schema.js', import.meta.url);
 const messagingUrl = new URL('../content/system/messaging.js', import.meta.url);
+const settingsUrl = new URL('../content/system/capabilities/settings.js', import.meta.url);
+const subtitleInterceptorUrl = new URL('../content/subtitle-modes/subtitle-interceptor.js', import.meta.url);
 
 function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -115,7 +117,7 @@ class ObservableStorage {
 }
 
 async function loadConfigModules(transport) {
-  const context = vm.createContext({ console });
+  const context = vm.createContext({ console, setTimeout, clearTimeout, structuredClone });
   const moduleCache = new Map();
   const messagingModule = new vm.SyntheticModule(
     ['sendMessage', 'onMessage'],
@@ -144,38 +146,43 @@ async function loadConfigModules(transport) {
     return module;
   }
 
-  const [configManagerModule, configBridgeModule, configSchemaModule] = await Promise.all([
+  const [configManagerModule, configBridgeModule, configSchemaModule, settingsModule] = await Promise.all([
     loadModule(configManagerUrl),
     loadModule(configBridgeUrl),
-    loadModule(configSchemaUrl)
+    loadModule(configSchemaUrl),
+    loadModule(settingsUrl)
   ]);
   await Promise.all([
     configManagerModule.evaluate(),
     configBridgeModule.evaluate(),
-    configSchemaModule.evaluate()
+    configSchemaModule.evaluate(),
+    settingsModule.evaluate()
   ]);
 
   return {
     ConfigManager: configManagerModule.namespace.ConfigManager,
     ConfigBridge: configBridgeModule.namespace.ConfigBridge,
+    createSettings: settingsModule.namespace.createSettings,
     getAllConfigKeys: configSchemaModule.namespace.getAllConfigKeys
   };
 }
 
 async function createConfigHarness() {
   const messages = new Set();
+  const requests = [];
   let manager;
+  let settings;
   const transport = {
     async sendMessage(message) {
-      switch (message.type) {
+      requests.push(clone(message));
+      switch (message.type || message.category) {
         case 'CONFIG_GET_ALL':
           return { success: true, config: manager.getAll() };
-        case 'CONFIG_SET':
-          await manager.set(message.key, message.value);
-          return { success: true };
-        case 'CONFIG_SET_MULTIPLE':
-          await manager.setMultiple(message.items);
-          return { success: true };
+        case 'settings-change': {
+          const result = await settings.change(message);
+          if (!result.ok) throw Object.assign(new Error(result.error.code), result.error);
+          return result.value;
+        }
         default:
           return { success: false, error: `Unsupported message: ${message.type}` };
       }
@@ -185,10 +192,15 @@ async function createConfigHarness() {
       return () => messages.delete(callback);
     }
   };
-  const { ConfigManager, ConfigBridge, getAllConfigKeys } = await loadConfigModules(transport);
+  const { ConfigManager, ConfigBridge, createSettings, getAllConfigKeys } = await loadConfigModules(transport);
   const storage = new ObservableStorage();
   manager = new ConfigManager({ storage });
   await manager.initialize();
+  settings = createSettings({
+    write: (items) => manager.setMultiple(items),
+    setTimeout,
+    clearTimeout
+  });
   manager.subscribe(getAllConfigKeys(), (key, newValue, oldValue) => {
     for (const listener of messages) {
       listener({ type: 'CONFIG_CHANGED', key, newValue, oldValue });
@@ -197,51 +209,142 @@ async function createConfigHarness() {
 
   const bridge = new ConfigBridge();
   await bridge.initialize();
-  return { bridge, manager, storage };
+  return { bridge, manager, requests, storage };
 }
 
-test('Given a deferred storage event When ConfigBridge sets a changed value Then subscribers stay quiet until it arrives once', async () => {
-  const { bridge, storage } = await createConfigHarness();
+async function createSyntheticModule(context, identifier, exports) {
+  const module = new vm.SyntheticModule(Object.keys(exports), function initialize() {
+    for (const [name, value] of Object.entries(exports)) this.setExport(name, value);
+  }, { context, identifier });
+  await module.link(() => { throw new Error('Unexpected synthetic dependency'); });
+  await module.evaluate();
+  return module;
+}
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+async function createSubtitleInterceptorHarness({ languageWrite, dualWrite }) {
+  const sandbox = vm.createContext({
+    console: { log() {}, warn() {}, error() {} },
+    Date,
+    Promise,
+    clearTimeout,
+    document: { getElementById() { return null; }, querySelector() { return null; } },
+    setTimeout,
+    window: { addEventListener() {}, removeEventListener() {} }
+  });
+  const dependencies = new Map([
+    ['../utils/subtitle-parser.js', await createSyntheticModule(sandbox, 'subtitle-parser.js', {
+      buildTimeIndex() { return []; }, findSubtitleByTime() { return null; }, findSubtitleByTimeIndex() { return null; }, parseSubtitle() { return { subtitles: [], regionConfigs: {} }; }
+    })],
+    ['../system/messaging.js', await createSyntheticModule(sandbox, 'messaging.js', {
+      dispatchInternalEvent() {}, registerInternalEventHandler: () => () => {}, sendMessage: async () => ({}), sendMessageToPageScript: async () => ({})
+    })],
+    ['../core/video-info.js', await createSyntheticModule(sandbox, 'video-info.js', {
+      getCurrentTimestamp: () => 0, getVideoId: () => 'test-video'
+    })],
+    ['../core/playback-context-manager.js', await createSyntheticModule(sandbox, 'playback-context-manager.js', {
+      playbackContextManager: { getCurrentContext: () => null }
+    })],
+    ['../ui/netflix-player-adapter.js', await createSyntheticModule(sandbox, 'netflix-player-adapter.js', {
+      getPlayerAdapter: () => ({ calculatePosition: () => null }), setRegionConfigs() {}
+    })],
+    ['./dom-overlap-matcher.js', await createSyntheticModule(sandbox, 'dom-overlap-matcher.js', {
+      DOMOverlapMatcher: class DOMOverlapMatcher {}
+    })],
+    ['../system/capabilities/ttml-acquisition-ingress.js', await createSyntheticModule(sandbox, 'ttml-acquisition-ingress.js', {
+      bindTtmlAcquisitionCapture: () => () => {}, TtmlAcquisitionIngress: class TtmlAcquisitionIngress {}
+    })]
+  ]);
+  const source = await readFile(subtitleInterceptorUrl, 'utf8');
+  const module = new vm.SourceTextModule(source, {
+    context: sandbox,
+    identifier: subtitleInterceptorUrl.href
+  });
+  await module.link((specifier) => {
+    const dependency = dependencies.get(specifier);
+    if (!dependency) throw new Error(`Unexpected import: ${specifier}`);
+    return dependency;
+  });
+  await module.evaluate();
+
+  const bridgeCalls = [];
+  let reloads = 0;
+  const interceptor = new module.namespace.SubtitleInterceptor();
+  interceptor.isActive = true;
+  interceptor.isInitialized = true;
+  interceptor.configBridge = {
+    setDualSubtitleEnabled(enabled) {
+      bridgeCalls.push({ method: 'setDualSubtitleEnabled', args: [enabled] });
+      return dualWrite;
+    },
+    setSubtitleLanguages(primaryLanguage, secondaryLanguage) {
+      bridgeCalls.push({ method: 'setSubtitleLanguages', args: [primaryLanguage, secondaryLanguage] });
+      return languageWrite;
+    }
+  };
+  interceptor.loadInterceptedSubtitles = () => { reloads += 1; };
+
+  return { bridgeCalls, interceptor, reloadCount: () => reloads };
+}
+
+test('Given a deferred storage event When ConfigBridge changes dual subtitles Then it sends the exact typed envelope and subscribers stay quiet until it arrives once', async () => {
+  const { bridge, requests, storage } = await createConfigHarness();
   const values = [];
   const storageEvents = [];
-  bridge.subscribe('debugMode', (value) => values.push(value));
+  bridge.subscribe('subtitle.dualModeEnabled', (value) => values.push(value));
   storage.watch((changes) => storageEvents.push(changes));
 
   storage.setDeferredEventDelivery(true);
-  await bridge.set('debugMode', true);
+  const result = await bridge.setDualSubtitleEnabled(false);
 
+  assert.deepEqual(clone(result), { variant: 'dual-subtitles', enabled: false });
+  assert.deepEqual(requests.at(-1), {
+    category: 'settings-change', variant: 'dual-subtitles', payload: { enabled: false }
+  });
   assert.deepEqual(values, []);
   assert.deepEqual(storageEvents, []);
 
   storage.flushDeferredEvents();
 
-  assert.deepEqual(values, [true]);
+  assert.deepEqual(values, [false]);
   assert.equal(storageEvents.length, 1);
-  assert.equal(bridge.get('debugMode'), true);
+  assert.equal(bridge.get('subtitle.dualModeEnabled'), false);
 });
 
-test('Given a same-value ConfigBridge write When storage emits no event Then it notifies once', async () => {
-  const { bridge, storage } = await createConfigHarness();
-  await bridge.set('debugMode', false);
+test('Given a same-value typed language change When storage emits no event Then it notifies once', async () => {
+  const { bridge, requests, storage } = await createConfigHarness();
+  await bridge.setSubtitleLanguages('ja', 'en');
 
   const values = [];
   const storageEvents = [];
-  bridge.subscribe('debugMode', (value) => values.push(value));
+  bridge.subscribe('subtitle.primaryLanguage', (value) => values.push(value));
   storage.watch((changes) => storageEvents.push(changes));
 
-  await bridge.set('debugMode', false);
+  const result = await bridge.setSubtitleLanguages('ja', 'en');
 
+  assert.deepEqual(clone(result), { variant: 'subtitle-languages', primaryLanguage: 'ja', secondaryLanguage: 'en' });
+  assert.deepEqual(requests.at(-1), {
+    category: 'settings-change',
+    variant: 'subtitle-languages',
+    payload: { primaryLanguage: 'ja', secondaryLanguage: 'en' }
+  });
   assert.deepEqual(storageEvents, []);
-  assert.deepEqual(values, [false]);
-  assert.equal(bridge.get('debugMode'), false);
+  assert.deepEqual(values, ['ja']);
+  assert.equal(bridge.get('subtitle.primaryLanguage'), 'ja');
 });
 
-test('Given a deferred mixed ConfigBridge batch When one value changes and one stays equal Then each key notifies once', async () => {
+test('Given a deferred typed language change When one value changes and one stays equal Then each key notifies once', async () => {
   const { bridge, storage } = await createConfigHarness();
-  await bridge.setMultiple({
-    'subtitle.primaryLanguage': 'ja',
-    'subtitle.secondaryLanguage': 'en'
-  });
+  await bridge.setSubtitleLanguages('ja', 'en');
 
   const primaryValues = [];
   const secondaryValues = [];
@@ -251,10 +354,7 @@ test('Given a deferred mixed ConfigBridge batch When one value changes and one s
   storage.watch((changes) => storageEvents.push(changes));
 
   storage.setDeferredEventDelivery(true);
-  await bridge.setMultiple({
-    'subtitle.primaryLanguage': 'ko',
-    'subtitle.secondaryLanguage': 'en'
-  });
+  await bridge.setSubtitleLanguages('ko', 'en');
 
   assert.deepEqual(primaryValues, []);
   assert.deepEqual(secondaryValues, ['en']);
@@ -267,6 +367,98 @@ test('Given a deferred mixed ConfigBridge batch When one value changes and one s
   assert.deepEqual(secondaryValues, ['en']);
   assert.equal(bridge.get('subtitle.primaryLanguage'), 'ko');
   assert.equal(bridge.get('subtitle.secondaryLanguage'), 'en');
+});
+
+test('Given a rejected typed language change When Settings rejects the manager batch Then ConfigBridge propagates the normalized error without notifying or changing its cache', async () => {
+  const { bridge, storage } = await createConfigHarness();
+  const values = [];
+  bridge.subscribe('subtitle.primaryLanguage', (value) => values.push(value));
+  storage.failNextWrite = true;
+
+  await assert.rejects(
+    bridge.setSubtitleLanguages('ja', 'en'),
+    (error) => error.kind === 'domain-rejected' && error.code === 'settings-write-failed' && error.retryable === true
+  );
+
+  assert.deepEqual(values, []);
+  assert.equal(bridge.get('subtitle.primaryLanguage'), 'zh-Hant');
+});
+
+test('Given a rejecting typed language bridge write When SubtitleInterceptor sets languages Then both fields and reload state remain unchanged', async () => {
+  const error = new Error('language write failed');
+  const languageWrite = createDeferred();
+  const { bridgeCalls, interceptor, reloadCount } = await createSubtitleInterceptorHarness({
+    languageWrite: languageWrite.promise,
+    dualWrite: Promise.resolve()
+  });
+
+  const pending = interceptor.setLanguages('ja', 'ko');
+  languageWrite.reject(error);
+  await assert.rejects(pending, (actual) => actual === error);
+
+  assert.deepEqual(bridgeCalls, [{ method: 'setSubtitleLanguages', args: ['ja', 'ko'] }]);
+  assert.equal(interceptor.primaryLanguage, 'zh-Hant');
+  assert.equal(interceptor.secondaryLanguage, 'en');
+  assert.equal(reloadCount(), 0);
+});
+
+test('Given a deferred typed language bridge write When SubtitleInterceptor sets languages Then it updates both fields and reloads only after settlement', async () => {
+  const languageWrite = createDeferred();
+  const { bridgeCalls, interceptor, reloadCount } = await createSubtitleInterceptorHarness({
+    languageWrite: languageWrite.promise,
+    dualWrite: Promise.resolve()
+  });
+
+  const pending = interceptor.setLanguages('ja', 'ko');
+
+  assert.deepEqual(bridgeCalls, [{ method: 'setSubtitleLanguages', args: ['ja', 'ko'] }]);
+  assert.equal(interceptor.primaryLanguage, 'zh-Hant');
+  assert.equal(interceptor.secondaryLanguage, 'en');
+  assert.equal(reloadCount(), 0);
+
+  languageWrite.resolve();
+  await pending;
+
+  assert.equal(interceptor.primaryLanguage, 'ja');
+  assert.equal(interceptor.secondaryLanguage, 'ko');
+  assert.equal(reloadCount(), 1);
+});
+
+test('Given a rejecting typed dual-subtitle bridge write When SubtitleInterceptor changes the mode Then it preserves the field and skips reload', async () => {
+  const error = new Error('dual write failed');
+  const dualWrite = createDeferred();
+  const { bridgeCalls, interceptor, reloadCount } = await createSubtitleInterceptorHarness({
+    languageWrite: Promise.resolve(),
+    dualWrite: dualWrite.promise
+  });
+
+  const pending = interceptor.setDualSubtitleEnabled(false);
+  dualWrite.reject(error);
+  await assert.rejects(pending, (actual) => actual === error);
+
+  assert.deepEqual(bridgeCalls, [{ method: 'setDualSubtitleEnabled', args: [false] }]);
+  assert.equal(interceptor.dualSubtitleEnabled, true);
+  assert.equal(reloadCount(), 0);
+});
+
+test('Given a deferred typed dual-subtitle bridge write When SubtitleInterceptor changes the mode Then it updates and reloads only after settlement', async () => {
+  const dualWrite = createDeferred();
+  const { bridgeCalls, interceptor, reloadCount } = await createSubtitleInterceptorHarness({
+    languageWrite: Promise.resolve(),
+    dualWrite: dualWrite.promise
+  });
+
+  const pending = interceptor.setDualSubtitleEnabled(false);
+
+  assert.deepEqual(bridgeCalls, [{ method: 'setDualSubtitleEnabled', args: [false] }]);
+  assert.equal(interceptor.dualSubtitleEnabled, true);
+  assert.equal(reloadCount(), 0);
+
+  dualWrite.resolve();
+  await pending;
+
+  assert.equal(interceptor.dualSubtitleEnabled, false);
+  assert.equal(reloadCount(), 1);
 });
 
 test('Given a storage root event When siblings change Then values and old values come from the event and unaffected siblings stay quiet', async () => {

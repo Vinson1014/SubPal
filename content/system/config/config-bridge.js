@@ -142,65 +142,36 @@ export class ConfigBridge {
 
   // ==================== 配置寫入 ====================
 
-  /**
-   * 設置配置值
-   * 會通過 messaging 發送到 content script 的 ConfigManager
-   *
-   * @param {string} key - 配置鍵
-   * @param {any} value - 配置值
-   * @returns {Promise<void>}
-   *
-   * @example
-   * await configBridge.set('debugMode', true);
-   * await configBridge.set('subtitle.primaryLanguage', 'en');
-   */
-  async set(key, value) {
+  async setSubtitleLanguages(primaryLanguage, secondaryLanguage) {
     this.ensureInitialized();
 
     try {
-      // 通過 messaging 發送配置更新請求
       const result = await sendMessage({
-        type: 'CONFIG_SET',
-        key: key,
-        value: value
+        category: 'settings-change',
+        variant: 'subtitle-languages',
+        payload: { primaryLanguage, secondaryLanguage }
       });
-
-      if (!result.success) {
-        throw new Error(result.error || '設置配置失敗');
-      }
-
-      this.log(`配置已更新: ${key} = ${JSON.stringify(value)}`);
-
+      this.log(`字幕語言已更新: 主要=${primaryLanguage}, 次要=${secondaryLanguage}`);
+      return result;
     } catch (error) {
-      this.error(`設置配置失敗 (${key}):`, error);
+      this.error('設置字幕語言失敗:', error);
       throw error;
     }
   }
 
-  /**
-   * 批量設置配置
-   *
-   * @param {Object} items - 配置對象（鍵值對）
-   * @returns {Promise<void>}
-   */
-  async setMultiple(items) {
+  async setDualSubtitleEnabled(enabled) {
     this.ensureInitialized();
 
     try {
-      // 通過 messaging 發送批量配置更新請求
       const result = await sendMessage({
-        type: 'CONFIG_SET_MULTIPLE',
-        items: items
+        category: 'settings-change',
+        variant: 'dual-subtitles',
+        payload: { enabled }
       });
-
-      if (!result.success) {
-        throw new Error(result.error || '批量設置配置失敗');
-      }
-
-      this.log(`批量更新 ${Object.keys(items).length} 個配置`);
-
+      this.log(`雙語字幕已更新: ${enabled}`);
+      return result;
     } catch (error) {
-      this.error('批量設置配置失敗:', error);
+      this.error('設置雙語字幕失敗:', error);
       throw error;
     }
   }

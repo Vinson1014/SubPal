@@ -1799,11 +1799,7 @@ class SubtitleInterceptor {
     this.log(`設置語言配置: 主要=${primaryLanguage}, 次要=${secondaryLanguage}`);
 
     try {
-      // 使用 ConfigBridge 設置配置（會自動更新緩存並通知訂閱者）
-      await this.configBridge.setMultiple({
-        'subtitle.primaryLanguage': primaryLanguage,
-        'subtitle.secondaryLanguage': secondaryLanguage
-      });
+      await this.configBridge.setSubtitleLanguages(primaryLanguage, secondaryLanguage);
 
       // 本地設置會通過訂閱機制自動更新
       // 但為了避免訂閱回調觸發 loadInterceptedSubtitles 之前就返回，也手動更新
@@ -1825,8 +1821,7 @@ class SubtitleInterceptor {
     this.log(`設置雙語字幕開關: ${enabled}`);
 
     try {
-      // 使用 ConfigBridge 設置配置（會自動更新緩存並通知訂閱者）
-      await this.configBridge.set('subtitle.dualModeEnabled', enabled);
+      await this.configBridge.setDualSubtitleEnabled(enabled);
 
       // 本地設置會通過訂閱機制自動更新
       // 但為了避免訂閱回調觸發 loadInterceptedSubtitles 之前就返回，也手動更新
