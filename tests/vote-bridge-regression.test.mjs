@@ -151,6 +151,25 @@ test('Given sendMessage returns an error When voteBridge enqueues Then the respo
   );
 });
 
+test('Given a vote operation When voteBridge retries it Then it sends the typed retry intent, returns retryScheduled, and exposes no history or status reads', async () => {
+  const messages = [];
+  const voteBridge = await loadVoteBridge(async (message) => {
+    messages.push(message);
+    return { retryScheduled: true, operationId: 'vote-operation-1' };
+  });
+
+  const retried = await voteBridge.retry('vote-operation-1');
+
+  assert.equal(retried, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    category: 'contribution-intent',
+    variant: 'retry-operation',
+    payload: { operationId: 'vote-operation-1' }
+  }]);
+  assert.equal(typeof voteBridge.getHistory, 'undefined');
+  assert.equal(typeof voteBridge.getStatus, 'undefined');
+});
+
 test('Given a normal subtitle hover vote When voteBridge enqueues it Then the legacy payload shape remains unchanged', async () => {
   const messages = [];
   const voteBridge = await loadVoteBridge(async (message) => {

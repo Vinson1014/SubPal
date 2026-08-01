@@ -244,7 +244,8 @@ class UIManager {
         const authorityRenderGeneration = this._renderGeneration;
         try {
           const { authority, hasPendingVote } = await sendMessage({
-            type: 'VOTE_GET_AUTHORITY',
+            category: 'contribution-read',
+            variant: 'vote-authority',
             payload: { translationID: processedSubtitle.translationID }
           });
           if (componentGeneration !== this._componentGeneration ||
@@ -259,7 +260,7 @@ class UIManager {
             this.log('跳過過時字幕投票更新，已有更新的字幕顯示');
             return;
           }
-          if (authority && !authority.pending && !hasPendingVote) {
+          if (authority && !hasPendingVote) {
             processedSubtitle = {
               ...processedSubtitle,
               myVote: authority.myVote,
@@ -958,7 +959,8 @@ class UIManager {
 
     try {
       const { permanentFailure: failedItem } = await sendMessage({
-        type: 'VOTE_GET_AUTHORITY',
+        category: 'contribution-read',
+        variant: 'vote-authority',
         payload: { translationID: this.currentSubtitle.translationID }
       });
 
@@ -972,16 +974,17 @@ class UIManager {
     }
   }
 
-  async readTranslationSyncSnapshot(itemIds) {
-    const { translationQueue, translationHistory } = await sendMessage({
-      type: 'TRANSLATION_GET_RECONCILIATION',
-      payload: { itemIds }
+  async readTranslationSyncSnapshot(operationIds) {
+    const records = await sendMessage({
+      category: 'contribution-read',
+      variant: 'translation-reconciliation',
+      payload: { operationIds }
     });
 
-    return {
-      queue: Array.isArray(translationQueue) ? translationQueue : [],
-      history: Array.isArray(translationHistory) ? translationHistory : []
-    };
+    return new Map(records.map(({ operationId, status, syncedAt, terminal }) => [
+      operationId,
+      { operationId, status, syncedAt, terminal }
+    ]));
   }
 
   async checkAndReconcileTranslationSubmissions() {
@@ -995,15 +998,13 @@ class UIManager {
 
     try {
       const localSnapshots = subtitleReplacer.listLocalReplacements();
-      const { queue, history } = await this.readTranslationSyncSnapshot(localSnapshots.map(item => item.itemId));
+      const recordsByOperationId = await this.readTranslationSyncSnapshot(localSnapshots.map(item => item.itemId));
       if (componentGeneration !== this._componentGeneration ||
           subtitleReplacer !== this.subtitleReplacer ||
           !this.isInitialized) {
         return;
       }
 
-      const queueByItemId = new Map(queue.map(item => [item.id, item]));
-      const historyByItemId = new Map(history.map(item => [item.id, item]));
       const now = Date.now();
 
       for (const localSnapshot of localSnapshots) {
@@ -1013,10 +1014,8 @@ class UIManager {
           return;
         }
 
-        const queueItem = queueByItemId.get(localSnapshot.itemId);
-        const historyItem = historyByItemId.get(localSnapshot.itemId);
-        const terminalFailure = queueItem?.status === 'failed' &&
-          queueItem.errorMetadata?.terminal === true;
+        const syncRecord = recordsByOperationId.get(localSnapshot.itemId);
+        const terminalFailure = syncRecord?.status === 'failed' && syncRecord.terminal;
 
         if (terminalFailure) {
           const expectedGeneration = this._renderGeneration;
@@ -1037,7 +1036,6 @@ class UIManager {
         }
 
         let localRecord = localSnapshot;
-        const syncRecord = historyItem?.status === 'completed' ? historyItem : queueItem;
         if ((syncRecord?.status === 'pending' || syncRecord?.status === 'syncing') &&
             (localRecord.status === 'pending' || localRecord.status === 'syncing')) {
           localRecord = subtitleReplacer.setLocalReplacementStatus(

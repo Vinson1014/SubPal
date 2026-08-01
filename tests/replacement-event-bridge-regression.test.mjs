@@ -41,3 +41,21 @@ test('Given invalid replacement input or a rejected enqueue When the bridge runs
   await assert.rejects(bridge.enqueue({ translationID: 'translation-1', contributorUserID: 'author-1', beneficiaryUserID: 'viewer-1', occurredAt: '2026-08-01T00:00:00.000Z' }), /queue rejected/);
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ category: 'contribution-intent', variant: 'enqueue-replacement-event', payload: { translationID: 'translation-1', contributorUserID: 'author-1', beneficiaryUserID: 'viewer-1', occurredAt: '2026-08-01T00:00:00.000Z' } }]);
 });
+
+test('Given a replacement event operation When its bridge retries it Then it sends the typed retry intent, returns retryScheduled, and exposes no history read', async () => {
+  const messages = [];
+  const bridge = await loadBridge(async (message) => {
+    messages.push(message);
+    return { retryScheduled: true, operationId: 'replacement-operation-1' };
+  });
+
+  const retried = await bridge.retry('replacement-operation-1');
+
+  assert.equal(retried, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    category: 'contribution-intent',
+    variant: 'retry-operation',
+    payload: { operationId: 'replacement-operation-1' }
+  }]);
+  assert.equal(typeof bridge.getHistory, 'undefined');
+});

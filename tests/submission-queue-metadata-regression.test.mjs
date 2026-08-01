@@ -52,10 +52,3 @@ test('Given a pending task vote When a context-free hover vote coalesces for the
   assert.equal(Object.hasOwn(record, 'resolutionContext'), false);
   assert.equal(Object.hasOwn(record, 'voteState'), false);
 });
-
-test('Given an obsolete raw enqueue message When content queue dispatch receives it Then it cannot mutate local storage', async () => {
-  const { handleQueueMessage, submissionQueueManager } = await import('../content/core/submission-queue-manager.js');
-  submissionQueueManager.isInitialized = true;
-  const response = await new Promise((resolve) => handleQueueMessage({ type: 'VOTE_ENQUEUE', payload: {} }, resolve));
-  assert.match(response.error, /Unsupported queue message type/);
-});

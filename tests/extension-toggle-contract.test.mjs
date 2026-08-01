@@ -267,9 +267,6 @@ async function createToggleHarness() {
 
   async function loadModule(url) {
     if (moduleCache.has(url.href)) return moduleCache.get(url.href);
-    if (url.pathname.endsWith('/content/core/submission-queue-manager.js')) {
-      return syntheticModule(url, { SubmissionQueueManager: class { async initialize() {} } });
-    }
     if (url.pathname.endsWith('/content/system/isolated-endscreen-tasks.js')) {
       return syntheticModule(url, { startIsolatedEndscreenTasks: async () => {} });
     }

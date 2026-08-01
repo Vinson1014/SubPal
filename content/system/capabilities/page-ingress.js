@@ -6,7 +6,11 @@ const VIDEO_CONTEXT_CHANGED_VARIANT = 'video-context-changed';
 const SUBTITLE_QUERY_CATEGORY = 'subtitle-query';
 const REPLACEMENT_SUBTITLE_QUERY_VARIANT = 'replacement-subtitle-query';
 const BACKEND_PROFILE_CATEGORY = 'backend-profile';
-const CONTRIBUTION_CATEGORY = 'contribution-intent';
+const CONTRIBUTION_INTENT_CATEGORY = 'contribution-intent';
+const CONTRIBUTION_READ_CATEGORY = 'contribution-read';
+const CONTRIBUTION_ENQUEUE_VARIANTS = new Set(['enqueue-vote', 'enqueue-translation', 'enqueue-replacement-event']);
+const CONTRIBUTION_READ_VARIANTS = new Set(['vote-authority', 'translation-reconciliation']);
+const CONTRIBUTION_RETRY_VARIANT = 'retry-operation';
 const PAYLOAD_KEYS = new Set(['oldVideoId', 'newVideoId', 'videoId']);
 const ENVELOPE_KEYS = new Set(['category', 'variant', 'payload']);
 const AUTHORITY_KEYS = new Set([
@@ -46,6 +50,32 @@ function normalizedVideoChange(payload) {
   return ok(event);
 }
 
+function parseRetryOperation(payload) {
+  try {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return fail('invalid', 'malformed-page-observation', false);
+    }
+    if (typeof structuredClone === 'function') structuredClone(payload);
+    const prototype = Object.getPrototypeOf(payload);
+    if (prototype !== null && Object.getPrototypeOf(prototype) !== null) {
+      return fail('invalid', 'malformed-page-observation', false);
+    }
+    const keys = Object.getOwnPropertyNames(payload);
+    if (Object.getOwnPropertySymbols(payload).length !== 0 || keys.length !== 1 || keys[0] !== 'operationId') {
+      return fail('invalid', 'malformed-page-observation', false);
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(payload, 'operationId');
+    if (!descriptor || !Object.hasOwn(descriptor, 'value') || descriptor.enumerable !== true) {
+      return fail('invalid', 'malformed-page-observation', false);
+    }
+    return typeof descriptor.value === 'string' && descriptor.value.length > 0
+      ? ok({ operationId: descriptor.value })
+      : fail('invalid', 'malformed-page-observation', false);
+  } catch {
+    return fail('invalid', 'malformed-page-observation', false);
+  }
+}
+
 function parseIngress(input, options) {
   try {
     if (!isRecord(input)) return fail('invalid', 'malformed-page-observation', false);
@@ -60,7 +90,11 @@ function parseIngress(input, options) {
       return fail('invalid', 'malformed-page-observation', false);
     }
     if (hasForbiddenAuthority(input.payload)) return fail('forbidden', 'page-ingress-variant', false);
-    if (input.category === CONTRIBUTION_CATEGORY) return ok(input);
+    if (input.category === CONTRIBUTION_READ_CATEGORY && CONTRIBUTION_READ_VARIANTS.has(input.variant)) return ok(input);
+    if (input.category === CONTRIBUTION_INTENT_CATEGORY && input.variant === CONTRIBUTION_RETRY_VARIANT) {
+      return parseRetryOperation(input.payload);
+    }
+    if (input.category === CONTRIBUTION_INTENT_CATEGORY && CONTRIBUTION_ENQUEUE_VARIANTS.has(input.variant)) return ok(input);
     if (input.category === SUBTITLE_QUERY_CATEGORY && input.variant === REPLACEMENT_SUBTITLE_QUERY_VARIANT) {
       return parseSubtitleQuery(input.payload);
     }
@@ -79,7 +113,25 @@ function parseIngress(input, options) {
 function accept(input, options = {}) {
   const parsed = parseIngress(input, options);
   if (!parsed.ok) return parsed;
-  if (input.category === CONTRIBUTION_CATEGORY) {
+  if (input.category === CONTRIBUTION_READ_CATEGORY) {
+    if (typeof options.contributions?.getProjection !== 'function') {
+      return fail('disconnected', 'contributions-unavailable', true);
+    }
+    try {
+      return Promise.resolve(options.contributions.getProjection({ variant: parsed.value.variant, payload: parsed.value.payload }, options.cancellation));
+    } catch (error) {
+      return fromThrown(error, 'contribution-read-failed');
+    }
+  }
+  if (input.category === CONTRIBUTION_INTENT_CATEGORY) {
+    if (input.variant === CONTRIBUTION_RETRY_VARIANT) {
+      if (typeof options.contributions?.retry !== 'function') return fail('disconnected', 'contributions-unavailable', true);
+      try {
+        return Promise.resolve(options.contributions.retry(parsed.value.operationId, options.cancellation));
+      } catch (error) {
+        return fromThrown(error, 'contribution-retry-failed');
+      }
+    }
     if (typeof options.contributions?.enqueue !== 'function') {
       return fail('disconnected', 'contributions-unavailable', true);
     }

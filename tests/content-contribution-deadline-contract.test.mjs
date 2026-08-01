@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 
+import { loadBackgroundWithApi, netflixSender } from './crowdsourcing-test-harness.mjs';
+
 const root = new URL('../', import.meta.url);
 const plain = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 
@@ -56,7 +58,7 @@ function contributionIntent() {
   };
 }
 
-async function loadContentContributionHarness() {
+async function loadContentContributionHarness({ connect } = {}) {
   const scheduler = new FakeScheduler();
   const listeners = new Map();
   const responses = [];
@@ -94,6 +96,7 @@ async function loadContentContributionHarness() {
     chrome: {
       runtime: {
         connect() {
+          if (connect) return connect();
           const messages = [];
           const disconnects = [];
           const sent = [];
@@ -144,7 +147,6 @@ async function loadContentContributionHarness() {
   const modules = {
     config: await syntheticModule(context, 'config-manager.js', { ConfigManager: class { async initialize() {} get() { return false; } subscribe() {} } }),
     schema: await syntheticModule(context, 'config-schema.js', { getAllConfigKeys: () => [] }),
-    queue: await syntheticModule(context, 'submission-queue-manager.js', { SubmissionQueueManager: class { async initialize() {} } }),
     messaging: await syntheticModule(context, 'messaging.js', { initMessaging: async () => {} }),
     isolated: await syntheticModule(context, 'isolated-endscreen-tasks.js', { startIsolatedEndscreenTasks: async () => {} }),
     playback: await syntheticModule(context, 'playback-context-manager.js', { playbackContextManager: {} })
@@ -153,7 +155,6 @@ async function loadContentContributionHarness() {
     importModuleDynamically: async (specifier) => {
       if (specifier.endsWith('config-manager.js')) return modules.config;
       if (specifier.endsWith('config-schema.js')) return modules.schema;
-      if (specifier.endsWith('submission-queue-manager.js')) return modules.queue;
       if (specifier.endsWith('messaging.js')) return modules.messaging;
       if (specifier.endsWith('isolated-endscreen-tasks.js')) return modules.isolated;
       if (specifier.endsWith('playback-context-manager.js')) return modules.playback;
@@ -168,7 +169,7 @@ async function loadContentContributionHarness() {
   return {
     ports, requests, responses, scheduler,
     pendingCount: () => transport.pendingCount(),
-    dispatch(messageId) {
+    dispatch(messageId, message = contributionIntent()) {
       return new Promise((resolve) => {
         const listener = (event) => {
           if (event.detail.messageId !== messageId) return;
@@ -176,9 +177,30 @@ async function loadContentContributionHarness() {
           resolve(event.detail.response);
         };
         window.addEventListener('responseFromContentScript', listener);
-        window.dispatchEvent(new context.CustomEvent('messageToContentScript', { detail: { messageId, message: contributionIntent() } }));
+        window.dispatchEvent(new context.CustomEvent('messageToContentScript', { detail: { messageId, message } }));
       });
     }
+  };
+}
+
+function createLinkedContributionPort(background, sent) {
+  const contentListeners = [];
+  const backgroundListeners = [];
+  const backgroundPort = {
+    name: 'subtitle-assistant-channel',
+    sender: netflixSender(),
+    postMessage(message) { for (const listener of contentListeners) listener(message); },
+    onMessage: { addListener(listener) { backgroundListeners.push(listener); } },
+    onDisconnect: { addListener() {} }
+  };
+  background.connect(backgroundPort);
+  return {
+    postMessage(message) {
+      sent.push(plain(message));
+      for (const listener of backgroundListeners) listener(message);
+    },
+    onMessage: { addListener(listener) { contentListeners.push(listener); } },
+    onDisconnect: { addListener() {} }
   };
 }
 
@@ -209,4 +231,105 @@ test('Given a content contribution uses the private Port When persistence times 
   assert.equal(harness.ports[1].sent.length, 1);
   harness.ports[1].emit({ messageId: harness.ports[1].sent[0].messageId, response: { status: 'queued-locally', operationId: 'fresh' } });
   assert.deepEqual(plain(await fresh), { ok: true, value: { status: 'queued-locally', operationId: 'fresh' } });
+});
+
+test('Given MAIN requests approved contribution projections or retries When content forwards them Then only closed private commands and the caller operation ID cross the Port', async () => {
+  const harness = await loadContentContributionHarness();
+  const read = harness.dispatch('contribution-read', {
+    category: 'contribution-read', variant: 'vote-authority', payload: { translationID: 'translation-1' }
+  });
+  await settle();
+
+  assert.equal(harness.requests.length, 1);
+  assert.deepEqual(plain(harness.requests[0]), {
+    envelope: {
+      protocolVersion: 1,
+      requestId: harness.requests[0].envelope.requestId,
+      kind: 'contribution-read',
+      payload: {
+        type: 'CONTRIBUTION_READ',
+        projection: { variant: 'vote-authority', payload: { translationID: 'translation-1' } }
+      }
+    },
+    options: { deadlineMs: 10_000 }
+  });
+  harness.ports[0].emit({
+    messageId: harness.ports[0].sent[0].messageId,
+    response: { authority: null, hasPendingVote: false, permanentFailure: null }
+  });
+  assert.deepEqual(plain(await read), {
+    ok: true,
+    value: { authority: null, hasPendingVote: false, permanentFailure: null }
+  });
+
+  const retry = harness.dispatch('contribution-retry', {
+    category: 'contribution-intent', variant: 'retry-operation', payload: { operationId: 'operation-1' }
+  });
+  await settle();
+  assert.equal(harness.requests.length, 2);
+  assert.deepEqual(plain(harness.requests[1]), {
+    envelope: {
+      protocolVersion: 1,
+      requestId: harness.requests[1].envelope.requestId,
+      kind: 'contribution-retry',
+      payload: { type: 'CONTRIBUTION_RETRY', operationId: 'operation-1' }
+    },
+    options: { deadlineMs: 10_000 }
+  });
+  harness.ports[0].emit({
+    messageId: harness.ports[0].sent[1].messageId,
+    response: { retryScheduled: true, operationId: 'operation-1' }
+  });
+  assert.deepEqual(plain(await retry), {
+    ok: true,
+    value: { retryScheduled: true, operationId: 'operation-1' }
+  });
+});
+
+test('Given MAIN reads and retries through the real private Port When background owns the queue Then strict wires and request-bound results agree end to end', async () => {
+  const sent = [];
+  const storage = {
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'default',
+      byId: { default: { id: 'default', endpoint: 'https://api.example.test', userId: 'user-1', jwt: null } }
+    },
+    voteQueue: [{
+      id: 'operation-1', operationId: 'operation-1', backendProfileId: 'default', status: 'failed', retryCount: 3,
+      error: 'temporary failure', errorMetadata: { isPermanent: false }, translationID: 'translation-1', syncedAt: null
+    }],
+    translationQueue: [],
+    replacementEventQueue: [],
+    voteStateByTranslation: {
+      'translation-1': { backendProfileId: 'default', myVote: 'like', upvotes: 4, downvotes: 1 }
+    }
+  };
+  const background = await loadBackgroundWithApi({}, { realContributionQueue: true, storage });
+  const harness = await loadContentContributionHarness({
+    connect: () => createLinkedContributionPort(background, sent)
+  });
+
+  const [read, retry] = await Promise.all([
+    harness.dispatch('integrated-read', {
+      category: 'contribution-read', variant: 'vote-authority', payload: { translationID: 'translation-1' }
+    }),
+    harness.dispatch('integrated-retry', {
+      category: 'contribution-intent', variant: 'retry-operation', payload: { operationId: 'operation-1' }
+    })
+  ]);
+  assert.deepEqual({
+    wires: sent.map(({ message }) => message),
+    results: plain([read, retry]),
+    retried: storage.voteQueue[0].status
+  }, {
+    wires: [
+      { type: 'CONTRIBUTION_READ', projection: { variant: 'vote-authority', payload: { translationID: 'translation-1' } } },
+      { type: 'CONTRIBUTION_RETRY', operationId: 'operation-1' }
+    ],
+    results: [
+      { ok: true, value: { authority: { myVote: 'like', upvotes: 4, downvotes: 1 }, hasPendingVote: false, permanentFailure: null } },
+      { ok: true, value: { retryScheduled: true, operationId: 'operation-1' } }
+    ],
+    retried: 'pending'
+  });
 });

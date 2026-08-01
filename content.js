@@ -21,7 +21,6 @@
   let messageCounter = 0; // 用於生成唯一訊息 ID 的計數器
   let backgroundPortTransportPromise = null;
   let configManager = null; // ConfigManager 實例
-  let submissionQueueManager = null; // SubmissionQueueManager 實例
   let pageScriptReadinessPromise = null;
   let pageContextStartAttempted = false;
   let isolatedEndscreenStartPromise = null;
@@ -43,13 +42,13 @@
     retryNotBefore: 'data-subpal-page-script-retry-not-before'
   };
 
-  // 隊列消息類型常數
-  const QUEUE_MESSAGE_TYPES = [
-    'VOTE_GET_HISTORY', 'VOTE_GET_STATUS', 'VOTE_GET_AUTHORITY', 'VOTE_RETRY',
-    'TRANSLATION_GET_HISTORY', 'TRANSLATION_GET_RECONCILIATION', 'TRANSLATION_RETRY',
+  const RETIRED_CONTRIBUTION_COMMANDS = new Set([
+    'VOTE_ENQUEUE', 'VOTE_GET_HISTORY', 'VOTE_GET_STATUS', 'VOTE_GET_AUTHORITY', 'VOTE_RETRY',
+    'TRANSLATION_ENQUEUE', 'TRANSLATION_GET_HISTORY', 'TRANSLATION_GET_STATUS', 'TRANSLATION_GET_RECONCILIATION', 'TRANSLATION_RETRY',
+    'REPLACEMENT_EVENT_ENQUEUE', 'REPLACEMENT_EVENT_GET_HISTORY', 'REPLACEMENT_EVENT_RETRY',
     'GET_ALL_PENDING', 'GET_QUEUE_STATS',
-    'REPLACEMENT_EVENT_GET_HISTORY', 'REPLACEMENT_EVENT_RETRY'
-  ];
+    'RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS'
+  ]);
 
   // 初始化 ConfigManager
   async function initializeConfigManager() {
@@ -101,28 +100,6 @@
 
     debugLog('ConfigManager 初始化完成');
     return true;
-  }
-
-  // 初始化 SubmissionQueueManager
-  async function initializeQueueManagers() {
-    try {
-      debugLog('開始初始化 SubmissionQueueManager...');
-
-      // 動態導入 SubmissionQueueManager
-      const { SubmissionQueueManager } = await import(chrome.runtime.getURL('content/core/submission-queue-manager.js'));
-
-      // 創建實例
-      submissionQueueManager = new SubmissionQueueManager({ debug: debugMode });
-
-      // 初始化
-      await submissionQueueManager.initialize();
-
-      debugLog('SubmissionQueueManager 初始化完成');
-      return true;
-    } catch (error) {
-      console.error('[Content Script] SubmissionQueueManager 初始化失敗:', error);
-      return false;
-    }
   }
 
   // 透過 DOM 注入，讓主模組在 MAIN world 執行並共享 page script handshake。
@@ -318,105 +295,6 @@
     }
   }
 
-  // 處理隊列相關訊息
-  async function handleQueueMessage(messageId, message) {
-    if (!submissionQueueManager) {
-      debugLog('SubmissionQueueManager 尚未初始化，回應錯誤');
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            error: 'SubmissionQueueManager not initialized'
-          }
-        }
-      }));
-      return;
-    }
-
-    const { type, payload } = message;
-
-    try {
-      let result;
-
-      switch (type) {
-        case 'VOTE_RETRY':
-        case 'TRANSLATION_RETRY':
-        case 'REPLACEMENT_EVENT_RETRY':
-        case 'VOTE_GET_AUTHORITY': {
-          const { createEnvelope, transport } = await getBackgroundPortTransport();
-          const response = await transport.request(createEnvelope({
-            requestId: generateUniqueMessageId(type),
-            kind: 'contribution-compatibility',
-            payload: { type, payload }
-          }), { deadlineMs: 10000 });
-          if (!response.ok) throw new Error(response.error.code);
-          result = response.value;
-          break;
-        }
-        case 'VOTE_GET_HISTORY':
-          result = await submissionQueueManager.getVoteHistory(payload?.limit);
-          result = { history: result };
-          break;
-
-        case 'VOTE_GET_STATUS':
-          result = await submissionQueueManager.getVoteStatus(payload.itemId);
-          break;
-
-        case 'TRANSLATION_GET_HISTORY':
-          result = await submissionQueueManager.getTranslationHistory(payload?.limit);
-          result = { history: result };
-          break;
-
-        case 'TRANSLATION_GET_RECONCILIATION':
-          result = await submissionQueueManager.getTranslationReconciliation(payload.itemIds);
-          break;
-
-        case 'REPLACEMENT_EVENT_GET_HISTORY':
-          result = await submissionQueueManager.getReplacementEventHistory(payload?.limit);
-          result = { history: result };
-          break;
-
-        // 通用消息
-        case 'GET_ALL_PENDING':
-          result = await submissionQueueManager.getAllPending();
-          break;
-
-        case 'GET_QUEUE_STATS':
-          result = await submissionQueueManager.getStats();
-          break;
-
-        default:
-          window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-            detail: {
-              messageId: messageId,
-              response: {
-                error: `未知的消息類型: ${type}`
-              }
-            }
-          }));
-          return;
-      }
-
-      // 回應成功
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: result
-        }
-      }));
-    } catch (error) {
-      debugLog('處理隊列消息失敗:', error);
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            error: error.message
-          }
-        }
-      }));
-    }
-  }
-
   function getBackgroundPortTransport() {
     if (!backgroundPortTransportPromise) {
       backgroundPortTransportPromise = import(chrome.runtime.getURL('content/system/capabilities/private-transports.js')).then(({ createEnvelope, createPortTransport }) => ({
@@ -549,7 +427,8 @@
       if (category?.value === 'backend-profile') {
         return { terminal: { ok: false, error: { kind: 'forbidden', code: 'page-profile-change', retryable: false } } };
       }
-      if (category?.value === 'page-observation' || category?.value === 'subtitle-query' || category?.value === 'contribution-intent') {
+      if (category?.value === 'page-observation' || category?.value === 'subtitle-query' ||
+          category?.value === 'contribution-intent' || category?.value === 'contribution-read') {
         return { input: message, type: type.value, authorityEscalated };
       }
       if (type.value === 'CHECK_SUBTITLE') return { input: message, type: type.value, authorityEscalated: false };
@@ -598,6 +477,22 @@
             kind: 'contribution-enqueue',
             payload: { type: 'CONTRIBUTION_ENQUEUE', intent }
           }), options);
+        },
+        readProjection(projection, options) {
+          const requestId = generateUniqueMessageId('CONTRIBUTION_READ');
+          return transport.request(createEnvelope({
+            requestId,
+            kind: 'contribution-read',
+            payload: { type: 'CONTRIBUTION_READ', projection }
+          }), options);
+        },
+        retryOperation(operationId, options) {
+          const requestId = generateUniqueMessageId('CONTRIBUTION_RETRY');
+          return transport.request(createEnvelope({
+            requestId,
+            kind: 'contribution-retry',
+            payload: { type: 'CONTRIBUTION_RETRY', operationId }
+          }), options);
         }
         }));
     }
@@ -631,7 +526,7 @@
         dispatch: (message) => dispatchInternalMessage(messageId, message),
         query: (subtitleQuery) => getSubtitleQueryCapability().then((subtitles) => subtitles.query(subtitleQuery))
       };
-      if (observation.input.category === 'contribution-intent') {
+      if (observation.input.category === 'contribution-intent' || observation.input.category === 'contribution-read') {
         options.contributions = await getContributionsCapability();
       }
       const result = await pageIngress.accept(observation.input, options);
@@ -654,8 +549,7 @@
     if (message?.type === 'GET_CROWDSOURCING_TASKS') return;
     if (message?.type === 'RAW_TTML_INTERCEPTED') return;
 
-    if (['RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS',
-      'VOTE_ENQUEUE', 'TRANSLATION_ENQUEUE', 'REPLACEMENT_EVENT_ENQUEUE'].includes(message.type)) {
+    if (RETIRED_CONTRIBUTION_COMMANDS.has(message.type)) {
       respondToPageObservation(messageId, terminalIngressFailure(true).terminal);
       return;
     }
@@ -678,13 +572,6 @@
         return;
       }
       handleConfigMessage(messageId, configRequest.request);
-      return;
-    }
-
-    // 檢查是否為隊列相關訊息（由 content script 處理，不轉發到 background）
-    if (QUEUE_MESSAGE_TYPES.includes(message.type)) {
-      debugLog('處理隊列訊息:', message.type);
-      handleQueueMessage(messageId, rawMessage);
       return;
     }
 
@@ -950,7 +837,6 @@
   // 建立初始連接
   connectToBackground();
 
-  // 初始化所有 Managers
   async function initializeAllManagers() {
     const pageScriptReady = ensureNetflixPageScriptReady();
     try {
@@ -959,11 +845,6 @@
         console.error('[Content Script] ConfigManager 初始化失敗');
         if (await pageScriptReady) startPageContextOnce();
         return;
-      }
-
-      const queueSuccess = await initializeQueueManagers();
-      if (!queueSuccess) {
-        console.error('[Content Script] SubmissionQueueManager 初始化失敗');
       }
 
       debugLog('All managers initialized.');

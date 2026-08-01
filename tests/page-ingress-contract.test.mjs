@@ -40,7 +40,7 @@ async function createPrivateTransportModule(context, { onRequest = () => {} } = 
   return module;
 }
 
-async function loadPageIngressModule(context = vm.createContext({})) {
+async function loadPageIngressModule(context = vm.createContext({ structuredClone: globalThis.structuredClone })) {
   const [resultSource, subtitlesSource, ingressSource] = await Promise.all([
     sourceOrNull('content/system/capabilities/result.js'),
     sourceOrNull('content/system/capabilities/subtitles.js'),
@@ -86,7 +86,7 @@ async function loadContributionsModule(context) {
 
 async function settle() { for (let index = 0; index < 64; index += 1) await Promise.resolve(); await new Promise((resolve) => setTimeout(resolve, 0)); for (let index = 0; index < 16; index += 1) await Promise.resolve(); }
 
-async function createContentHarness({ backendProfiles = {}, queueWrites = [] } = {}) {
+async function createContentHarness({ backendProfiles = {} } = {}) {
   const listeners = new Map();
   const bridgeEvents = [];
   const responses = [];
@@ -127,6 +127,7 @@ async function createContentHarness({ backendProfiles = {}, queueWrites = [] } =
     window,
     document,
     console: { log() {}, warn() {}, error(...args) { errors.push(args); } },
+    structuredClone: globalThis.structuredClone,
     CustomEvent: class CustomEvent {
       constructor(type, options = {}) { this.type = type; this.detail = options.detail; }
     },
@@ -173,10 +174,6 @@ async function createContentHarness({ backendProfiles = {}, queueWrites = [] } =
       }
     }),
     schema: await createModule(context, 'config-schema.js', { getAllConfigKeys: () => [] }),
-    queue: await createModule(context, 'submission-queue-manager.js', { SubmissionQueueManager: class SubmissionQueueManager {
-      async initialize() {}
-      async enqueueVote(payload, backendProfileId) { queueWrites.push({ payload, backendProfileId }); return { operationId: 'queued-vote-1' }; }
-    } }),
     messaging: await createModule(context, 'messaging.js', { initMessaging: async () => {} }),
     isolated: await createModule(context, 'isolated-endscreen-tasks.js', { startIsolatedEndscreenTasks: async () => {} }),
     playback: await createModule(context, 'playback-context-manager.js', { playbackContextManager: {} })
@@ -192,7 +189,6 @@ async function createContentHarness({ backendProfiles = {}, queueWrites = [] } =
     importModuleDynamically: async (specifier) => {
       if (specifier.endsWith('config-manager.js')) return modules.config;
       if (specifier.endsWith('config-schema.js')) return modules.schema;
-      if (specifier.endsWith('submission-queue-manager.js')) return modules.queue;
       if (specifier.endsWith('messaging.js')) return modules.messaging;
       if (specifier.endsWith('isolated-endscreen-tasks.js')) return modules.isolated;
       if (specifier.endsWith('playback-context-manager.js')) return modules.playback;
@@ -212,7 +208,6 @@ async function createContentHarness({ backendProfiles = {}, queueWrites = [] } =
   return {
     baseline,
     bridgeEvents,
-    queueWrites,
     responses,
     dispatchAndWait(messageId, message) {
       return new Promise((resolve, reject) => {
@@ -270,6 +265,113 @@ test('Given a MAIN contribution intent When PageIngress accepts it Then it waits
   assert.deepEqual(plain(await result), {
     ok: true,
     value: { status: 'queued-locally', operationId: 'operation-1' }
+  });
+});
+
+test('Given approved contribution reads and retries When PageIngress accepts them Then it dispatches only the allowlisted contribution capability methods', async () => {
+  const ingress = await loadPageIngress();
+  assert.ok(ingress, 'PageIngress capability is missing');
+  const reads = [];
+  const retries = [];
+  const contributions = {
+    getProjection(read) {
+      reads.push(read);
+      return { ok: true, value: { authority: null, hasPendingVote: false, permanentFailure: null } };
+    },
+    retry(operationId) {
+      retries.push(operationId);
+      return { ok: true, value: { retryScheduled: true, operationId } };
+    }
+  };
+  const read = { category: 'contribution-read', variant: 'vote-authority', payload: { translationID: 'translation-1' } };
+  const retry = { category: 'contribution-intent', variant: 'retry-operation', payload: { operationId: 'operation-1' } };
+
+  assert.deepEqual(plain(await ingress.PageIngress.accept(read, { contributions })), {
+    ok: true,
+    value: { authority: null, hasPendingVote: false, permanentFailure: null }
+  });
+  assert.deepEqual(plain(await ingress.PageIngress.accept(retry, { contributions })), {
+    ok: true,
+    value: { retryScheduled: true, operationId: 'operation-1' }
+  });
+  assert.deepEqual(plain(reads), [{ variant: 'vote-authority', payload: { translationID: 'translation-1' } }]);
+  assert.deepEqual(retries, ['operation-1']);
+
+  for (const variant of ['active-profile-summary', 'operation-status', 'personal-history']) {
+    assert.deepEqual(plain(await ingress.PageIngress.accept({ category: 'contribution-read', variant, payload: {} }, { contributions })), {
+      ok: false,
+      error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false }
+    });
+  }
+  assert.equal(reads.length, 1);
+  assert.equal(retries.length, 1);
+});
+
+test('Given hostile retry-operation payloads When PageIngress accepts them Then it rejects without calling Contributions.retry', async () => {
+  const ingress = await loadPageIngress();
+  assert.ok(ingress, 'PageIngress capability is missing');
+  const retries = [];
+  const contributions = {
+    retry(operationId) {
+      retries.push(operationId);
+      return { ok: true, value: { retryScheduled: true, operationId } };
+    }
+  };
+  const reject = (payload, expected) => {
+    const result = ingress.PageIngress.accept(
+      { category: 'contribution-intent', variant: 'retry-operation', payload },
+      { contributions }
+    );
+    assert.deepEqual(plain(result), { ok: false, error: expected });
+    assert.deepEqual(retries, []);
+  };
+
+  reject(Object.create({ operationId: 'operation-1' }), {
+    kind: 'invalid', code: 'malformed-page-observation', retryable: false
+  });
+  reject({ operationId: 'operation-1', extra: true }, {
+    kind: 'invalid', code: 'malformed-page-observation', retryable: false
+  });
+  reject({ operationId: 'operation-1', [Symbol('operation')]: 'ignored' }, {
+    kind: 'invalid', code: 'malformed-page-observation', retryable: false
+  });
+
+  const accessorPayload = {};
+  Object.defineProperty(accessorPayload, 'operationId', {
+    enumerable: true,
+    get() { return 'operation-1'; }
+  });
+  reject(accessorPayload, {
+    kind: 'invalid', code: 'malformed-page-observation', retryable: false
+  });
+
+  const throwingGetterPayload = {};
+  Object.defineProperty(throwingGetterPayload, 'operationId', {
+    enumerable: true,
+    get() { throw new Error('getter exploded'); }
+  });
+  reject(throwingGetterPayload, {
+    kind: 'invalid', code: 'malformed-page-observation', retryable: false
+  });
+
+  reject([], {
+    kind: 'invalid', code: 'malformed-page-observation', retryable: false
+  });
+  reject(new Proxy({ operationId: 'operation-1' }, {}), {
+    kind: 'invalid', code: 'malformed-page-observation', retryable: false
+  });
+
+  const revoked = Proxy.revocable({ operationId: 'operation-1' }, {});
+  revoked.revoke();
+  reject(revoked.proxy, {
+    kind: 'invalid', code: 'malformed-page-observation', retryable: false
+  });
+
+  reject({ operationId: 'operation-1', jwt: 'private-token' }, {
+    kind: 'forbidden', code: 'page-ingress-variant', retryable: false
+  });
+  reject({ operationId: '' }, {
+    kind: 'invalid', code: 'malformed-page-observation', retryable: false
   });
 });
 
@@ -528,15 +630,18 @@ test('Given hostile category or type accessors and Proxy traps When the isolated
   }
 });
 
-test('Given MAIN legacy retry or raw contribution enqueue commands When the isolated bridge receives them Then it denies each before Port forwarding or persistence work', async () => {
+test('Given a retired generic contribution command When the isolated bridge receives it Then it returns a terminal PageIngress denial before Port, storage, sync, or persistence work', async () => {
   const harness = await createContentHarness();
-  const retryTypes = [
-    'RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS',
-    'VOTE_ENQUEUE', 'TRANSLATION_ENQUEUE', 'REPLACEMENT_EVENT_ENQUEUE'
+  const retiredTypes = [
+    'VOTE_ENQUEUE', 'VOTE_GET_HISTORY', 'VOTE_GET_STATUS', 'VOTE_GET_AUTHORITY', 'VOTE_RETRY',
+    'TRANSLATION_ENQUEUE', 'TRANSLATION_GET_HISTORY', 'TRANSLATION_GET_STATUS', 'TRANSLATION_GET_RECONCILIATION', 'TRANSLATION_RETRY',
+    'REPLACEMENT_EVENT_ENQUEUE', 'REPLACEMENT_EVENT_GET_HISTORY', 'REPLACEMENT_EVENT_RETRY',
+    'GET_ALL_PENDING', 'GET_QUEUE_STATS',
+    'RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS'
   ];
   const forbidden = { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } };
 
-  for (const type of retryTypes) {
+  for (const type of retiredTypes) {
     const before = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
     const response = await harness.dispatchAndWait(`main-${type}`, { type });
     assert.deepEqual(plain(response), { messageId: `main-${type}`, response: forbidden });
@@ -553,7 +658,6 @@ test('Given any content-local profile record When MAIN submits a contribution in
   const before = validHarness.baseline();
   const validResponse = await validHarness.dispatchAndWait('valid-profile-contribution', intent);
   assert.deepEqual(plain(validResponse.response), { ok: true, value: { status: 'queued-locally', operationId: 'queued-vote-1' } });
-  assert.equal(validHarness.queueWrites.length, 0);
   assert.equal(validHarness.baseline().storageReads, before.storageReads);
   assert.equal(validHarness.baseline().portRequests, before.portRequests + 1);
 
@@ -562,7 +666,6 @@ test('Given any content-local profile record When MAIN submits a contribution in
     const invalidBefore = harness.baseline();
     const response = await harness.dispatchAndWait('invalid-profile-contribution', intent);
     assert.deepEqual(plain(response.response), { ok: true, value: { status: 'queued-locally', operationId: 'queued-vote-1' } });
-    assert.deepEqual(harness.queueWrites, []);
     assert.equal(harness.baseline().storageReads, invalidBefore.storageReads);
     assert.equal(harness.baseline().portRequests, invalidBefore.portRequests + 1);
   }

@@ -79,6 +79,25 @@ test('Given sendMessage returns an error When translationBridge enqueues Then th
   );
 });
 
+test('Given a translation operation When translationBridge retries it Then it sends the typed retry intent, returns retryScheduled, and exposes no history or status reads', async () => {
+  const messages = [];
+  const translationBridge = await loadTranslationBridge(async (message) => {
+    messages.push(message);
+    return { retryScheduled: true, operationId: 'translation-operation-1' };
+  });
+
+  const retried = await translationBridge.retry('translation-operation-1');
+
+  assert.equal(retried, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    category: 'contribution-intent',
+    variant: 'retry-operation',
+    payload: { operationId: 'translation-operation-1' }
+  }]);
+  assert.equal(typeof translationBridge.getHistory, 'undefined');
+  assert.equal(typeof translationBridge.getStatus, 'undefined');
+});
+
 test('Given an official subtitle task When its improvement is submitted Then translationID is not required and exact resolutionContext is preserved', async () => {
   const messages = [];
   const translationBridge = await loadTranslationBridge(async (message) => {

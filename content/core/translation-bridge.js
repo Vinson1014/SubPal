@@ -3,8 +3,8 @@
  *
  * 設計理念：
  * 1. 提供簡潔的翻譯提交 API 給 page context 使用
- * 2. 透過 sendMessage 與 content script 的 SubmissionQueueManager 溝通
- * 3. 所有數據持久化由 content script 處理
+ * 2. 透過 sendMessage 發送 typed contribution intent
+ * 3. 所有數據持久化由 background owner 處理
  * 4. 專注於消息傳遞和參數驗證
  */
 
@@ -175,97 +175,34 @@ export const translationBridge = {
   },
 
   /**
-   * 獲取翻譯提交歷史
-   * @param {number} [limit=100] - 返回記錄數量上限
-   * @returns {Promise<Array>} - 翻譯歷史陣列
-   */
-  async getHistory(limit = 100) {
-    this.log('getHistory 方法被調用，limit:', limit);
-
-    try {
-      this.log('發送 TRANSLATION_GET_HISTORY 消息到 content script');
-      const response = await sendMessage({
-        type: 'TRANSLATION_GET_HISTORY',
-        payload: { limit }
-      });
-
-      this.log('TRANSLATION_GET_HISTORY 響應:', response);
-
-      if (response.error) {
-        throw new Error(response.error);
-      }
-
-      return response.history || [];
-
-    } catch (error) {
-      this.log('getHistory 失敗:', error.message);
-      throw new Error(`獲取翻譯歷史失敗: ${error.message}`);
-    }
-  },
-
-  /**
-   * 獲取項目狀態
-   * @param {string} itemId - 項目唯一識別碼
-   * @returns {Promise<Object>} - 狀態物件 { status, error? }
-   */
-  async getStatus(itemId) {
-    this.log('getStatus 方法被調用，itemId:', itemId);
-
-    if (!itemId) {
-      const error = new Error('缺少必要參數: itemId');
-      this.log('參數驗證失敗:', error.message);
-      throw error;
-    }
-
-    try {
-      this.log('發送 TRANSLATION_GET_STATUS 消息到 content script');
-      const response = await sendMessage({
-        type: 'TRANSLATION_GET_STATUS',
-        payload: { itemId }
-      });
-
-      this.log('TRANSLATION_GET_STATUS 響應:', response);
-
-      if (response.error) {
-        throw new Error(response.error);
-      }
-
-      return response;
-
-    } catch (error) {
-      this.log('getStatus 失敗:', error.message);
-      throw new Error(`獲取項目狀態失敗: ${error.message}`);
-    }
-  },
-
-  /**
    * 重試失敗的翻譯提交
-   * @param {string} itemId - 失敗項目的 ID
+   * @param {string} operationId - 失敗操作的 ID
    * @returns {Promise<boolean>} - 是否成功重試
    */
-  async retry(itemId) {
-    this.log('retry 方法被調用，itemId:', itemId);
+  async retry(operationId) {
+    this.log('retry 方法被調用，operationId:', operationId);
 
-    if (!itemId) {
-      const error = new Error('缺少必要參數: itemId');
+    if (!operationId) {
+      const error = new Error('缺少必要參數: operationId');
       this.log('參數驗證失敗:', error.message);
       throw error;
     }
 
     try {
-      this.log('發送 TRANSLATION_RETRY 消息到 content script');
+      this.log('發送 typed translation retry intent 到 content script');
       const response = await sendMessage({
-        type: 'TRANSLATION_RETRY',
-        payload: { itemId }
+        category: 'contribution-intent',
+        variant: 'retry-operation',
+        payload: { operationId }
       });
 
-      this.log('TRANSLATION_RETRY 響應:', response);
+      this.log('translation retry intent 響應:', response);
 
       if (response.error) {
         throw new Error(response.error);
       }
 
-      return response.success || false;
+      return response.retryScheduled === true;
 
     } catch (error) {
       this.log('retry 失敗:', error.message);

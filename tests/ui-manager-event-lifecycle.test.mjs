@@ -14,7 +14,7 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-async function loadManager({ pageWorld = false } = {}) {
+async function loadManager() {
   const handlers = new Map();
   const events = [];
   const lifecycle = {
@@ -39,18 +39,9 @@ async function loadManager({ pageWorld = false } = {}) {
       return lifecycle.timeouts.length;
     }
   };
-  if (!pageWorld) {
-    contextValues.chrome = { storage: { local: { get: (...args) => context.storageGet(...args) } } };
-  }
   const context = vm.createContext(contextValues);
-  context.storageGet = async () => ({});
   const source = await readFile(new URL('../content/ui/ui-manager-new.js', import.meta.url), 'utf8');
-  const legacySource = process.env.UI_MANAGER_LEGACY_STORAGE === '1'
-    ? source
-      .replace("const { authority, hasPendingVote } = await sendMessage({\n            type: 'VOTE_GET_AUTHORITY',\n            payload: { translationID: processedSubtitle.translationID }\n          });", "const { voteStateByTranslation, voteQueue } = await chrome.storage.local.get(['voteStateByTranslation', 'voteQueue']);\n          const authority = voteStateByTranslation?.[processedSubtitle.translationID];\n          const hasPendingVote = voteQueue?.some(item => item.translationID === processedSubtitle.translationID && (item.status === 'pending' || item.status === 'syncing'));")
-      .replace("const { permanentFailure: failedItem } = await sendMessage({\n        type: 'VOTE_GET_AUTHORITY',\n        payload: { translationID: this.currentSubtitle.translationID }\n      });", "const { voteQueue } = await chrome.storage.local.get('voteQueue');\n      const failedItem = voteQueue?.find(item => item.translationID === this.currentSubtitle.translationID && item.status === 'failed' && item.errorMetadata?.isPermanent && item.previousVoteState !== undefined && item.previousCounts !== undefined);")
-    : source;
-  const module = new vm.SourceTextModule(legacySource, { context, identifier: 'content/ui/ui-manager-new.js' });
+  const module = new vm.SourceTextModule(source, { context, identifier: 'content/ui/ui-manager-new.js' });
   const componentModule = (name, body = '') => new vm.SourceTextModule(`
     export class ${name} {
       async initialize() {
@@ -111,7 +102,6 @@ async function loadManager({ pageWorld = false } = {}) {
     lifecycle,
     blockInitialization() { context.blockNextInitialization = true; },
     releaseInitialization() { context.releaseInitialization(); },
-    setStorageGet(handler) { context.storageGet = handler; },
     setSendMessage(handler) { context.sendMessage = handler; },
     runTimers() {
       const callbacks = lifecycle.timeouts.splice(0);
@@ -250,7 +240,7 @@ test('Given replacement rejects after a video switch When the subtitle resumes T
   assert.equal(fixture.manager.currentSubtitle, null);
 });
 
-test('Given storage authority resolves after a video switch When the subtitle resumes Then stale authority data cannot update the new generation', async () => {
+test('Given typed vote authority resolves after a video switch When the subtitle resumes Then stale authority data cannot update the new generation', async () => {
   const fixture = await loadManager();
   const storage = deferred();
   fixture.setSendMessage(() => storage.promise);
@@ -259,14 +249,14 @@ test('Given storage authority resolves after a video switch When the subtitle re
 
   fixture.handlers.get('VIDEO_ID_CHANGED')({ oldVideoId: '1', newVideoId: '2' });
   await fixture.manager._componentReinitializationPromise;
-  storage.resolve({ voteStateByTranslation: { 'translation-1': { myVote: 'like', upvotes: 3, downvotes: 1 } }, voteQueue: [] });
+  storage.resolve({ authority: { myVote: 'like', upvotes: 3, downvotes: 1 }, hasPendingVote: false, permanentFailure: null });
   await showPromise;
 
   assert.equal(fixture.manager.currentSubtitle, null);
   assert.equal(fixture.lifecycle.voteUpdates.length, 0, 'stale authority data must not update the new generation');
 });
 
-test('Given storage authority rejects after a video switch When the subtitle resumes Then stale error recovery cannot update the new generation', async () => {
+test('Given typed vote authority rejects after a video switch When the subtitle resumes Then stale error recovery cannot update the new generation', async () => {
   const fixture = await loadManager();
   const storage = deferred();
   fixture.setSendMessage(() => storage.promise);
@@ -299,27 +289,29 @@ test('Given avoidance is delayed When the manager tears down Then the old callba
   assert.doesNotThrow(() => fixture.runTimers());
 });
 
-test('Given page-world reconciliation When local sync records are read Then queue and history come from the translation bridge without chrome.storage', async () => {
-  const fixture = await loadManager({ pageWorld: true });
-  const queueItem = { id: 'pending-item', status: 'syncing' };
-  const historyItem = { id: 'completed-item', status: 'completed', syncedAt: 123 };
+test('Given local translation operations When UIManager reads reconciliation Then it sends operation IDs and maps minimized records by operation ID', async () => {
+  const fixture = await loadManager();
+  const pendingItem = { operationId: 'pending-operation', status: 'syncing', syncedAt: null, terminal: false };
+  const completedItem = { operationId: 'completed-operation', status: 'completed', syncedAt: 123, terminal: true };
   const messages = [];
   fixture.setSendMessage(async (message) => {
     messages.push(message);
-    return { translationQueue: [queueItem], translationHistory: [historyItem] };
+    return [pendingItem, completedItem];
   });
 
-  const snapshot = await fixture.manager.readTranslationSyncSnapshot([queueItem.id, historyItem.id]);
+  const snapshot = await fixture.manager.readTranslationSyncSnapshot([pendingItem.operationId, completedItem.operationId]);
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
-    type: 'TRANSLATION_GET_RECONCILIATION',
-    payload: { itemIds: [queueItem.id, historyItem.id] }
+    category: 'contribution-read',
+    variant: 'translation-reconciliation',
+    payload: { operationIds: [pendingItem.operationId, completedItem.operationId] }
   }]);
-  assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), { queue: [queueItem], history: [historyItem] });
+  assert.equal(snapshot.get(pendingItem.operationId).status, 'syncing');
+  assert.equal(snapshot.get(completedItem.operationId).syncedAt, 123);
 });
 
-test('Given page-world vote authority and a permanent failure When UIManager reads both paths Then scoped bridge data updates and rolls back without chrome.storage', async () => {
-  const fixture = await loadManager({ pageWorld: true });
+test('Given typed vote authority and a permanent failure When UIManager reads both paths Then scoped bridge data updates and rolls back', async () => {
+  const fixture = await loadManager();
   const messages = [];
   let rollback;
   fixture.manager.revertOptimisticVote = (state, counts) => { rollback = { state, counts }; };
@@ -336,8 +328,39 @@ test('Given page-world vote authority and a permanent failure When UIManager rea
   await fixture.manager.checkAndRevertPermanentFailures();
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
-    { type: 'VOTE_GET_AUTHORITY', payload: { translationID: 'translation-1' } },
-    { type: 'VOTE_GET_AUTHORITY', payload: { translationID: 'translation-1' } }
+    { category: 'contribution-read', variant: 'vote-authority', payload: { translationID: 'translation-1' } },
+    { category: 'contribution-read', variant: 'vote-authority', payload: { translationID: 'translation-1' } }
   ]);
   assert.deepEqual(rollback, { state: 'none', counts: { like: 1, dislike: 2 } });
+});
+
+test('Given a minimized reconciliation record When UIManager reconciles local replacements Then it applies the status matched by operation ID', async () => {
+  const fixture = await loadManager();
+  const messages = [];
+  const statusUpdates = [];
+  fixture.manager.subtitleReplacer = {
+    listLocalReplacements() {
+      return [{ itemId: 'operation-1', status: 'pending' }];
+    },
+    setLocalReplacementStatus(itemId, status) {
+      statusUpdates.push({ itemId, status });
+      return { itemId, status };
+    },
+    isLocalReplacementReconciliationDue() {
+      return false;
+    }
+  };
+  fixture.setSendMessage(async (message) => {
+    messages.push(message);
+    return [{ operationId: 'operation-1', status: 'syncing', syncedAt: null, terminal: false }];
+  });
+
+  await fixture.manager.checkAndReconcileTranslationSubmissions();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    category: 'contribution-read',
+    variant: 'translation-reconciliation',
+    payload: { operationIds: ['operation-1'] }
+  }]);
+  assert.deepEqual(statusUpdates, [{ itemId: 'operation-1', status: 'syncing' }]);
 });

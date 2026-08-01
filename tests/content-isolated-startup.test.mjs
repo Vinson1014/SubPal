@@ -178,14 +178,10 @@ function createContentStartupHarness({ pageMode = 'loaded-unready' } = {}) {
     }));
   });
 
-  async function createRuntime(owner, {
-    config = 'resolve',
-    queue = 'resolve'
-  } = {}) {
+  async function createRuntime(owner, { config = 'resolve' } = {}) {
     const state = {
       configAssigned: false,
       configInitialized: false,
-      queueInitialized: false,
       mainAttempts: 0,
       mainInitialized: 0,
       isolatedAttempts: 0,
@@ -268,14 +264,6 @@ function createContentStartupHarness({ pageMode = 'loaded-unready' } = {}) {
         return [];
       });
     }, { context, identifier: `${owner}/config-schema.js` });
-    const queueModule = new vm.SyntheticModule(['SubmissionQueueManager'], function initializeQueueModule() {
-      this.setExport('SubmissionQueueManager', class SubmissionQueueManager {
-        async initialize() {
-          if (queue === 'fail') throw new Error('queue initialization failed');
-          state.queueInitialized = true;
-        }
-      });
-    }, { context, identifier: `${owner}/submission-queue-manager.js` });
     const messagingModule = new vm.SyntheticModule(['initMessaging'], function initializeMessagingModule() {
       this.setExport('initMessaging', async () => {});
     }, { context, identifier: `${owner}/messaging.js` });
@@ -288,7 +276,7 @@ function createContentStartupHarness({ pageMode = 'loaded-unready' } = {}) {
     const playbackModule = new vm.SyntheticModule(['playbackContextManager'], function initializePlaybackModule() {
       this.setExport('playbackContextManager', {});
     }, { context, identifier: `${owner}/playback-context-manager.js` });
-    for (const module of [configModule, schemaModule, queueModule, messagingModule, isolatedModule, playbackModule]) {
+    for (const module of [configModule, schemaModule, messagingModule, isolatedModule, playbackModule]) {
       await module.link(() => { throw new Error('Unexpected static import'); });
       await module.evaluate();
     }
@@ -302,7 +290,6 @@ function createContentStartupHarness({ pageMode = 'loaded-unready' } = {}) {
           return configModule;
         }
         if (specifier.endsWith('config-schema.js')) return schemaModule;
-        if (specifier.endsWith('submission-queue-manager.js')) return queueModule;
         if (specifier.endsWith('messaging.js')) return messagingModule;
         if (specifier.endsWith('isolated-endscreen-tasks.js')) return isolatedModule;
         if (specifier.endsWith('playback-context-manager.js')) return playbackModule;
@@ -580,24 +567,20 @@ test('Given a loaded but unready page script When its marker deadline arrives Th
 test('Given page readiness When startup branches settle Then each fallback row reports initialized and not-initialized owners rather than append-only evidence', async (t) => {
   const rows = [
     {
-      name: 'normal config and queue', options: {},
-      expected: { configAssigned: true, configInitialized: true, queueInitialized: true, mainAttempts: 1, mainInitialized: 1, isolatedAttempts: 1, isolatedInitialized: 1 }
-    },
-    {
-      name: 'queue failure with config available', options: { queue: 'fail' },
-      expected: { configAssigned: true, configInitialized: true, queueInitialized: false, mainAttempts: 1, mainInitialized: 1, isolatedAttempts: 1, isolatedInitialized: 1 }
+      name: 'normal config initialization', options: {},
+      expected: { configAssigned: true, configInitialized: true, mainAttempts: 1, mainInitialized: 1, isolatedAttempts: 1, isolatedInitialized: 1 }
     },
     {
       name: 'config initialization failure', options: { config: 'initialize-fail' },
-      expected: { configAssigned: true, configInitialized: false, queueInitialized: false, mainAttempts: 1, mainInitialized: 0, isolatedAttempts: 0, isolatedInitialized: 0 }
+      expected: { configAssigned: true, configInitialized: false, mainAttempts: 1, mainInitialized: 0, isolatedAttempts: 0, isolatedInitialized: 0 }
     },
     {
       name: 'outer error before config assignment', options: { config: 'import-fail' },
-      expected: { configAssigned: false, configInitialized: false, queueInitialized: false, mainAttempts: 1, mainInitialized: 0, isolatedAttempts: 0, isolatedInitialized: 0 }
+      expected: { configAssigned: false, configInitialized: false, mainAttempts: 1, mainInitialized: 0, isolatedAttempts: 0, isolatedInitialized: 0 }
     },
     {
       name: 'outer error after config assignment', options: { config: 'post-assignment-fail' },
-      expected: { configAssigned: true, configInitialized: true, queueInitialized: false, mainAttempts: 1, mainInitialized: 1, isolatedAttempts: 1, isolatedInitialized: 1 }
+      expected: { configAssigned: true, configInitialized: true, mainAttempts: 1, mainInitialized: 1, isolatedAttempts: 1, isolatedInitialized: 1 }
     }
   ];
 
@@ -660,7 +643,6 @@ test('Given production content listener after manager initialization When a publ
   const script = new vm.Script(source, { importModuleDynamically: async (specifier) => {
     if (specifier.endsWith('config-manager.js')) return import('data:text/javascript,export class ConfigManager { async initialize() {} get() { return false } subscribe() {} }');
     if (specifier.endsWith('config-schema.js')) return import('data:text/javascript,export const getAllConfigKeys = () => []');
-    if (specifier.endsWith('submission-queue-manager.js')) return import('data:text/javascript,export class SubmissionQueueManager { async initialize() {} }');
     if (specifier.endsWith('messaging.js')) return import('data:text/javascript,export const initMessaging = async () => {}');
     if (specifier.endsWith('isolated-endscreen-tasks.js')) return import('data:text/javascript,export const startIsolatedEndscreenTasks = async () => {}');
     if (specifier.endsWith('playback-context-manager.js')) return import('data:text/javascript,export const playbackContextManager = { initialize: async () => {}, getCurrentContext: () => null }');
@@ -699,7 +681,6 @@ test('Given production content listener after manager initialization When a lega
   const script = new vm.Script(source, { importModuleDynamically: async (specifier) => {
     if (specifier.endsWith('config-manager.js')) return import('data:text/javascript,export class ConfigManager { async initialize() {} get() { return false } subscribe() {} }');
     if (specifier.endsWith('config-schema.js')) return import('data:text/javascript,export const getAllConfigKeys = () => []');
-    if (specifier.endsWith('submission-queue-manager.js')) return import('data:text/javascript,export class SubmissionQueueManager { async initialize() {} }');
     if (specifier.endsWith('messaging.js')) return import('data:text/javascript,export const initMessaging = async () => {}');
     if (specifier.endsWith('isolated-endscreen-tasks.js')) return import('data:text/javascript,export const startIsolatedEndscreenTasks = async () => {}');
     if (specifier.endsWith('playback-context-manager.js')) return import('data:text/javascript,export const playbackContextManager = { initialize: async () => {}, getCurrentContext: () => null }');
@@ -769,7 +750,6 @@ test('Given cold page-script injection When isolated PlaybackContext starts Then
   const script = new vm.Script(source, { importModuleDynamically: async (specifier) => {
     if (specifier.endsWith('config-manager.js')) return import('data:text/javascript,export class ConfigManager { async initialize() {} get() { return false } subscribe() {} }');
     if (specifier.endsWith('config-schema.js')) return import('data:text/javascript,export const getAllConfigKeys = () => []');
-    if (specifier.endsWith('submission-queue-manager.js')) return import('data:text/javascript,export class SubmissionQueueManager { async initialize() {} }');
     if (specifier.endsWith('messaging.js')) return messagingModule;
     if (specifier.endsWith('isolated-endscreen-tasks.js')) return isolatedModule;
     if (specifier.endsWith('playback-context-manager.js')) return playbackModule;
@@ -814,7 +794,6 @@ test('Given cold startup with page readiness delayed beyond the legacy timeout W
   const script = new vm.Script(source, { importModuleDynamically: async (specifier) => {
     if (specifier.endsWith('config-manager.js')) return import('data:text/javascript,export class ConfigManager { async initialize() {} get() { return false } subscribe() {} }');
     if (specifier.endsWith('config-schema.js')) return import('data:text/javascript,export const getAllConfigKeys = () => []');
-    if (specifier.endsWith('submission-queue-manager.js')) return import('data:text/javascript,export class SubmissionQueueManager { async initialize() {} }');
     if (specifier.endsWith('messaging.js')) return messagingModule;
     if (specifier.endsWith('isolated-endscreen-tasks.js')) return isolatedModule;
     if (specifier.endsWith('playback-context-manager.js')) return playbackModule;
@@ -931,7 +910,6 @@ test('Given isolated startup with its own messaging module When content forwards
   const script = new vm.Script(source, { importModuleDynamically: async (specifier) => {
     if (specifier.endsWith('config-manager.js')) return import('data:text/javascript,export class ConfigManager { async initialize() {} get() { return false } subscribe() {} }');
     if (specifier.endsWith('config-schema.js')) return import('data:text/javascript,export const getAllConfigKeys = () => []');
-    if (specifier.endsWith('submission-queue-manager.js')) return import('data:text/javascript,export class SubmissionQueueManager { async initialize() {} }');
     if (specifier.endsWith('messaging.js')) return isolatedMessagingModule;
     if (specifier.endsWith('isolated-endscreen-tasks.js')) return isolatedModule;
     if (specifier.endsWith('playback-context-manager.js')) return playbackModule;
