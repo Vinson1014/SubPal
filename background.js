@@ -27,7 +27,13 @@ import {
   setBackendProfileCredentials
 } from './background/backend-profiles.js';
 import { ensureStorageMigrationsComplete } from './background/storage-migrations.js';
-import { enqueueContribution, parseContributionIntent, readVoteAuthority, retryContribution } from './background/contribution-queue.js';
+import {
+  enqueueContribution,
+  getContributionProjection,
+  parseContributionIntent,
+  retryContribution,
+  retryFailedContributions
+} from './background/contribution-queue.js';
 
 let lifecycleInitialization;
 
@@ -116,13 +122,13 @@ const BACKEND_PROFILE_COMMANDS = new Set([
   'BACKEND_PROFILES_CREATE',
   'BACKEND_PROFILES_ACTIVATE',
   'BACKEND_PROFILES_DELETE',
-  'BACKEND_PROFILES_EXPORT_QUEUE'
+  'BACKEND_PROFILES_EXPORT_QUEUE',
+  'BACKEND_PROFILES_RETRY_FAILED'
 ]);
 const CONTRIBUTION_ENQUEUE_COMMAND = 'CONTRIBUTION_ENQUEUE';
-// Temporary private adapters until Slice 7 migrates their public callers.
-const CONTRIBUTION_COMPATIBILITY_COMMANDS = new Set([
-  'VOTE_RETRY', 'TRANSLATION_RETRY', 'REPLACEMENT_EVENT_RETRY', 'VOTE_GET_AUTHORITY'
-]);
+const CONTRIBUTION_READ_COMMAND = 'CONTRIBUTION_READ';
+const CONTRIBUTION_RETRY_COMMAND = 'CONTRIBUTION_RETRY';
+const CONTRIBUTION_READ_VARIANTS = new Set(['vote-authority', 'translation-reconciliation']);
 
 function profileFailure(kind, code) {
   return { ok: false, error: { kind, code, retryable: false } };
@@ -130,6 +136,44 @@ function profileFailure(kind, code) {
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function strictOwnDataRecord(value, expectedKeys) {
+  try {
+    if (!isRecord(value)) return null;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== null && Object.getPrototypeOf(prototype) !== null) return null;
+    const keys = Object.getOwnPropertyNames(value);
+    if (Object.getOwnPropertySymbols(value).length !== 0 || keys.length !== expectedKeys.length ||
+        keys.some((key) => !expectedKeys.includes(key))) return null;
+    const result = {};
+    for (const key of expectedKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || descriptor.enumerable !== true) return null;
+      result[key] = descriptor.value;
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+function strictOwnDataArray(value) {
+  try {
+    if (!Array.isArray(value) || Object.getOwnPropertySymbols(value).length !== 0) return null;
+    const keys = Object.getOwnPropertyNames(value);
+    if (keys.length !== value.length + 1 || !keys.includes('length') ||
+        keys.some((key) => key !== 'length' && !/^(0|[1-9]\d*)$/.test(key))) return null;
+    const items = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || descriptor.enumerable !== true) return null;
+      items.push(descriptor.value);
+    }
+    return items;
+  } catch {
+    return null;
+  }
 }
 
 function readPortRequest(messageData) {
@@ -182,10 +226,13 @@ function isTrustedContributionPort(port) {
   try {
     const sender = port?.sender;
     const tab = sender?.tab;
+    const senderUrl = new URL(sender?.url);
+    const tabUrl = new URL(tab?.url);
     return port?.name === 'subtitle-assistant-channel' &&
       sender?.id === chrome.runtime.id &&
       Number.isInteger(tab?.id) && tab.id >= 0 &&
-      isHttpsNetflixUrl(sender.url) && isHttpsNetflixUrl(tab.url);
+      isHttpsNetflixUrl(sender.url) && isHttpsNetflixUrl(tab.url) &&
+      sender.url === tab.url && sender.origin === senderUrl.origin && senderUrl.origin === tabUrl.origin;
   } catch {
     return false;
   }
@@ -236,43 +283,84 @@ async function handleContributionPortRequest(messageId, request, port) {
   }
 }
 
-function parseContributionCompatibilityRequest(request) {
-  try {
-    if (!isRecord(request) || !CONTRIBUTION_COMPATIBILITY_COMMANDS.has(request.type)) return null;
-    const keys = Object.keys(request);
-    if (keys.length !== 2 || !keys.includes('type') || !keys.includes('payload') || !isRecord(request.payload)) return null;
-    const payloadKeys = Object.keys(request.payload);
-    const expectedKey = request.type === 'VOTE_GET_AUTHORITY' ? 'translationID' : 'itemId';
-    if (payloadKeys.length !== 1 || payloadKeys[0] !== expectedKey || typeof request.payload[expectedKey] !== 'string' || !request.payload[expectedKey]) return null;
-    return { type: request.type, value: request.payload[expectedKey] };
-  } catch {
-    return null;
+function parseContributionReadRequest(request) {
+  const envelope = strictOwnDataRecord(request, ['type', 'projection']);
+  if (!envelope || envelope.type !== CONTRIBUTION_READ_COMMAND) return null;
+  const projection = strictOwnDataRecord(envelope.projection, ['variant', 'payload']);
+  if (!projection || !CONTRIBUTION_READ_VARIANTS.has(projection.variant)) return null;
+  if (projection.variant === 'vote-authority') {
+    const payload = strictOwnDataRecord(projection.payload, ['translationID']);
+    return payload && typeof payload.translationID === 'string' && payload.translationID.length > 0
+      ? { projection: { variant: projection.variant, payload } }
+      : null;
   }
+  const payload = strictOwnDataRecord(projection.payload, ['operationIds']);
+  const operationIds = payload ? strictOwnDataArray(payload.operationIds) : null;
+  if (!operationIds || operationIds.length > 100 || operationIds.some((operationId) => typeof operationId !== 'string' || !operationId) ||
+      new Set(operationIds).size !== operationIds.length) return null;
+  return { projection: { variant: projection.variant, payload: { operationIds } } };
 }
 
-async function handleContributionCompatibilityPortRequest(messageId, request, port) {
+function parseContributionRetryRequest(request) {
+  const envelope = strictOwnDataRecord(request, ['type', 'operationId']);
+  return envelope && envelope.type === CONTRIBUTION_RETRY_COMMAND && typeof envelope.operationId === 'string' && envelope.operationId.length > 0
+    ? envelope
+    : null;
+}
+
+async function handleContributionReadPortRequest(messageId, request, port) {
   if (!isTrustedContributionPort(port)) {
-    port.postMessage({ messageId, response: { error: 'Unauthorized contribution compatibility request' } });
+    port.postMessage({ messageId, response: contributionFailure('forbidden', 'contribution-port-access') });
     return;
   }
-  const parsed = parseContributionCompatibilityRequest(request);
+  const parsed = parseContributionReadRequest(request);
   if (!parsed) {
-    port.postMessage({ messageId, response: { error: 'Invalid contribution compatibility request' } });
+    port.postMessage({ messageId, response: contributionFailure('invalid', 'contribution-input') });
     return;
   }
   try {
     await ensureStorageMigrationsComplete(chrome.storage.local);
-    const response = parsed.type === 'VOTE_GET_AUTHORITY'
-      ? await readVoteAuthority(chrome.storage.local, parsed.value)
-      : { success: await retryContribution(chrome.storage.local, parsed.type, parsed.value) };
-    port.postMessage({ messageId, response });
+    const value = await getContributionProjection(chrome.storage.local, parsed.projection);
+    port.postMessage({ messageId, response: { ok: true, value } });
   } catch (error) {
-    port.postMessage({ messageId, response: { error: error?.message || 'Contribution compatibility request failed' } });
+    const code = error?.message === 'Invalid active backend profile' ? 'profile-unavailable' : 'local-persistence-failed';
+    port.postMessage({ messageId, response: contributionFailure('domain-rejected', code, code === 'local-persistence-failed') });
+  }
+}
+
+async function handleContributionRetryPortRequest(messageId, request, port) {
+  if (!isTrustedContributionPort(port)) {
+    port.postMessage({ messageId, response: contributionFailure('forbidden', 'contribution-port-access') });
+    return;
+  }
+  const parsed = parseContributionRetryRequest(request);
+  if (!parsed) {
+    port.postMessage({ messageId, response: contributionFailure('invalid', 'contribution-input') });
+    return;
+  }
+  try {
+    await ensureStorageMigrationsComplete(chrome.storage.local);
+    const activeProfile = await resolveBackendProfile(chrome.storage.local);
+    if (!activeProfile?.id) throw new Error('Active profile unavailable');
+    try {
+      await retryContribution(chrome.storage.local, parsed.operationId, activeProfile.id);
+    } catch {
+      port.postMessage({ messageId, response: contributionFailure('domain-rejected', 'operation-not-found') });
+      return;
+    }
+    port.postMessage({ messageId, response: { ok: true, value: { retryScheduled: true, operationId: parsed.operationId } } });
+  } catch {
+    port.postMessage({ messageId, response: contributionFailure('domain-rejected', 'profile-unavailable') });
   }
 }
 
 function parseBackendProfileRequest(request) {
   try {
+    const retryRequest = strictOwnDataRecord(request, ['type', 'profileId', 'confirmInactiveProfile']);
+    if (retryRequest?.type === 'BACKEND_PROFILES_RETRY_FAILED') {
+      return typeof retryRequest.profileId === 'string' && retryRequest.profileId.length > 0 &&
+        typeof retryRequest.confirmInactiveProfile === 'boolean' ? retryRequest : null;
+    }
     if (!isRecord(request) || !isBackendProfileCommand(request.type) || !Object.hasOwn(request, 'type')) return null;
     const keys = Object.keys(request);
     const hasOnly = (...allowed) => keys.every((key) => allowed.includes(key));
@@ -300,6 +388,33 @@ function parseBackendProfileRequest(request) {
     }
   } catch {
     return null;
+  }
+}
+
+async function handleBackendProfileRetryPortRequest(messageId, parsed, port) {
+  try {
+    const selectedProfile = await resolveBackendProfile(chrome.storage.local, parsed.profileId);
+    const activeProfile = await resolveBackendProfile(chrome.storage.local);
+    if (!selectedProfile?.id || selectedProfile.id !== parsed.profileId || !activeProfile?.id) {
+      throw new Error('Profile unavailable');
+    }
+    if (selectedProfile.id !== activeProfile.id && !parsed.confirmInactiveProfile) {
+      port.postMessage({ messageId, response: profileFailure('forbidden', 'profile-inactive-confirmation-required') });
+      return;
+    }
+    const scheduled = await retryFailedContributions(chrome.storage.local, selectedProfile.id);
+    const triggerWork = [];
+    if (scheduled.vote > 0) triggerWork.push(syncModule.triggerVoteSync(selectedProfile.id));
+    if (scheduled.translation > 0) triggerWork.push(syncModule.triggerTranslationSync(selectedProfile.id));
+    if (scheduled.replacementEvent > 0) triggerWork.push(syncModule.triggerReplacementEventSync(selectedProfile.id));
+    await Promise.all(triggerWork);
+    port.postMessage({ messageId, response: { ok: true, value: { retryScheduled: true } } });
+  } catch (error) {
+    const message = typeof error?.message === 'string' ? error.message : '';
+    const code = message === 'Profile unavailable' || message.startsWith('Unknown backend profile')
+      ? 'profile-unavailable'
+      : 'profile-retry-failed';
+    port.postMessage({ messageId, response: profileFailure('domain-rejected', code) });
   }
 }
 
@@ -359,6 +474,9 @@ async function handleBackendProfilePortRequest(messageId, request, port) {
       case 'BACKEND_PROFILES_EXPORT_QUEUE':
         value = await exportBackendProfileQueue(chrome.storage.local, parsed.profileId);
         break;
+      case 'BACKEND_PROFILES_RETRY_FAILED':
+        await handleBackendProfileRetryPortRequest(messageId, parsed, port);
+        return;
     }
     port.postMessage({ messageId, response: { ok: true, value } });
   } catch (error) {
@@ -398,8 +516,12 @@ chrome.runtime.onConnect.addListener((port) => {
         void handleContributionPortRequest(messageId, message, port);
         return;
       }
-      if (CONTRIBUTION_COMPATIBILITY_COMMANDS.has(type)) {
-        void handleContributionCompatibilityPortRequest(messageId, message, port);
+      if (type === CONTRIBUTION_READ_COMMAND) {
+        void handleContributionReadPortRequest(messageId, message, port);
+        return;
+      }
+      if (type === CONTRIBUTION_RETRY_COMMAND) {
+        void handleContributionRetryPortRequest(messageId, message, port);
         return;
       }
       const handledCoreMessageTypes = [
@@ -436,6 +558,12 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
       const { messageId, message, type } = request;
+      if (type === CONTRIBUTION_READ_COMMAND || type === CONTRIBUTION_RETRY_COMMAND) {
+        void (type === CONTRIBUTION_READ_COMMAND
+          ? handleContributionReadPortRequest(messageId, message, port)
+          : handleContributionRetryPortRequest(messageId, message, port));
+        return;
+      }
       if (isBackendProfileCommand(type)) {
         void handleBackendProfilePortRequest(messageId, message, port);
         return;
@@ -471,6 +599,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (isBackendProfileCommand(requestType)) {
     sendResponse(profileFailure('forbidden', 'options-profile-access'));
+    return false;
+  }
+
+  if (requestType === CONTRIBUTION_READ_COMMAND || requestType === CONTRIBUTION_RETRY_COMMAND) {
+    sendResponse(contributionFailure('forbidden', 'contribution-port-access'));
     return false;
   }
 
@@ -744,9 +877,6 @@ function routeMessageToModulePort(messageId, request, port) {
   // 定義訊息類型到模組的映射
   const moduleMapping = {
     'SUBTITLE_QUERY': 'api',
-    'RETRY_FAILED_VOTES': 'sync',
-    'RETRY_FAILED_TRANSLATIONS': 'sync',
-    'RETRY_FAILED_REPLACEMENT_EVENTS': 'sync',
     'SUBTITLE_STYLE_UPDATED': 'core' // 添加字幕樣式更新消息路由
   };
 
@@ -770,12 +900,6 @@ function routeMessageToModulePort(messageId, request, port) {
           console.error('[Background] Unhandled API request type:', request.type);
           portSendResponse({ success: false, error: `Unhandled API request type: ${request.type}` });
         }
-        break;
-      case 'sync':
-        console.log('[Background] Handling in sync module (port):', request.type);
-        // 調用模組處理函數，傳遞包裝後的 sendResponse
-        // 注意：syncModule.handleMessage 需要修改以接受 portSendResponse
-        syncModule.handleMessage(request, port.sender, portSendResponse);
         break;
       default:
         // 如果模組未處理訊息，則返回錯誤

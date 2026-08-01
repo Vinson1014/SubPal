@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { enqueueContribution } from '../background/contribution-queue.js';
+import { enqueueContribution, retryFailedContributions } from '../background/contribution-queue.js';
 import { assertExactContext, contextWithExtraKey, loadSync } from './background-sync-metadata-harness.mjs';
 
 function deferred() {
@@ -44,20 +44,40 @@ function conflict409() {
   return error;
 }
 
-function pauseAfterPendingVoteSnapshot() {
+function pauseAfterPendingSnapshot(queueKey) {
   const snapshotTaken = deferred();
   const resume = deferred();
-  let voteQueueReads = 0;
+  let queueReads = 0;
   return {
     afterStorageGet: async ({ keys }) => {
-      if (keys.length !== 1 || keys[0] !== 'voteQueue') return;
-      voteQueueReads += 1;
-      if (voteQueueReads !== 2) return;
+      if (keys.length !== 1 || keys[0] !== queueKey) return;
+      queueReads += 1;
+      if (queueReads !== 2) return;
       snapshotTaken.resolve();
       await resume.promise;
     },
     resume: () => resume.resolve(),
     snapshotTaken: snapshotTaken.promise
+  };
+}
+
+function pauseAfterPendingVoteSnapshot() {
+  return pauseAfterPendingSnapshot('voteQueue');
+}
+
+function pendingTranslation(id) {
+  return {
+    id, operationId: `operation-${id}`, backendProfileId: 'profile-a', videoId: `video-${id}`, timestamp: 12.5,
+    original: `original-${id}`, translation: `translation-${id}`, languageCode: 'zh-TW', submissionReason: 'improvement',
+    status: 'pending', createdAt: Date.now(), syncedAt: null, retryCount: 0, error: null
+  };
+}
+
+function pendingReplacementEvent(id) {
+  return {
+    id, operationId: `operation-${id}`, backendProfileId: 'profile-a', translationID: `translation-${id}`,
+    contributorUserID: 'contributor-1', beneficiaryUserID: 'beneficiary-1', occurredAt: '2026-08-01T00:00:00.000Z',
+    status: 'pending', createdAt: Date.now(), syncedAt: null, retryCount: 0, error: null
   };
 }
 
@@ -264,4 +284,76 @@ test('Given a stateful vote snapshot When legacy coalescing wins before its clai
   assert.equal(state.voteHistory.some((record) => record.status === 'syncing'), false);
   assert.equal(state.voteQueue.some((record) => record.status === 'syncing'), false);
   assert.deepEqual(state.voteQueue[0], inactiveTwin);
+});
+
+test('Given each queue has active A work after its snapshot When A is retried and triggered again Then the second trigger waits for one trailing run', async () => {
+  const definitions = [
+    {
+      type: 'vote', queueKey: 'voteQueue', historyKey: 'voteHistory', trigger: 'triggerVoteSync',
+      create: (id) => ({ ...pendingVote({ id, operationId: `operation-${id}` }), videoId: `video-${id}`, translationID: null }),
+      contacts: (calls) => calls.filter(({ kind }) => kind === 'submitVote').map(({ payload }) => payload.videoID)
+    },
+    {
+      type: 'translation', queueKey: 'translationQueue', historyKey: 'translationHistory', trigger: 'triggerTranslationSync',
+      create: pendingTranslation,
+      contacts: (calls) => calls.filter(({ kind }) => kind === 'submitTranslation').map(({ payload }) => payload.translation)
+    },
+    {
+      type: 'replacementEvent', queueKey: 'replacementEventQueue', historyKey: 'replacementEventHistory', trigger: 'triggerReplacementEventSync',
+      create: pendingReplacementEvent,
+      contacts: (calls) => calls.filter(({ kind }) => kind === 'submitReplacementEvents')
+        .flatMap(({ payload }) => payload.map(({ translationID }) => translationID))
+    }
+  ];
+  const outcomes = [];
+
+  for (const definition of definitions) {
+    const pause = pauseAfterPendingSnapshot(definition.queueKey);
+    const first = definition.create(`${definition.type}-first`);
+    const retried = {
+      ...definition.create(`${definition.type}-retried`),
+      status: 'failed', retryCount: 3, error: 'temporary failure',
+      errorMetadata: { terminal: true, private: 'must-be-removed' }, syncStartedAt: 123
+    };
+    const { module, state, apiCalls, storage } = await loadSync({
+      state: {
+        backendProfiles: profileStore(),
+        voteQueue: [], translationQueue: [], replacementEventQueue: [],
+        [definition.queueKey]: [first, retried]
+      },
+      afterStorageGet: pause.afterStorageGet
+    });
+
+    const firstRun = module.namespace[definition.trigger]('profile-a');
+    await pause.snapshotTaken;
+    const scheduled = await retryFailedContributions(storage, 'profile-a');
+    let secondSettled = false;
+    const secondRun = module.namespace[definition.trigger]('profile-a').then(() => { secondSettled = true; });
+    await new Promise(setImmediate);
+    const settledBeforeRelease = secondSettled;
+    pause.resume();
+    await Promise.all([firstRun, secondRun]);
+
+    outcomes.push({
+      type: definition.type,
+      scheduled: scheduled[definition.type],
+      settledBeforeRelease,
+      contacts: definition.contacts(apiCalls),
+      queuedIds: state[definition.queueKey].map(({ id }) => id).sort(),
+      historyIds: state[definition.historyKey].map(({ id }) => id).sort()
+    });
+  }
+
+  assert.deepEqual(outcomes, definitions.map((definition) => ({
+    type: definition.type,
+    scheduled: 1,
+    settledBeforeRelease: false,
+    contacts: definition.type === 'vote'
+      ? ['video-vote-first', 'video-vote-retried']
+      : definition.type === 'translation'
+        ? ['translation-translation-first', 'translation-translation-retried']
+        : ['translation-replacementEvent-first', 'translation-replacementEvent-retried'],
+    queuedIds: [],
+    historyIds: [`${definition.type}-first`, `${definition.type}-retried`].sort()
+  })));
 });

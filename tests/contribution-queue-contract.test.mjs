@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { enqueueContribution, retryContribution, readVoteAuthority } from '../background/contribution-queue.js';
+import { enqueueContribution, getContributionProjection, retryContribution } from '../background/contribution-queue.js';
 import { runStorageMutation } from '../background/storage-mutation-coordinator.js';
 
 function clone(value) {
@@ -107,7 +107,7 @@ test('Given a rejected storage mutation When a later mutation starts Then the sh
   assert.equal(await runStorageMutation(storage, async () => 'second mutation committed'), 'second mutation committed');
 });
 
-test('Given profile-bound failed records When legacy retry and authority compatibility run Then only the bound record changes and identity survives', async () => {
+test('Given profile-bound failed records When typed retry and projection run Then only the bound record changes and identity survives', async () => {
   const storage = createStorage({
     backendProfiles: profileStore(),
     voteQueue: [
@@ -116,14 +116,16 @@ test('Given profile-bound failed records When legacy retry and authority compati
     ]
   });
 
-  assert.equal(await retryContribution(storage.local, 'VOTE_RETRY', 'operation-a'), true);
+  assert.equal(await retryContribution(storage.local, 'operation-a', 'profile-a'), true);
   assert.deepEqual(storage.data().voteQueue.map((record) => [record.id, record.operationId, record.backendProfileId, record.status, record.retryCount, record.error]), [
     ['vote-a', 'operation-a', 'profile-a', 'pending', 0, null],
     ['vote-b', 'operation-b', 'profile-b', 'failed', 2, 'foreign']
   ]);
   storage.data().voteQueue[0].status;
   await storage.local.set({ voteQueue: [{ ...storage.data().voteQueue[0], status: 'failed', errorMetadata: { isPermanent: true }, previousVoteState: 'none', previousCounts: { like: 1, dislike: 2 } }, storage.data().voteQueue[1]] });
-  assert.deepEqual(await readVoteAuthority(storage.local, 'translation-1'), {
+  assert.deepEqual(await getContributionProjection(storage.local, {
+    variant: 'vote-authority', payload: { translationID: 'translation-1' }
+  }), {
     authority: null,
     hasPendingVote: false,
     permanentFailure: { previousVoteState: 'none', previousCounts: { like: 1, dislike: 2 } }
@@ -132,13 +134,13 @@ test('Given profile-bound failed records When legacy retry and authority compati
   assert.equal(storage.data().voteQueue[1].status, 'failed');
 });
 
-test('Given retry and enqueue overlap When both compatibility and durable queue mutations complete Then neither record is lost', async () => {
+test('Given typed retry and enqueue overlap When both durable queue mutations complete Then neither record is lost', async () => {
   const storage = createStorage({
     backendProfiles: profileStore(),
     voteQueue: [{ id: 'failed-vote', operationId: 'failed-operation', backendProfileId: 'profile-a', status: 'failed', retryCount: 2, error: 'failed' }]
   });
   await Promise.all([
-    retryContribution(storage.local, 'VOTE_RETRY', 'failed-operation'),
+    retryContribution(storage.local, 'failed-operation', 'profile-a'),
     enqueueContribution(storage.local, voteIntent('new-translation'))
   ]);
   assert.equal(storage.data().voteQueue.length, 2);

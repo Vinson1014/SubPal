@@ -37,10 +37,18 @@ function normalizeResolutionContext(context) {
   };
 }
 
-// 同步狀態標誌
-let isSyncingVotes = false;
-let isSyncingTranslations = false;
-let isSyncingReplacementEvents = false;
+const voteSyncChains = new Map();
+const translationSyncChains = new Map();
+const replacementEventSyncChains = new Map();
+
+function scheduleProfileSync(chains, profileId, sync) {
+  const previous = chains.get(profileId) || Promise.resolve();
+  const current = previous.catch(() => undefined).then(() => sync(profileId));
+  chains.set(profileId, current);
+  return current.finally(() => {
+    if (chains.get(profileId) === current) chains.delete(profileId);
+  });
+}
 
 async function resolveSyncProfileId(profileId) {
   await ensureStorageMigrationsComplete();
@@ -128,6 +136,22 @@ async function markItemAsSyncing(queueType, itemId, profileId) {
  */
 async function updateQueueItemRetryCount(queueType, itemId, profileId, retryCount) {
   await updateQueueItem(queueType, itemId, profileId, { retryCount });
+}
+
+async function resetFailedItems(queueType, profileId) {
+  return await runStorageMutation(chrome.storage.local, async () => {
+    const result = await chrome.storage.local.get(queueType);
+    const queue = result[queueType] || [];
+    let resetCount = 0;
+    const updatedQueue = queue.map((item) => {
+      if (item.status !== 'failed' || item.backendProfileId !== profileId) return item;
+      const { errorMetadata, syncStartedAt, ...preserved } = item;
+      resetCount += 1;
+      return { ...preserved, status: 'pending', retryCount: 0, error: null };
+    });
+    if (resetCount > 0) await chrome.storage.local.set({ [queueType]: updatedQueue });
+    return resetCount;
+  });
 }
 
 /**
@@ -263,9 +287,9 @@ async function getSyncStatus(profileId) {
     pendingReplacementEvents: replacementEventQueue.filter(item => item.status === 'pending' && item.backendProfileId === profileId).length,
     syncingReplacementEvents: replacementEventQueue.filter(item => item.status === 'syncing' && item.backendProfileId === profileId).length,
     failedReplacementEvents: replacementEventQueue.filter(item => item.status === 'failed' && item.backendProfileId === profileId).length,
-    isSyncingVotes,
-    isSyncingTranslations,
-    isSyncingReplacementEvents
+    isSyncingVotes: voteSyncChains.has(profileId),
+    isSyncingTranslations: translationSyncChains.has(profileId),
+    isSyncingReplacementEvents: replacementEventSyncChains.has(profileId)
   };
 }
 
@@ -275,8 +299,6 @@ async function getSyncStatus(profileId) {
  * 同步待處理的投票隊列
  */
 async function syncPendingVotes(profileId) {
-  if (isSyncingVotes) return;
-  isSyncingVotes = true;
   console.log('[Sync] Starting vote sync...');
 
   try {
@@ -344,8 +366,6 @@ async function syncPendingVotes(profileId) {
     }
   } catch (error) {
     console.error('[Sync] Error during vote sync:', error);
-  } finally {
-    isSyncingVotes = false;
   }
 }
 
@@ -353,8 +373,6 @@ async function syncPendingVotes(profileId) {
  * 同步待處理的翻譯隊列
  */
 async function syncPendingTranslations(profileId) {
-  if (isSyncingTranslations) return;
-  isSyncingTranslations = true;
   console.log('[Sync] Starting translation sync...');
 
   try {
@@ -422,8 +440,6 @@ async function syncPendingTranslations(profileId) {
     }
   } catch (error) {
     console.error('[Sync] Error during translation sync:', error);
-  } finally {
-    isSyncingTranslations = false;
   }
 }
 
@@ -433,17 +449,9 @@ async function syncPendingTranslations(profileId) {
 async function retryFailedVotes(profileId) {
   const pinnedProfileId = await resolveSyncProfileId(profileId);
   await recoverStaleSyncingItems(VOTE_QUEUE_KEY, pinnedProfileId);
-  const result = await chrome.storage.local.get(VOTE_QUEUE_KEY);
-  const queue = result[VOTE_QUEUE_KEY] || [];
-  const failedItems = queue.filter(item => item.status === 'failed' && item.backendProfileId === pinnedProfileId);
-
-  for (const item of failedItems) {
-    await updateItemStatus(VOTE_QUEUE_KEY, item.id, pinnedProfileId, 'pending', null);
-    await updateQueueItemRetryCount(VOTE_QUEUE_KEY, item.id, pinnedProfileId, 0);
-  }
-
-  console.log(`[Sync] Retrying ${failedItems.length} failed votes`);
-  await syncPendingVotes(pinnedProfileId);
+  const resetCount = await resetFailedItems(VOTE_QUEUE_KEY, pinnedProfileId);
+  console.log(`[Sync] Retrying ${resetCount} failed votes`);
+  await scheduleProfileSync(voteSyncChains, pinnedProfileId, syncPendingVotes);
 }
 
 /**
@@ -452,17 +460,9 @@ async function retryFailedVotes(profileId) {
 async function retryFailedTranslations(profileId) {
   const pinnedProfileId = await resolveSyncProfileId(profileId);
   await recoverStaleSyncingItems(TRANSLATION_QUEUE_KEY, pinnedProfileId);
-  const result = await chrome.storage.local.get(TRANSLATION_QUEUE_KEY);
-  const queue = result[TRANSLATION_QUEUE_KEY] || [];
-  const failedItems = queue.filter(item => item.status === 'failed' && item.backendProfileId === pinnedProfileId);
-
-  for (const item of failedItems) {
-    await updateItemStatus(TRANSLATION_QUEUE_KEY, item.id, pinnedProfileId, 'pending', null);
-    await updateQueueItemRetryCount(TRANSLATION_QUEUE_KEY, item.id, pinnedProfileId, 0);
-  }
-
-  console.log(`[Sync] Retrying ${failedItems.length} failed translations`);
-  await syncPendingTranslations(pinnedProfileId);
+  const resetCount = await resetFailedItems(TRANSLATION_QUEUE_KEY, pinnedProfileId);
+  console.log(`[Sync] Retrying ${resetCount} failed translations`);
+  await scheduleProfileSync(translationSyncChains, pinnedProfileId, syncPendingTranslations);
 }
 
 // ==================== API 調用函數 ====================
@@ -576,69 +576,18 @@ async function sendTranslationToAPI(translationData, profileId) {
  * 觸發投票同步
  */
 export async function triggerVoteSync(profileId) {
-  if (!isSyncingVotes) {
-    const pinnedProfileId = await resolveSyncProfileId(profileId);
-    console.log('[Sync] Triggering vote sync');
-    await syncPendingVotes(pinnedProfileId);
-  } else {
-    console.log('[Sync] Vote sync already in progress');
-  }
+  const pinnedProfileId = await resolveSyncProfileId(profileId);
+  console.log('[Sync] Triggering vote sync');
+  await scheduleProfileSync(voteSyncChains, pinnedProfileId, syncPendingVotes);
 }
 
 /**
  * 觸發翻譯同步
  */
 export async function triggerTranslationSync(profileId) {
-  if (!isSyncingTranslations) {
-    const pinnedProfileId = await resolveSyncProfileId(profileId);
-    console.log('[Sync] Triggering translation sync');
-    await syncPendingTranslations(pinnedProfileId);
-  } else {
-    console.log('[Sync] Translation sync already in progress');
-  }
-}
-
-// ==================== 消息處理器 ====================
-
-/**
- * 處理資料同步相關的訊息 (通過 port)
- * @param {Object} request - 接收到的訊息請求
- * @param {object} sender - 發送者信息
- * @param {Function} portSendResponse - 回應函數 (通過 port 發送)
- */
-export function handleMessage(request, sender, portSendResponse) {
-  switch (request.type) {
-    case 'RETRY_FAILED_VOTES':
-      retryFailedVotes().then(() => {
-        portSendResponse({ success: true, message: 'Failed votes retry triggered' });
-      }).catch(error => {
-        portSendResponse({ success: false, error: error.message });
-      });
-      break;
-
-    case 'RETRY_FAILED_TRANSLATIONS':
-      retryFailedTranslations().then(() => {
-        portSendResponse({ success: true, message: 'Failed translations retry triggered' });
-      }).catch(error => {
-        portSendResponse({ success: false, error: error.message });
-      });
-      break;
-
-    case 'RETRY_FAILED_REPLACEMENT_EVENTS':
-      retryFailedReplacementEvents().then(() => {
-        portSendResponse({ success: true, message: 'Failed replacement events retry triggered' });
-      }).catch(error => {
-        portSendResponse({ success: false, error: error.message });
-      });
-      break;
-
-    default:
-      portSendResponse({
-        success: false,
-        error: `Unhandled message type in sync module: ${request.type}`
-      });
-      break;
-  }
+  const pinnedProfileId = await resolveSyncProfileId(profileId);
+  console.log('[Sync] Triggering translation sync');
+  await scheduleProfileSync(translationSyncChains, pinnedProfileId, syncPendingTranslations);
 }
 
 // ==================== 替換事件同步 ====================
@@ -648,8 +597,6 @@ export function handleMessage(request, sender, portSendResponse) {
  * 使用批量 API 提交（最多100個）
  */
 async function syncPendingReplacementEvents(profileId) {
-  if (isSyncingReplacementEvents) return;
-  isSyncingReplacementEvents = true;
   console.log('[Sync] Starting replacement event sync...');
 
   try {
@@ -722,8 +669,6 @@ async function syncPendingReplacementEvents(profileId) {
     }
   } catch (error) {
     console.error('[Sync] Error during replacement event sync:', error);
-  } finally {
-    isSyncingReplacementEvents = false;
   }
 }
 
@@ -733,17 +678,9 @@ async function syncPendingReplacementEvents(profileId) {
 async function retryFailedReplacementEvents(profileId) {
   const pinnedProfileId = await resolveSyncProfileId(profileId);
   await recoverStaleSyncingItems(REPLACEMENT_EVENT_QUEUE_KEY, pinnedProfileId);
-  const result = await chrome.storage.local.get(REPLACEMENT_EVENT_QUEUE_KEY);
-  const queue = result[REPLACEMENT_EVENT_QUEUE_KEY] || [];
-  const failedItems = queue.filter(item => item.status === 'failed' && item.backendProfileId === pinnedProfileId);
-
-  for (const item of failedItems) {
-    await updateItemStatus(REPLACEMENT_EVENT_QUEUE_KEY, item.id, pinnedProfileId, 'pending', null);
-    await updateQueueItemRetryCount(REPLACEMENT_EVENT_QUEUE_KEY, item.id, pinnedProfileId, 0);
-  }
-
-  console.log(`[Sync] Retrying ${failedItems.length} failed replacement events`);
-  await syncPendingReplacementEvents(pinnedProfileId);
+  const resetCount = await resetFailedItems(REPLACEMENT_EVENT_QUEUE_KEY, pinnedProfileId);
+  console.log(`[Sync] Retrying ${resetCount} failed replacement events`);
+  await scheduleProfileSync(replacementEventSyncChains, pinnedProfileId, syncPendingReplacementEvents);
 }
 
 /**
@@ -780,13 +717,9 @@ async function sendReplacementEventsToAPI(items, profileId) {
  * 觸發替換事件同步
  */
 export async function triggerReplacementEventSync(profileId) {
-  if (!isSyncingReplacementEvents) {
-    const pinnedProfileId = await resolveSyncProfileId(profileId);
-    console.log('[Sync] Triggering replacement event sync');
-    await syncPendingReplacementEvents(pinnedProfileId);
-  } else {
-    console.log('[Sync] Replacement event sync already in progress');
-  }
+  const pinnedProfileId = await resolveSyncProfileId(profileId);
+  console.log('[Sync] Triggering replacement event sync');
+  await scheduleProfileSync(replacementEventSyncChains, pinnedProfileId, syncPendingReplacementEvents);
 }
 
 // ==================== 初始化 ====================

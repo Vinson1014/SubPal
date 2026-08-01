@@ -62,13 +62,10 @@ const removedSyncMessages = [
   'GET_SYNC_STATUS',
   'TRIGGER_VOTE_SYNC',
   'TRIGGER_TRANSLATION_SYNC',
-  'TRIGGER_REPLACEMENT_EVENT_SYNC'
-];
-
-const retrySyncMessages = [
-  ['RETRY_FAILED_VOTES', 'retryFailedVotes'],
-  ['RETRY_FAILED_TRANSLATIONS', 'retryFailedTranslations'],
-  ['RETRY_FAILED_REPLACEMENT_EVENTS', 'retryFailedReplacementEvents']
+  'TRIGGER_REPLACEMENT_EVENT_SYNC',
+  'RETRY_FAILED_VOTES',
+  'RETRY_FAILED_TRANSLATIONS',
+  'RETRY_FAILED_REPLACEMENT_EVENTS'
 ];
 
 async function sendPortMessage(background, messageId, type) {
@@ -96,29 +93,6 @@ async function sendProfilePortMessage(background, messageId, message, sender = t
   background.connect(port);
   send({ messageId, message });
   return JSON.parse(JSON.stringify(await waitForResponse(sentMessages, messageId)));
-}
-
-function createRetrySyncModule(retryFunctions) {
-  return {
-    handleMessage(request, _sender, portSendResponse) {
-      const retry = retryFunctions[request.type];
-      if (!retry) {
-        portSendResponse({ success: false, error: `Unexpected sync request: ${request.type}` });
-        return;
-      }
-      retry().then(portSendResponse).catch((error) => {
-        portSendResponse({ success: false, error: error.message });
-      });
-    }
-  };
-}
-
-function invokeSyncMessage(syncModule, type) {
-  return new Promise((resolve) => {
-    syncModule.namespace.handleMessage({ type }, {}, (response) => {
-      resolve(JSON.parse(JSON.stringify(response)));
-    });
-  });
 }
 
 async function waitForCallCount(calls, count) {
@@ -643,38 +617,6 @@ test('Given replacement-event retries are disabled When its request receives 401
   assert.equal(requests, 1);
 });
 
-test('Given options retry commands When they reach the background port Then each returns its matching retry result', async () => {
-  const calls = [];
-  const retryFunctions = Object.fromEntries(retrySyncMessages.map(([type, retry]) => [type, async () => {
-    calls.push(retry);
-    return { success: true, retry };
-  }]));
-  const background = await loadBackgroundWithApi({}, {
-    syncModule: createRetrySyncModule(retryFunctions)
-  });
-
-  for (const [type, retry] of retrySyncMessages) {
-    assert.deepEqual(await sendPortMessage(background, `retry-${type}`, type), { success: true, retry });
-  }
-
-  assert.deepEqual(calls, retrySyncMessages.map(([, retry]) => retry));
-});
-
-test('Given a retained retry rejects When it reaches the background port Then the retry failure is returned without changing internal trigger paths', async () => {
-  const background = await loadBackgroundWithApi({}, {
-    syncModule: createRetrySyncModule({
-      RETRY_FAILED_VOTES: async () => ({ success: true }),
-      RETRY_FAILED_TRANSLATIONS: async () => { throw new Error('retry rejected'); },
-      RETRY_FAILED_REPLACEMENT_EVENTS: async () => ({ success: true })
-    })
-  });
-
-  assert.deepEqual(
-    await sendPortMessage(background, 'retry-rejects', 'RETRY_FAILED_TRANSLATIONS'),
-    { success: false, error: 'retry rejected' }
-  );
-});
-
 test('Given active profile B and caller-supplied popup identities When API proxy calls run Then only encoded B identity and credentials reach the backend', async () => {
   const callerIdentity = '../caller-a?token=malicious';
   const registrationToken = 'registration-token-must-stay-private';
@@ -1023,16 +965,321 @@ test('Given profile operation domain failures When a trusted Options Port invoke
   assert.equal(JSON.stringify(responses).includes('private-id'), false);
 });
 
-test('Given a removed sync command When it reaches the background port Then it receives the ordinary unhandled response', async () => {
-  const forwarded = [];
+test('Given an exact trusted Options Port When it retries failed work for an inactive selected profile with confirmation Then it awaits only affected pinned queue triggers and minimizes the response', async () => {
+  const retryCalls = [];
+  const triggerCalls = [];
+  const trigger = deferred();
+  const storage = {
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'active-a',
+      byId: {
+        'active-a': { id: 'active-a', endpoint: 'https://a.example.test', userId: 'user-a', jwt: null },
+        'inactive-b': { id: 'inactive-b', endpoint: 'https://b.example.test', userId: 'user-b', jwt: null }
+      }
+    }
+  };
   const background = await loadBackgroundWithApi({}, {
+    storage,
+    contributionQueue: {
+      async retryFailedContributions(_storage, profileId) {
+        retryCalls.push(profileId);
+        return { vote: 1, translation: 0, replacementEvent: 2 };
+      }
+    },
     syncModule: {
-      handleMessage(request, _sender, portSendResponse) {
-        forwarded.push(request.type);
-        portSendResponse({ success: true, forwarded: request.type });
+      async triggerVoteSync(profileId) {
+        triggerCalls.push(['vote', profileId]);
+        await trigger.promise;
+      },
+      async triggerTranslationSync(profileId) { triggerCalls.push(['translation', profileId]); },
+      async triggerReplacementEventSync(profileId) {
+        triggerCalls.push(['replacementEvent', profileId]);
+        await trigger.promise;
       }
     }
   });
+  const { port, send, sentMessages } = createPort();
+  port.name = 'options-page-channel';
+  port.sender = trustedOptionsSender();
+  background.connect(port);
+  send({
+    messageId: 'retry-inactive',
+    message: { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'inactive-b', confirmInactiveProfile: true }
+  });
+
+  await waitFor(() => triggerCalls.length === 2, 'pinned affected queue triggers');
+  assert.deepEqual(retryCalls, ['inactive-b']);
+  assert.deepEqual(triggerCalls, [['vote', 'inactive-b'], ['replacementEvent', 'inactive-b']]);
+  assert.equal(sentMessages.some(({ messageId }) => messageId === 'retry-inactive'), false);
+  trigger.resolve();
+  assert.deepEqual(JSON.parse(JSON.stringify(await waitForResponse(sentMessages, 'retry-inactive'))), {
+    ok: true,
+    value: { retryScheduled: true }
+  });
+});
+
+test('Given active A is syncing When confirmed inactive B retry starts through the real owner Then both profiles complete once and ACK waits for B', async () => {
+  const activeEntered = deferred();
+  const releaseActive = deferred();
+  const inactiveEntered = deferred();
+  const releaseInactive = deferred();
+  const apiCalls = [];
+  const storage = {
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'active-a',
+      byId: {
+        'active-a': { id: 'active-a', endpoint: 'https://a.example.test', userId: 'user-a', jwt: null },
+        'inactive-b': { id: 'inactive-b', endpoint: 'https://b.example.test', userId: 'user-b', jwt: null }
+      }
+    },
+    voteQueue: [
+      { ...pendingVote('active-vote'), backendProfileId: 'active-a', operationId: 'active-operation' },
+      { ...pendingVote('inactive-vote'), backendProfileId: 'inactive-b', operationId: 'inactive-operation', status: 'failed', retryCount: 3, error: 'temporary failure' }
+    ],
+    voteHistory: [],
+    translationQueue: [],
+    translationHistory: [],
+    replacementEventQueue: [],
+    replacementEventHistory: [],
+    voteStateByTranslation: {}
+  };
+  const background = await loadBackgroundWithApi({
+    isPermanentError: () => false,
+    setVoteState: async () => ({ myVote: null, upvotes: 0, downvotes: 0 }),
+    async submitVote(payload) {
+      apiCalls.push({ kind: 'vote', profileId: payload.backendProfileId });
+      if (payload.backendProfileId === 'active-a') {
+        activeEntered.resolve();
+        await releaseActive.promise;
+      } else {
+        inactiveEntered.resolve();
+        await releaseInactive.promise;
+      }
+      return { success: true };
+    },
+    submitTranslation: async () => ({ success: true }),
+    submitReplacementEvents: async () => ({ success: true })
+  }, { realContributionQueue: true, realSyncModule: true, storage });
+  const { port, send, sentMessages } = createPort();
+  port.name = 'options-page-channel';
+  port.sender = trustedOptionsSender();
+  background.connect(port);
+
+  const activeSync = background.actualSync.triggerVoteSync('active-a');
+  await activeEntered.promise;
+  send({
+    messageId: 'real-inactive-retry',
+    message: { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'inactive-b', confirmInactiveProfile: true }
+  });
+
+  try {
+    await waitFor(() => apiCalls.some(({ profileId }) => profileId === 'inactive-b') ||
+      sentMessages.some(({ messageId }) => messageId === 'real-inactive-retry'), 'inactive B API contact or early ACK');
+    assert.equal(apiCalls.filter(({ profileId }) => profileId === 'inactive-b').length, 1);
+    assert.equal(sentMessages.some(({ messageId }) => messageId === 'real-inactive-retry'), false);
+
+    const duplicateInactiveSync = background.actualSync.triggerVoteSync('inactive-b');
+    await new Promise(setImmediate);
+    assert.equal(apiCalls.filter(({ profileId }) => profileId === 'inactive-b').length, 1);
+    releaseInactive.resolve();
+    assert.deepEqual(JSON.parse(JSON.stringify(await waitForResponse(sentMessages, 'real-inactive-retry'))), {
+      ok: true,
+      value: { retryScheduled: true }
+    });
+    await duplicateInactiveSync;
+  } finally {
+    releaseInactive.resolve();
+    releaseActive.resolve();
+    await activeSync;
+  }
+
+  assert.deepEqual(apiCalls.map(({ profileId }) => profileId).sort(), ['active-a', 'inactive-b']);
+  assert.deepEqual(storage.voteQueue, []);
+  assert.deepEqual(storage.voteHistory.map(({ id, operationId, backendProfileId, status }) => ({ id, operationId, backendProfileId, status })).sort((left, right) => left.id.localeCompare(right.id)), [
+    { id: 'active-vote', operationId: 'active-operation', backendProfileId: 'active-a', status: 'completed' },
+    { id: 'inactive-vote', operationId: 'inactive-operation', backendProfileId: 'inactive-b', status: 'completed' }
+  ]);
+});
+
+test('Given active A captured its vote snapshot When Options retries another A failure Then ACK waits for the queued same-profile run', async () => {
+  const firstEntered = deferred();
+  const releaseFirst = deferred();
+  const secondEntered = deferred();
+  const releaseSecond = deferred();
+  const apiCalls = [];
+  const storage = {
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'active-a',
+      byId: { 'active-a': { id: 'active-a', endpoint: 'https://a.example.test', userId: 'user-a', jwt: null } }
+    },
+    voteQueue: [
+      { ...pendingVote('active-first'), videoId: 'video-first', backendProfileId: 'active-a', operationId: 'operation-first' },
+      {
+        ...pendingVote('active-retried'), videoId: 'video-retried', backendProfileId: 'active-a', operationId: 'operation-retried',
+        status: 'failed', retryCount: 3, error: 'temporary failure',
+        errorMetadata: { terminal: true, private: 'must-be-removed' }, syncStartedAt: 123
+      }
+    ],
+    voteHistory: [],
+    translationQueue: [],
+    translationHistory: [],
+    replacementEventQueue: [],
+    replacementEventHistory: [],
+    voteStateByTranslation: {}
+  };
+  const background = await loadBackgroundWithApi({
+    isPermanentError: () => false,
+    setVoteState: async () => ({ myVote: null, upvotes: 0, downvotes: 0 }),
+    async submitVote(payload) {
+      apiCalls.push(payload.videoID);
+      if (apiCalls.length === 1) {
+        firstEntered.resolve();
+        await releaseFirst.promise;
+      } else {
+        secondEntered.resolve();
+        await releaseSecond.promise;
+      }
+      return { success: true };
+    },
+    submitTranslation: async () => ({ success: true }),
+    submitReplacementEvents: async () => ({ success: true })
+  }, { realContributionQueue: true, realSyncModule: true, storage });
+  const { port, send, sentMessages } = createPort();
+  port.name = 'options-page-channel';
+  port.sender = trustedOptionsSender();
+  background.connect(port);
+
+  const activeSync = background.actualSync.triggerVoteSync('active-a');
+  await firstEntered.promise;
+  send({
+    messageId: 'same-profile-retry',
+    message: { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'active-a', confirmInactiveProfile: false }
+  });
+
+  try {
+    await waitFor(() => storage.voteQueue.find(({ id }) => id === 'active-retried')?.status === 'pending', 'same-profile retry reset');
+    for (let turn = 0; turn < 5; turn += 1) await new Promise(setImmediate);
+    assert.equal(sentMessages.some(({ messageId }) => messageId === 'same-profile-retry'), false);
+
+    releaseFirst.resolve();
+    await waitFor(() => apiCalls.length === 2 || sentMessages.some(({ messageId }) => messageId === 'same-profile-retry'), 'trailing API contact or early ACK');
+    assert.deepEqual(apiCalls, ['video-first', 'video-retried']);
+    assert.equal(sentMessages.some(({ messageId }) => messageId === 'same-profile-retry'), false);
+    releaseSecond.resolve();
+    assert.deepEqual(JSON.parse(JSON.stringify(await waitForResponse(sentMessages, 'same-profile-retry'))), {
+      ok: true,
+      value: { retryScheduled: true }
+    });
+  } finally {
+    releaseFirst.resolve();
+    releaseSecond.resolve();
+    await activeSync;
+  }
+
+  assert.deepEqual(storage.voteQueue, []);
+  assert.deepEqual(storage.voteHistory.map(({ id }) => id).sort(), ['active-first', 'active-retried']);
+});
+
+test('Given startup retries failed records with private metadata When initializeSync completes Then all queue histories are sanitized', async () => {
+  const secret = 'private-terminal-metadata-must-not-survive-startup';
+  const failed = (record) => ({
+    ...record,
+    status: 'failed', retryCount: 3, error: 'temporary failure', syncStartedAt: 123,
+    errorMetadata: { terminal: true, diagnostic: secret }
+  });
+  const { module, state, apiCalls } = await loadSync({
+    state: {
+      voteQueue: [failed(pendingVote('startup-vote'))],
+      translationQueue: [failed(pendingTranslation('startup-translation'))],
+      replacementEventQueue: [failed(pendingReplacementEvent('startup-replacement'))]
+    }
+  });
+
+  await module.namespace.initializeSync();
+
+  const histories = [state.voteHistory, state.translationHistory, state.replacementEventHistory];
+  assert.deepEqual(histories.map((history) => history.map((record) => ({
+    id: record.id,
+    hasErrorMetadata: Object.hasOwn(record, 'errorMetadata'),
+    hasSyncStartedAt: Object.hasOwn(record, 'syncStartedAt'),
+    hasRetryCount: Object.hasOwn(record, 'retryCount'),
+    hasError: Object.hasOwn(record, 'error')
+  }))), [
+    [{ id: 'startup-vote', hasErrorMetadata: false, hasSyncStartedAt: false, hasRetryCount: false, hasError: false }],
+    [{ id: 'startup-translation', hasErrorMetadata: false, hasSyncStartedAt: false, hasRetryCount: false, hasError: false }],
+    [{ id: 'startup-replacement', hasErrorMetadata: false, hasSyncStartedAt: false, hasRetryCount: false, hasError: false }]
+  ]);
+  assert.equal(JSON.stringify(apiCalls).includes(secret), false);
+  assert.equal(JSON.stringify(histories).includes(secret), false);
+});
+
+test('Given unconfirmed, unknown, malformed, or untrusted bulk retry requests When they reach the closed profile route Then they have no retry effects and return safe Results', async () => {
+  const retryCalls = [];
+  const triggerCalls = [];
+  const storage = {
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'active-a',
+      byId: {
+        'active-a': { id: 'active-a', endpoint: 'https://a.example.test', userId: 'user-a', jwt: null },
+        'inactive-b': { id: 'inactive-b', endpoint: 'https://b.example.test', userId: 'user-b', jwt: null }
+      }
+    }
+  };
+  const background = await loadBackgroundWithApi({}, {
+    storage,
+    contributionQueue: {
+      async retryFailedContributions(_storage, profileId) { retryCalls.push(profileId); return { vote: 1, translation: 1, replacementEvent: 1 }; }
+    },
+    syncModule: {
+      async triggerVoteSync(profileId) { triggerCalls.push(['vote', profileId]); },
+      async triggerTranslationSync(profileId) { triggerCalls.push(['translation', profileId]); },
+      async triggerReplacementEventSync(profileId) { triggerCalls.push(['replacementEvent', profileId]); }
+    }
+  });
+  const baseline = background.storageCalls.length;
+  const request = { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'inactive-b', confirmInactiveProfile: false };
+  assert.deepEqual(await sendProfilePortMessage(background, 'unconfirmed-inactive', request), {
+    ok: false,
+    error: { kind: 'forbidden', code: 'profile-inactive-confirmation-required', retryable: false }
+  });
+  assert.deepEqual(await sendProfilePortMessage(background, 'unknown-profile', {
+    type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'missing-private-profile', confirmInactiveProfile: true
+  }), {
+    ok: false,
+    error: { kind: 'domain-rejected', code: 'profile-unavailable', retryable: false }
+  });
+  const accessor = { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'inactive-b' };
+  Object.defineProperty(accessor, 'confirmInactiveProfile', { enumerable: true, get() { return true; } });
+  const symbol = { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'inactive-b', confirmInactiveProfile: true };
+  symbol[Symbol('authority')] = true;
+  for (const message of [
+    { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'inactive-b', confirmInactiveProfile: 'true' },
+    { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'inactive-b', confirmInactiveProfile: true, backendProfileId: 'forged' },
+    Object.assign(Object.create({ profileId: 'inactive-b' }), { type: 'BACKEND_PROFILES_RETRY_FAILED', confirmInactiveProfile: true }),
+    accessor,
+    symbol
+  ]) {
+    assert.deepEqual(await sendProfilePortMessage(background, 'malformed-retry', message), {
+      ok: false,
+      error: { kind: 'invalid', code: 'profile-input', retryable: false }
+    });
+  }
+  const forbidden = { ok: false, error: { kind: 'forbidden', code: 'options-profile-access', retryable: false } };
+  assert.deepEqual(await sendProfilePortMessage(background, 'netflix-retry', request, {
+    id: 'subpal-extension-id', tab: { id: 7, url: 'https://www.netflix.com/watch/81234567' }, url: 'https://www.netflix.com/watch/81234567', origin: 'https://www.netflix.com'
+  }), forbidden);
+  assert.deepEqual(JSON.parse(JSON.stringify(await sendRuntimeMessage(background, request, trustedOptionsSender()))), forbidden);
+  assert.deepEqual(retryCalls, []);
+  assert.deepEqual(triggerCalls, []);
+  assert.equal(background.storageCalls.length, baseline);
+});
+
+test('Given retired generic sync commands When they reach the background port Then each receives the ordinary unhandled response without invoking a sync handler', async () => {
+  const background = await loadBackgroundWithApi({}, {});
 
   for (const type of removedSyncMessages) {
     assert.deepEqual(
@@ -1040,45 +1287,8 @@ test('Given a removed sync command When it reaches the background port Then it r
       { success: false, error: `Unhandled message type (port) ${type}` }
     );
   }
-
-  assert.deepEqual(forwarded, []);
-});
-
-test('Given a removed sync command When it reaches the sync handler Then it receives the handler unhandled response', async () => {
-  const { module } = await loadSync();
-
-  for (const type of removedSyncMessages) {
-    assert.deepEqual(
-      await invokeSyncMessage(module, type),
-      { success: false, error: `Unhandled message type in sync module: ${type}` }
-    );
-  }
-});
-
-test('Given held or rejected storage migration When Options retries failed queues Then all retry commands avoid queue and API work until readiness', async () => {
-  for (const [type] of retrySyncMessages) {
-    const migration = deferred();
-    const { apiCalls, module, storageCalls } = await loadSync({ migration: migration.promise });
-    const retry = invokeSyncMessage(module, type);
-    await new Promise(setImmediate);
-    assert.deepEqual(storageCalls, [], type);
-    assert.deepEqual(apiCalls, [], type);
-
-    migration.resolve();
-    assert.deepEqual(await retry, { success: true, message: 'Failed ' + (
-      type === 'RETRY_FAILED_VOTES' ? 'votes' : type === 'RETRY_FAILED_TRANSLATIONS' ? 'translations' : 'replacement events'
-    ) + ' retry triggered' });
-
-    const rejected = deferred();
-    rejected.promise.catch(() => {});
-    const failed = await loadSync({ migration: rejected.promise });
-    const response = invokeSyncMessage(failed.module, type);
-    await new Promise(setImmediate);
-    rejected.reject(new Error('migration rejected'));
-    assert.deepEqual(await response, { success: false, error: 'migration rejected' });
-    assert.deepEqual(failed.storageCalls, []);
-    assert.deepEqual(failed.apiCalls, []);
-  }
+  assert.deepEqual(background.storageCalls, []);
+  assert.equal(background.profileMigrationCalls, 0);
 });
 
 test('Given pending queues When each exported sync trigger runs Then votes, translations, and replacement events synchronize', async () => {

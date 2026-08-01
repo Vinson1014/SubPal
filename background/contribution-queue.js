@@ -35,8 +35,13 @@ function isNonEmptyString(value) {
 }
 
 function ownDataValue(value, key) {
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  try {
+    if (!isRecord(value)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function strictOwnRecord(value, allowedKeys, requiredKeys) {
@@ -250,65 +255,199 @@ function queueReplacementEvent(queue, payload, backendProfileId) {
   };
 }
 
-const RETRY_QUEUE_KEYS = Object.freeze({
-  VOTE_RETRY: 'voteQueue',
-  TRANSLATION_RETRY: 'translationQueue',
-  REPLACEMENT_EVENT_RETRY: 'replacementEventQueue'
-});
+const QUEUE_TYPES = Object.freeze([
+  { type: 'vote', key: 'voteQueue', historyKey: 'voteHistory' },
+  { type: 'translation', key: 'translationQueue', historyKey: 'translationHistory' },
+  { type: 'replacementEvent', key: 'replacementEventQueue', historyKey: 'replacementEventHistory' }
+]);
+const PROJECTION_ENVELOPE_KEYS = new Set(['variant', 'payload']);
+const VOTE_AUTHORITY_PROJECTION_KEYS = new Set(['translationID']);
+const TRANSLATION_RECONCILIATION_PROJECTION_KEYS = new Set(['operationIds']);
+const RECONCILIATION_STATUSES = new Set(['pending', 'syncing', 'failed', 'completed']);
 
-function hasKnownProfile(store, profileId) {
-  return isRecord(store) && isRecord(store.byId) && isRecord(store.byId[profileId]) &&
-    store.byId[profileId].id === profileId;
+function canonicalProfile(store, profileId) {
+  if (!isRecord(store) || !isNonEmptyString(profileId)) return null;
+  const byId = ownDataValue(store, 'byId');
+  const profile = isRecord(byId) ? ownDataValue(byId, profileId) : null;
+  const endpoint = isRecord(profile) ? normalizeBackendEndpoint(ownDataValue(profile, 'endpoint')) : null;
+  const userId = isRecord(profile) ? ownDataValue(profile, 'userId') : null;
+  const jwt = isRecord(profile) ? ownDataValue(profile, 'jwt') : null;
+  if (!isRecord(profile) || ownDataValue(profile, 'id') !== profileId || !endpoint || !isNonEmptyString(userId) ||
+      (jwt !== null && typeof jwt !== 'string')) return null;
+  return { id: profileId, endpoint, userId, jwt };
 }
 
-export async function retryContribution(storage, type, operationId) {
-  const queueKey = RETRY_QUEUE_KEYS[type];
-  if (!queueKey || !isNonEmptyString(operationId)) throw new Error('Invalid contribution retry');
+function retryFailedRecord(record) {
+  const { errorMetadata, syncStartedAt, ...preserved } = record;
+  return { ...preserved, status: 'pending', retryCount: 0, error: null };
+}
+
+function operationMatches(record, operationId) {
+  return isRecord(record) && (record.operationId === operationId || record.id === operationId);
+}
+
+function collectOperationMatches(data, operationId) {
+  return QUEUE_TYPES.flatMap(({ key }) => {
+    const queue = Array.isArray(data[key]) ? data[key] : [];
+    return queue.flatMap((record, index) => operationMatches(record, operationId) ? [{ key, index, record }] : []);
+  });
+}
+
+export async function retryContribution(storage, operationId, authorizedProfileId) {
+  if (!isNonEmptyString(operationId) || !isNonEmptyString(authorizedProfileId)) {
+    throw new Error('Invalid contribution retry');
+  }
   await ensureBackendProfilesMigrated(storage);
   return await runStorageMutation(storage, async () => {
-    const data = await storage.get([PROFILE_STORE_KEY, queueKey]);
-    const queue = Array.isArray(data[queueKey]) ? data[queueKey] : [];
-    const index = queue.findIndex((record) => isRecord(record) &&
-      (record.operationId === operationId || record.id === operationId) && record.status === 'failed' &&
-      hasKnownProfile(data[PROFILE_STORE_KEY], record.backendProfileId));
-    if (index === -1) throw new Error('Contribution retry record not found');
+    const data = await storage.get([PROFILE_STORE_KEY, ...QUEUE_TYPES.map(({ key }) => key)]);
+    const activeProfile = canonicalActiveProfile(data[PROFILE_STORE_KEY]);
+    if (!activeProfile || activeProfile.id !== authorizedProfileId) {
+      throw new Error('Contribution retry is not authorized for this profile');
+    }
+    const matches = collectOperationMatches(data, operationId);
+    if (matches.length !== 1) throw new Error('Contribution retry record not found or ambiguous');
+    const match = matches[0];
+    if (match.record.backendProfileId !== authorizedProfileId) {
+      throw new Error('Contribution retry is not authorized for this profile');
+    }
+    if (match.record.status === 'pending' || match.record.status === 'syncing') return true;
+    if (match.record.status !== 'failed') throw new Error('Contribution retry record not found');
+    const queue = Array.isArray(data[match.key]) ? data[match.key] : [];
     const nextQueue = [...queue];
-    nextQueue[index] = { ...queue[index], status: 'pending', retryCount: 0, error: null };
-    await storage.set({ [queueKey]: nextQueue });
+    nextQueue[match.index] = retryFailedRecord(match.record);
+    await storage.set({ [match.key]: nextQueue });
     return true;
   });
 }
 
-export async function readVoteAuthority(storage, translationID) {
-  if (!isNonEmptyString(translationID)) throw new Error('Invalid vote authority request');
+export async function retryFailedContributions(storage, authorizedProfileId) {
+  if (!isNonEmptyString(authorizedProfileId)) throw new Error('Invalid contribution retry');
   await ensureBackendProfilesMigrated(storage);
   return await runStorageMutation(storage, async () => {
-    const data = await storage.get([PROFILE_STORE_KEY, 'voteQueue', 'voteStateByTranslation']);
+    const queueKeys = QUEUE_TYPES.map(({ key }) => key);
+    const data = await storage.get([PROFILE_STORE_KEY, ...queueKeys]);
+    const profile = canonicalProfile(data[PROFILE_STORE_KEY], authorizedProfileId);
+    if (!profile) {
+      throw new Error('Contribution retry is not authorized for this profile');
+    }
+    const scheduled = {};
+    const nextQueues = {};
+    let changed = false;
+    for (const { type, key } of QUEUE_TYPES) {
+      const queue = Array.isArray(data[key]) ? data[key] : [];
+      let count = 0;
+      const nextQueue = queue.map((record) => {
+        if (!isRecord(record) || record.backendProfileId !== authorizedProfileId || record.status !== 'failed') return record;
+        count += 1;
+        return retryFailedRecord(record);
+      });
+      scheduled[type] = count;
+      nextQueues[key] = nextQueue;
+      changed ||= count > 0;
+    }
+    if (changed) await storage.set(nextQueues);
+    return scheduled;
+  });
+}
+
+function parseContributionProjection(approvedRead) {
+  const envelope = strictOwnRecord(approvedRead, PROJECTION_ENVELOPE_KEYS, PROJECTION_ENVELOPE_KEYS);
+  if (!envelope || !isNonEmptyString(envelope.variant)) return null;
+  if (envelope.variant === 'vote-authority') {
+    const payload = strictOwnRecord(envelope.payload, VOTE_AUTHORITY_PROJECTION_KEYS, VOTE_AUTHORITY_PROJECTION_KEYS);
+    return payload && isNonEmptyString(payload.translationID)
+      ? { variant: envelope.variant, translationID: payload.translationID }
+      : null;
+  }
+  if (envelope.variant === 'translation-reconciliation') {
+    const payload = strictOwnRecord(envelope.payload, TRANSLATION_RECONCILIATION_PROJECTION_KEYS, TRANSLATION_RECONCILIATION_PROJECTION_KEYS);
+    if (!payload || !Array.isArray(payload.operationIds) || payload.operationIds.length > 100 ||
+        payload.operationIds.some((operationId) => !isNonEmptyString(operationId)) ||
+        new Set(payload.operationIds).size !== payload.operationIds.length) return null;
+    return { variant: envelope.variant, operationIds: [...payload.operationIds] };
+  }
+  return null;
+}
+
+function projectVoteAuthority(record, profileId) {
+  if (!isRecord(record) || record.backendProfileId !== profileId) return null;
+  const myVote = ownDataValue(record, 'myVote');
+  const upvotes = ownDataValue(record, 'upvotes');
+  const downvotes = ownDataValue(record, 'downvotes');
+  if (!(myVote === null || ['like', 'dislike', 'none'].includes(myVote)) ||
+      !Number.isFinite(upvotes) || upvotes < 0 || !Number.isFinite(downvotes) || downvotes < 0) return null;
+  return { myVote: myVote === 'none' ? null : myVote, upvotes, downvotes };
+}
+
+function projectPermanentVoteFailure(record, profileId, translationID) {
+  if (!isRecord(record) || ownDataValue(record, 'backendProfileId') !== profileId ||
+      ownDataValue(record, 'translationID') !== translationID || ownDataValue(record, 'status') !== 'failed' ||
+      ownDataValue(ownDataValue(record, 'errorMetadata'), 'isPermanent') !== true) return null;
+  const previousVoteState = ownDataValue(record, 'previousVoteState');
+  const previousCounts = parsePreviousCounts(ownDataValue(record, 'previousCounts'));
+  if (!(previousVoteState === null || ['like', 'dislike', 'none'].includes(previousVoteState)) || !previousCounts) return null;
+  return { previousVoteState, previousCounts };
+}
+
+function reconciliationRecord(queue, history, operationId, profileId) {
+  const matchingRecord = (records) => records.find((record) => {
+    if (!isRecord(record) || record.backendProfileId !== profileId) return false;
+    return Object.hasOwn(record, 'operationId')
+      ? ownDataValue(record, 'operationId') === operationId
+      : ownDataValue(record, 'id') === operationId;
+  });
+  return matchingRecord(queue) || matchingRecord(history) || null;
+}
+
+function projectReconciliationRecord(record, operationId) {
+  if (!isRecord(record)) return null;
+  const status = ownDataValue(record, 'status');
+  const syncedAt = ownDataValue(record, 'syncedAt');
+  const errorMetadata = ownDataValue(record, 'errorMetadata');
+  if (!isNonEmptyString(operationId) || !RECONCILIATION_STATUSES.has(status) ||
+      !(syncedAt === null || Number.isFinite(syncedAt))) return null;
+  return {
+    operationId,
+    status,
+    syncedAt,
+    terminal: isRecord(errorMetadata) && ownDataValue(errorMetadata, 'terminal') === true
+  };
+}
+
+export async function getContributionProjection(storage, approvedRead) {
+  const request = parseContributionProjection(approvedRead);
+  if (!request) throw new Error('Invalid contribution projection');
+  await ensureBackendProfilesMigrated(storage);
+  return await runStorageMutation(storage, async () => {
+    const keys = request.variant === 'vote-authority'
+      ? [PROFILE_STORE_KEY, 'voteQueue', 'voteStateByTranslation']
+      : [PROFILE_STORE_KEY, 'translationQueue', 'translationHistory'];
+    const data = await storage.get(keys);
     const profile = canonicalActiveProfile(data[PROFILE_STORE_KEY]);
     if (!profile) throw new Error('Invalid active backend profile');
-    const queue = Array.isArray(data.voteQueue) ? data.voteQueue : [];
-    const failedIndex = queue.findIndex((record) => isRecord(record) && record.backendProfileId === profile.id &&
-      record.translationID === translationID && record.status === 'failed' && record.errorMetadata?.isPermanent &&
-      record.previousVoteState !== undefined && record.previousCounts !== undefined);
-    const permanentFailure = failedIndex === -1 ? null : queue[failedIndex];
-    if (failedIndex !== -1) {
-      const nextQueue = [...queue];
-      nextQueue[failedIndex] = { ...permanentFailure, status: 'failed-reverted' };
-      await storage.set({ voteQueue: nextQueue });
+    if (request.variant === 'vote-authority') {
+      const queue = Array.isArray(data.voteQueue) ? data.voteQueue : [];
+      const failedIndex = queue.findIndex((record) => projectPermanentVoteFailure(record, profile.id, request.translationID));
+      const permanentFailure = failedIndex === -1 ? null : projectPermanentVoteFailure(queue[failedIndex], profile.id, request.translationID);
+      if (failedIndex !== -1) {
+        const nextQueue = [...queue];
+        nextQueue[failedIndex] = { ...queue[failedIndex], status: 'failed-reverted' };
+        await storage.set({ voteQueue: nextQueue });
+      }
+      return {
+        authority: projectVoteAuthority(data.voteStateByTranslation?.[request.translationID], profile.id),
+        hasPendingVote: queue.some((record) => isRecord(record) && record.backendProfileId === profile.id &&
+          record.translationID === request.translationID && (record.status === 'pending' || record.status === 'syncing')),
+        permanentFailure
+      };
     }
-    const authority = isRecord(data.voteStateByTranslation?.[translationID]) &&
-      data.voteStateByTranslation[translationID].backendProfileId === profile.id
-      ? data.voteStateByTranslation[translationID]
-      : null;
-    return {
-      authority,
-      hasPendingVote: queue.some((record) => isRecord(record) && record.backendProfileId === profile.id &&
-        record.translationID === translationID && (record.status === 'pending' || record.status === 'syncing')),
-      permanentFailure: permanentFailure ? {
-        previousVoteState: permanentFailure.previousVoteState,
-        previousCounts: permanentFailure.previousCounts
-      } : null
-    };
+    const queue = Array.isArray(data.translationQueue) ? data.translationQueue : [];
+    const history = Array.isArray(data.translationHistory) ? data.translationHistory : [];
+    return request.operationIds.flatMap((operationId) => {
+      const record = reconciliationRecord(queue, history, operationId, profile.id);
+      const projection = projectReconciliationRecord(record, operationId);
+      return projection ? [projection] : [];
+    });
   });
 }
 

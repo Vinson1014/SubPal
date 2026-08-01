@@ -3,11 +3,15 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
 export async function loadBackgroundWithApi(apiModule, options = {}) {
+  const modulesByContext = new WeakMap();
   return await loadBackground((specifier, context) => {
-    if (specifier === './background/api.js') {
-      return new vm.SyntheticModule(Object.keys(apiModule), function init() {
-        for (const [name, value] of Object.entries(apiModule)) this.setExport(name, value);
-      }, { context, identifier: 'api.js' });
+    if (specifier === './background/api.js' || specifier === './api.js') {
+      if (!modulesByContext.has(context)) {
+        modulesByContext.set(context, new vm.SyntheticModule(Object.keys(apiModule), function init() {
+          for (const [name, value] of Object.entries(apiModule)) this.setExport(name, value);
+        }, { context, identifier: 'api.js' }));
+      }
+      return modulesByContext.get(context);
     }
     if (specifier === './background/sync.js' && options.syncModule) {
       return new vm.SyntheticModule(Object.keys(options.syncModule), function init() {
@@ -67,6 +71,21 @@ async function loadStorageMigrationsModule(context, backendProfilesModule) {
 
 function createConsole(logs) {
   return Object.fromEntries(['log', 'warn', 'error'].map((level) => [level, (...args) => logs.push({ level, args })]));
+}
+
+async function loadActualBackgroundModules(context, { contributionQueue, sync }) {
+  const paths = [
+    'background/storage-mutation-coordinator.js',
+    'background/backend-profiles.js',
+    'background/storage-migrations.js',
+    ...(contributionQueue ? ['background/contribution-queue.js'] : []),
+    ...(sync ? ['background/sync.js'] : [])
+  ];
+  const modules = await Promise.all(paths.map(async (path) => [
+    path,
+    new vm.SourceTextModule(await readFile(new URL(`../${path}`, import.meta.url), 'utf8'), { context, identifier: path })
+  ]));
+  return Object.fromEntries(modules.map(([path, module]) => [path.split('/').at(-1).replace('.js', ''), module]));
 }
 
 async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
@@ -160,15 +179,15 @@ async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
   const exportBackendProfileQueue = async (...args) => await profileOperations.exportQueue?.(...args);
   let profileModule;
   const syncModule = {
-    handleMessage() {},
     async initializeSync() { lifecycleEvents.push('sync-initialize'); },
     ...options.syncModule
   };
   const contributionQueue = {
     enqueueContribution: async () => { throw new Error('Unexpected contribution enqueue'); },
+    getContributionProjection: async () => { throw new Error('Unexpected contribution projection'); },
     parseContributionIntent: () => null,
-    readVoteAuthority: async () => { throw new Error('Unexpected contribution authority request'); },
     retryContribution: async () => { throw new Error('Unexpected contribution retry'); },
+    retryFailedContributions: async () => { throw new Error('Unexpected contribution bulk retry'); },
     ...options.contributionQueue
   };
   const context = vm.createContext({
@@ -221,6 +240,10 @@ async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
       tabs: { async create() {} }
     }
   });
+  const actualModules = await loadActualBackgroundModules(context, {
+    contributionQueue: options.realContributionQueue === true,
+    sync: options.realSyncModule === true
+  });
   profileModule = new vm.SyntheticModule([
     'ensureBackendProfilesMigrated',
     'resolveBackendProfile',
@@ -248,6 +271,15 @@ async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
   await module.link(async (specifier) => {
     const resolved = await resolveModule(specifier, context);
     if (resolved) return resolved;
+    if (options.realSyncModule && specifier === './background/sync.js') return actualModules.sync;
+    if (options.realContributionQueue && specifier === './background/contribution-queue.js') return actualModules['contribution-queue'];
+    if ((options.realContributionQueue || options.realSyncModule) &&
+        (specifier === './background/backend-profiles.js' || specifier === './backend-profiles.js')) return actualModules['backend-profiles'];
+    if ((options.realContributionQueue || options.realSyncModule) &&
+        (specifier === './background/storage-migrations.js' || specifier === './storage-migrations.js')) return actualModules['storage-migrations'];
+    if ((options.realContributionQueue || options.realSyncModule) && specifier === './storage-mutation-coordinator.js') {
+      return actualModules['storage-mutation-coordinator'];
+    }
     if (specifier === './background/sync.js') {
       return new vm.SyntheticModule(Object.keys(syncModule), function init() {
         for (const [name, value] of Object.entries(syncModule)) this.setExport(name, value);
@@ -279,6 +311,7 @@ async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
       await onInstalled.listener(details);
     },
     logs,
+    actualSync: actualModules.sync?.namespace ?? null,
     lifecycleEvents,
     get legacyMigrationCalls() { return legacyMigrationCalls; },
     get profileMigrationCalls() { return profileMigrationCalls; },
@@ -377,6 +410,7 @@ export function netflixSender(overrides = {}) {
     id: 'subpal-extension-id',
     tab: { id: 7, url: 'https://www.netflix.com/watch/82147770' },
     url: 'https://www.netflix.com/watch/82147770',
+    origin: 'https://www.netflix.com',
     ...overrides
   };
 }
