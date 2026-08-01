@@ -45,7 +45,8 @@ test('Given Options profile operations When the client invokes each one Then it 
     { ok: true, value: { id: 'created' } },
     { ok: true, value: { id: 'created', isActive: true } },
     { ok: true, value: true },
-    { ok: true, value: { profile: { id: 'created' }, queues: {} } }
+    { ok: true, value: { profile: { id: 'created' }, queues: {} } },
+    { ok: true, value: { vote: 1, translation: 0, replacementEvent: 2 } }
   ];
   let nextRequestId = 0;
   const profiles = loaded.createBackendProfiles({
@@ -61,7 +62,8 @@ test('Given Options profile operations When the client invokes each one Then it 
     profiles.create({ endpoint: 'http://localhost:8787/api' }),
     profiles.activate('created'),
     profiles.deleteProfile('created'),
-    profiles.exportQueue('created')
+    profiles.exportQueue('created'),
+    profiles.retryFailed('created', { confirmInactiveProfile: true })
   ]);
 
   assert.deepEqual(plain(results), [
@@ -69,14 +71,16 @@ test('Given Options profile operations When the client invokes each one Then it 
     { ok: true, value: { id: 'created' } },
     { ok: true, value: { id: 'created', isActive: true } },
     { ok: true, value: true },
-    { ok: true, value: { profile: { id: 'created' }, queues: {} } }
+    { ok: true, value: { profile: { id: 'created' }, queues: {} } },
+    { ok: true, value: { vote: 1, translation: 0, replacementEvent: 2 } }
   ]);
   assert.deepEqual(plain(requests), [
     { requestId: 'profile-request-1', message: { type: 'BACKEND_PROFILES_LIST' } },
     { requestId: 'profile-request-2', message: { type: 'BACKEND_PROFILES_CREATE', endpoint: 'http://localhost:8787/api' } },
     { requestId: 'profile-request-3', message: { type: 'BACKEND_PROFILES_ACTIVATE', profileId: 'created' } },
     { requestId: 'profile-request-4', message: { type: 'BACKEND_PROFILES_DELETE', profileId: 'created', discard: false } },
-    { requestId: 'profile-request-5', message: { type: 'BACKEND_PROFILES_EXPORT_QUEUE', profileId: 'created' } }
+    { requestId: 'profile-request-5', message: { type: 'BACKEND_PROFILES_EXPORT_QUEUE', profileId: 'created' } },
+    { requestId: 'profile-request-6', message: { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'created', confirmInactiveProfile: true } }
   ]);
 });
 
@@ -100,7 +104,10 @@ test('Given invalid profile input or a hostile caller object When the client is 
     profiles.activate(hostileProfileId),
     profiles.deleteProfile('created', { discard: 'yes' }),
     profiles.deleteProfile('created', new Proxy({}, { ownKeys() { throw new Error('options proxy'); } })),
-    profiles.exportQueue('')
+    profiles.exportQueue(''),
+    profiles.retryFailed('', { confirmInactiveProfile: false }),
+    profiles.retryFailed('created', { confirmInactiveProfile: 'yes' }),
+    profiles.retryFailed('created', new Proxy({}, { ownKeys() { throw new Error('options proxy'); } }))
   ]);
 
   for (const result of results) {
@@ -256,15 +263,17 @@ function createScheduler() {
   };
 }
 
-async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles, listResult, exportResult } = {}) {
+async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles, listResult, exportResult, retryResult } = {}) {
   const elements = Object.fromEntries([
     'backendProfileSelect', 'backendProfileEndpoint', 'createBackendProfileButton',
     'activateBackendProfileButton', 'exportBackendProfileButton', 'deleteBackendProfileButton',
     'backendProfileStatus', 'backendProfileIdentity', 'backendProfileQueueCounts', 'backendProfileError',
+    'retryAllSyncButton', 'voteQueueCount', 'translationQueueCount', 'replacementEventsQueueCount',
     'debugModeCheckbox', 'endscreenTasksEnabledCheckbox'
   ].map(id => [id, new FakeElement(id)]));
   const profiles = initialProfiles || [profile('active', true), profile('idle', false)];
   const calls = [];
+  const alerts = [];
   let blockDelete = false;
   let factoryArguments;
   const scheduler = createScheduler();
@@ -293,6 +302,10 @@ async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles,
     async exportQueue(id) {
       calls.push(['export', id]);
       return exportResult || { ok: true, value: { profile: profile(id, true), queues: {} } };
+    },
+    async retryFailed(id, { confirmInactiveProfile }) {
+      calls.push(['retry', id, confirmInactiveProfile]);
+      return retryResult || { ok: true, value: { vote: 0, translation: 0, replacementEvent: 0 } };
     }
   };
   const domListeners = new Map();
@@ -318,7 +331,7 @@ async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles,
     setTimeout: scheduler.setTimeout,
     clearTimeout: scheduler.clearTimeout,
     confirm: () => confirmations.shift() ?? false,
-    alert() {},
+    alert(message) { alerts.push(message); },
     Blob: FakeBlob,
     URL: {
       createObjectURL(blob) {
@@ -410,7 +423,7 @@ async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles,
   });
   await module.evaluate();
   await domListeners.get('DOMContentLoaded')();
-  return { elements, profiles, calls, ports, profileClient, factoryArguments, scheduler, storageCalls, downloads, setBlockDelete(value) { blockDelete = value; } };
+  return { elements, profiles, calls, ports, profileClient, factoryArguments, scheduler, storageCalls, downloads, alerts, setBlockDelete(value) { blockDelete = value; } };
 }
 
 test('Given the production Options profile port When it times out, disconnects, receives a late reply, and reconnects Then each Result is normalized and pending work is cleaned', async () => {
@@ -467,6 +480,91 @@ test('Given a real backend profile snapshot When Options renders queue counts Th
 
   assert.equal(options.elements.backendProfileQueueCounts.textContent, '待處理：3；同步中：1；失敗：2');
   assert.equal(options.elements.backendProfileQueueCounts.textContent.includes('[object Object]'), false);
+});
+
+test('Given selected safe profile snapshots When Options renders pending queue counts or selection changes Then it uses only the selected nested profile counts', async () => {
+  const options = await loadOptionsProfilesHarness({
+    initialProfiles: [
+      {
+        ...profile('active', true),
+        queueCounts: {
+          pending: { vote: 2, translation: 3, replacementEvent: 4, total: 9 },
+          syncing: { vote: 5, translation: 6, replacementEvent: 7, total: 18 },
+          failed: { vote: 8, translation: 9, replacementEvent: 10, total: 27 }
+        }
+      },
+      {
+        ...profile('idle', false),
+        queueCounts: {
+          pending: { vote: 11, translation: 12, replacementEvent: 13, total: 36 },
+          syncing: { vote: 0, translation: 0, replacementEvent: 0, total: 0 },
+          failed: { vote: 0, translation: 0, replacementEvent: 0, total: 0 }
+        }
+      }
+    ]
+  });
+
+  assert.equal(options.elements.voteQueueCount.textContent, '2');
+  assert.equal(options.elements.translationQueueCount.textContent, '3');
+  assert.equal(options.elements.replacementEventsQueueCount.textContent, '4');
+  assert.equal(options.storageCalls.gets.some(keys => Array.isArray(keys) && keys.some(key => ['voteQueue', 'translationQueue', 'replacementEventQueue'].includes(key))), false);
+
+  options.elements.backendProfileSelect.value = 'idle';
+  await options.elements.backendProfileSelect.dispatch('change');
+  assert.equal(options.elements.voteQueueCount.textContent, '11');
+  assert.equal(options.elements.translationQueueCount.textContent, '12');
+  assert.equal(options.elements.replacementEventsQueueCount.textContent, '13');
+});
+
+test('Given malformed nested queue counts When Options receives profile snapshots Then each invalid count is rendered as zero without exposing unsafe data', async () => {
+  const options = await loadOptionsProfilesHarness({
+    initialProfiles: [{
+      ...profile('active', true),
+      queueCounts: {
+        pending: { vote: 'secret-token', translation: 2, replacementEvent: -1, total: 1 },
+        syncing: { vote: 0, translation: 0, replacementEvent: 0, total: 0 },
+        failed: { vote: 0, translation: 0, replacementEvent: 0, total: 0 }
+      }
+    }]
+  });
+
+  assert.equal(options.elements.voteQueueCount.textContent, '0');
+  assert.equal(options.elements.translationQueueCount.textContent, '2');
+  assert.equal(options.elements.replacementEventsQueueCount.textContent, '0');
+  assert.equal(JSON.stringify(options.elements).includes('secret-token'), false);
+});
+
+test('Given an active or inactive selected profile When Options retries failed contributions Then it uses the trusted retry capability with the required confirmation', async () => {
+  const active = await loadOptionsProfilesHarness();
+  await active.elements.retryAllSyncButton.dispatch('click');
+  assert.deepEqual(active.calls, [['retry', 'active', false]]);
+  assert.equal(active.alerts.includes('已觸發重試，背景持續處理中。'), true);
+
+  const cancelled = await loadOptionsProfilesHarness({ confirmations: [false] });
+  cancelled.elements.backendProfileSelect.value = 'idle';
+  await cancelled.elements.backendProfileSelect.dispatch('change');
+  await cancelled.elements.retryAllSyncButton.dispatch('click');
+  assert.deepEqual(cancelled.calls, []);
+
+  const inactive = await loadOptionsProfilesHarness({ confirmations: [true] });
+  inactive.elements.backendProfileSelect.value = 'idle';
+  await inactive.elements.backendProfileSelect.dispatch('change');
+  await inactive.elements.retryAllSyncButton.dispatch('click');
+  assert.deepEqual(inactive.calls, [['retry', 'idle', true]]);
+  assert.equal(JSON.stringify(inactive.elements).includes('jwt'), false);
+  assert.equal(JSON.stringify(inactive.alerts).includes('secret-token'), false);
+});
+
+test('Given a retry failure containing raw backend data When Options reports it Then no raw error reaches the DOM or alert', async () => {
+  const options = await loadOptionsProfilesHarness({
+    retryResult: { ok: false, error: { kind: 'domain-rejected', code: 'jwt-secret-token', retryable: false } }
+  });
+
+  await options.elements.retryAllSyncButton.dispatch('click');
+
+  assert.deepEqual(options.calls, [['retry', 'active', false]]);
+  assert.deepEqual(options.alerts, ['重試同步失敗，請稍後再試。']);
+  assert.equal(options.elements.backendProfileError.textContent.includes('jwt-secret-token'), false);
 });
 
 test('Given profile snapshots When Options creates, activates, and deletes profiles Then it renders only safe data and uses the closed capability', async () => {

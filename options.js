@@ -772,61 +772,6 @@ function setupStyleControlListeners(type, keyPrefix) {
   }
 }
 
-// ==================== Background Port 通訊 ====================
-
-let bgPort = null;
-const pendingPortRequests = new Map();
-let nextPortMessageId = 1;
-
-/**
- * 取得（或建立）與 background service worker 的 port 連線
- * 連線中斷時自動清空，下一次呼叫會重新建立
- */
-function getBackgroundPort() {
-  if (bgPort) return bgPort;
-
-  bgPort = chrome.runtime.connect({ name: 'options-page-channel' });
-
-  bgPort.onMessage.addListener(({ messageId, response }) => {
-    const resolver = pendingPortRequests.get(messageId);
-    if (resolver) {
-      pendingPortRequests.delete(messageId);
-      resolver(response);
-    }
-  });
-
-  bgPort.onDisconnect.addListener(() => {
-    console.warn('[Options] background port 已中斷');
-    bgPort = null;
-    // 通知所有等待中的請求失敗
-    for (const [, resolver] of pendingPortRequests) {
-      resolver({ success: false, error: 'background port 已中斷' });
-    }
-    pendingPortRequests.clear();
-  });
-
-  return bgPort;
-}
-
-/**
- * 透過 port 傳送訊息到 background，回傳 Promise
- * @param {Object} message - 訊息物件，需含 type 欄位
- * @returns {Promise<Object>} 後端回應
- */
-function sendToBackground(message) {
-  return new Promise((resolve) => {
-    const port = getBackgroundPort();
-    const messageId = nextPortMessageId++;
-    pendingPortRequests.set(messageId, resolve);
-    try {
-      port.postMessage({ messageId, message });
-    } catch (error) {
-      pendingPortRequests.delete(messageId);
-      resolve({ success: false, error: error.message });
-    }
-  });
-}
-
 const BACKEND_PROFILE_DEADLINE_MS = 10000;
 let backendProfilesPort = null;
 const pendingBackendProfileRequests = new Map();
@@ -914,9 +859,22 @@ async function getBackendProfiles() {
   return backendProfiles;
 }
 
-function safeQueueTotal(queueCounts, status) {
-  const total = queueCounts?.[status]?.total;
-  return Number.isInteger(total) && total >= 0 ? total : 0;
+function safeQueueCount(value) {
+  return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function safeQueueCounts(queueCounts) {
+  const counts = {};
+  for (const status of ['pending', 'syncing', 'failed']) {
+    const source = queueCounts?.[status];
+    counts[status] = {
+      vote: safeQueueCount(source?.vote),
+      translation: safeQueueCount(source?.translation),
+      replacementEvent: safeQueueCount(source?.replacementEvent),
+      total: safeQueueCount(source?.total)
+    };
+  }
+  return counts;
 }
 
 function toSafeBackendProfileSnapshot(value) {
@@ -931,11 +889,7 @@ function toSafeBackendProfileSnapshot(value) {
       userIdMasked: value.userIdMasked,
       hasJwt: value.hasJwt,
       isActive: value.isActive,
-      queueCounts: {
-        pending: safeQueueTotal(value.queueCounts, 'pending'),
-        syncing: safeQueueTotal(value.queueCounts, 'syncing'),
-        failed: safeQueueTotal(value.queueCounts, 'failed')
-      }
+      queueCounts: safeQueueCounts(value.queueCounts)
     };
   } catch {
     return null;
@@ -992,7 +946,7 @@ function renderBackendProfiles() {
   }
   if (queueCounts) {
     queueCounts.textContent = selectedProfile
-      ? `待處理：${selectedProfile.queueCounts.pending}；同步中：${selectedProfile.queueCounts.syncing}；失敗：${selectedProfile.queueCounts.failed}`
+      ? `待處理：${selectedProfile.queueCounts.pending.total}；同步中：${selectedProfile.queueCounts.syncing.total}；失敗：${selectedProfile.queueCounts.failed.total}`
       : '待處理：0；同步中：0；失敗：0';
   }
   if (activateButton) activateButton.disabled = backendProfileBusy || !selectedProfile || selectedProfile.isActive;
@@ -1046,10 +1000,11 @@ function setupBackendProfileControls() {
   const exportButton = document.getElementById('exportBackendProfileButton');
   const deleteButton = document.getElementById('deleteBackendProfileButton');
 
-  select?.addEventListener('change', () => {
+  select?.addEventListener('change', async () => {
     selectedBackendProfileId = select.value;
     setBackendProfileError();
     renderBackendProfiles();
+    await updatePendingDataUI();
   });
   createButton?.addEventListener('click', () => runBackendProfileOperation(async () => {
     const endpoint = endpointInput?.value.trim() || '';
@@ -1118,7 +1073,7 @@ function setupBackendProfileControls() {
       return;
     }
     const counts = profile.queueCounts;
-    setBackendProfileError(`此設定檔仍有待處理、同步中或失敗的資料（待處理：${counts.pending}；同步中：${counts.syncing}；失敗：${counts.failed}）。`);
+    setBackendProfileError(`此設定檔仍有待處理、同步中或失敗的資料（待處理：${counts.pending.total}；同步中：${counts.syncing.total}；失敗：${counts.failed.total}）。`);
     if (!confirm('刪除會永久捨棄這些資料。確定要繼續嗎？')) return;
     const discardResult = await (await getBackendProfiles()).deleteProfile(profile.id, { discard: true });
     if (!discardResult?.ok) {
@@ -1203,28 +1158,24 @@ function setupRetrySyncButton() {
   const originalLabel = labelSpan ? labelSpan.textContent : '重試同步';
 
   retryAllSyncButton.addEventListener('click', async () => {
+    const profile = selectedBackendProfile();
+    if (!profile) return;
+    const confirmInactiveProfile = !profile.isActive;
+    if (confirmInactiveProfile && !confirm(`確定要重試非使用中端點 ${profile.endpoint} 的失敗資料嗎？`)) return;
     retryAllSyncButton.disabled = true;
     if (labelSpan) labelSpan.textContent = '重試中…';
 
     try {
-      const responses = await Promise.all([
-        sendToBackground({ type: 'RETRY_FAILED_VOTES' }),
-        sendToBackground({ type: 'RETRY_FAILED_TRANSLATIONS' }),
-        sendToBackground({ type: 'RETRY_FAILED_REPLACEMENT_EVENTS' })
-      ]);
-
-      const failed = responses.filter(r => r && r.success === false);
-      if (failed.length > 0) {
-        const messages = failed.map(r => r.error || '未知錯誤').join('\n');
-        alert(`部分隊列重試觸發失敗：\n${messages}`);
-      } else {
-        alert('已觸發重試，背景持續處理中。');
+      const result = await (await getBackendProfiles()).retryFailed(profile.id, { confirmInactiveProfile });
+      if (!result?.ok) {
+        alert('重試同步失敗，請稍後再試。');
+        return;
       }
+      alert('已觸發重試，背景持續處理中。');
 
       await updatePendingDataUI();
-    } catch (error) {
-      console.error('[Options] 重試同步失敗:', error);
-      alert('重試同步失敗：' + error.message);
+    } catch {
+      alert('重試同步失敗，請稍後再試。');
     } finally {
       retryAllSyncButton.disabled = false;
       if (labelSpan) labelSpan.textContent = originalLabel;
@@ -1346,25 +1297,15 @@ function restoreData(file) {
  * 更新待同步數據 UI
  */
 async function updatePendingDataUI() {
-  try {
-    const result = await chrome.storage.local.get(['voteQueue', 'translationQueue', 'replacementEventQueue']);
+  await refreshBackendProfiles();
+  const pending = selectedBackendProfile()?.queueCounts.pending;
+  const voteQueueCount = document.getElementById('voteQueueCount');
+  const translationQueueCount = document.getElementById('translationQueueCount');
+  const replacementEventsQueueCount = document.getElementById('replacementEventsQueueCount');
 
-    const voteQueueCount = document.getElementById('voteQueueCount');
-    const translationQueueCount = document.getElementById('translationQueueCount');
-    const replacementEventsQueueCount = document.getElementById('replacementEventsQueueCount');
-
-    if (voteQueueCount) {
-      voteQueueCount.textContent = (result.voteQueue || []).length;
-    }
-    if (translationQueueCount) {
-      translationQueueCount.textContent = (result.translationQueue || []).length;
-    }
-    if (replacementEventsQueueCount) {
-      replacementEventsQueueCount.textContent = (result.replacementEventQueue || []).length;
-    }
-  } catch (error) {
-    console.error('[Options] 更新待同步數據 UI 失敗:', error);
-  }
+  if (voteQueueCount) voteQueueCount.textContent = String(safeQueueCount(pending?.vote));
+  if (translationQueueCount) translationQueueCount.textContent = String(safeQueueCount(pending?.translation));
+  if (replacementEventsQueueCount) replacementEventsQueueCount.textContent = String(safeQueueCount(pending?.replacementEvent));
 }
 
 // ==================== 工具函數 ====================
@@ -1425,8 +1366,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 更新待同步數據 UI
   await updatePendingDataUI();
-
-  await refreshBackendProfiles();
 
   console.log('[Options] 頁面初始化完成');
 });

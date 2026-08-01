@@ -5,7 +5,8 @@ const COMMANDS = Object.freeze({
   create: 'BACKEND_PROFILES_CREATE',
   activate: 'BACKEND_PROFILES_ACTIVATE',
   delete: 'BACKEND_PROFILES_DELETE',
-  exportQueue: 'BACKEND_PROFILES_EXPORT_QUEUE'
+  exportQueue: 'BACKEND_PROFILES_EXPORT_QUEUE',
+  retryFailed: 'BACKEND_PROFILES_RETRY_FAILED'
 });
 
 function invalidProfileInput() {
@@ -32,6 +33,17 @@ function parseDeleteOptions(options) {
       Object.keys(options).some((key) => key !== 'discard') ||
       (Object.hasOwn(options, 'discard') && typeof options.discard !== 'boolean')) return null;
     return { discard: Object.hasOwn(options, 'discard') ? options.discard : false };
+  } catch {
+    return null;
+  }
+}
+
+function parseRetryOptions(options) {
+  try {
+    if (!options || typeof options !== 'object' || Array.isArray(options) ||
+      Object.keys(options).length !== 1 || !Object.hasOwn(options, 'confirmInactiveProfile') ||
+      typeof options.confirmInactiveProfile !== 'boolean') return null;
+    return { confirmInactiveProfile: options.confirmInactiveProfile };
   } catch {
     return null;
   }
@@ -75,6 +87,12 @@ export function createBackendProfiles({ request, createRequestId = () => crypto.
     exportQueue(profileId) {
       return isNonEmptyString(profileId)
         ? execute({ type: COMMANDS.exportQueue, profileId })
+        : Promise.resolve(invalidProfileInput());
+    },
+    retryFailed(profileId, options) {
+      const parsed = parseRetryOptions(options);
+      return isNonEmptyString(profileId) && parsed
+        ? execute({ type: COMMANDS.retryFailed, profileId, confirmInactiveProfile: parsed.confirmInactiveProfile })
         : Promise.resolve(invalidProfileInput());
     }
   });
