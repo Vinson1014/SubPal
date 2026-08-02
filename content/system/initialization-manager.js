@@ -7,13 +7,15 @@
 
 import { sendMessage, waitForPageScript } from './messaging.js';
 import { getVideoId } from '../core/video-info.js';
+import { playbackContextManager as defaultPlaybackContextManager } from '../core/playback-context-manager.js';
 
 class InitializationManager {
-  constructor() {
+  constructor({ playbackContextManager = defaultPlaybackContextManager } = {}) {
     this.isInitialized = false;
     this.initializationSteps = [];
     this.currentStep = 0;
     this.debug = false; // 將由 ConfigBridge 設置
+    this.playbackContextManager = playbackContextManager;
     
     // 初始化狀態
     this.state = {
@@ -320,64 +322,25 @@ class InitializationManager {
     }
   }
 
-  /**
-   * 步驟4: 檢查 Netflix API 可用性並初始化播放器助手
-   */
   async checkNetflixAPI() {
-    this.log('檢查 Netflix API 可用性並初始化播放器助手...');
+    this.log('建立 PlaybackContextManager...');
     
     try {
-      // 動態導入 sendMessageToPageScript
-      const { sendMessageToPageScript } = await import('./messaging.js');
-      
-      // 檢查 Netflix API 可用性
-      const apiResult = await sendMessageToPageScript({
-        type: 'CHECK_API_AVAILABILITY'
-      });
-      
-      if (!apiResult.success || !apiResult.available) {
-        throw new Error('Netflix API 不可用');
+      if (!this.state.pageScriptInjected) {
+        await this.initializePageScript();
       }
-      
-      this.log('Netflix API 可用性檢查通過');
-      
-      // 初始化播放器助手
-      this.log('初始化播放器助手...');
-      const playerResult = await sendMessageToPageScript({
-        type: 'INITIALIZE_PLAYER_HELPER'
-      });
-      
-      if (!playerResult.success) {
-        throw new Error(playerResult.error || '播放器助手初始化失敗');
-      }
-      
-      this.log('播放器助手初始化成功');
-      
-      // 立即啟動字幕攔截器（在攔截預設字幕之前）
-      this.log('立即啟動字幕攔截器...');
-      const interceptorResult = await sendMessageToPageScript({
-        type: 'INITIALIZE_SUBTITLE_INTERCEPTOR'
-      });
-      
-      if (!interceptorResult.success) {
-        console.warn('字幕攔截器啟動失敗:', interceptorResult.error);
-        // 不拋出錯誤，因為字幕攔截器不是必需的
-      } else {
-        this.log('字幕攔截器已啟動，開始攔截所有Netflix CDN請求');
-      }
-
-      await this.initializePlaybackContextManager();
+      const initialized = await this.initializePlaybackContextManager();
+      if (!initialized) throw new Error('PlaybackContext snapshot unavailable');
       
       this.state.netflixAPIAvailable = true;
       return true;
       
     } catch (error) {
-      console.error('Netflix API 和播放器助手初始化失敗:', error);
+      console.error('PlaybackContext 初始化失敗:', error);
       
-      // 等待頁面加載完成後重試
-      if (error.message.includes('不可用') || error.message.includes('未初始化')) {
+      if (error.message.includes('unavailable') || error.message.includes('未初始化')) {
         await new Promise(resolve => setTimeout(resolve, 1000));
-        throw new Error('Netflix API 仍不可用，請重試');
+        throw new Error('PlaybackContext 仍不可用，請重試');
       }
       
       throw error;
@@ -391,14 +354,15 @@ class InitializationManager {
     this.log('初始化 PlaybackContextManager...');
 
     try {
-      const { playbackContextManager } = await import('../core/playback-context-manager.js');
-      await playbackContextManager.initialize();
-      this.components.playbackContextManager = playbackContextManager;
+      await this.playbackContextManager.initialize();
+      this.components.playbackContextManager = this.playbackContextManager;
       this.state.playbackContextReady = true;
-      this.log('PlaybackContextManager 初始化完成', playbackContextManager.getCurrentContext());
+      this.log('PlaybackContextManager 初始化完成', this.playbackContextManager.getCurrentContext());
+      return true;
     } catch (error) {
       this.state.playbackContextReady = false;
       console.warn('PlaybackContextManager 初始化失敗，暫時不影響既有字幕流程:', error);
+      return false;
     }
   }
 
@@ -821,40 +785,6 @@ class InitializationManager {
     this.state = {};
     
     this.log('初始化管理器資源清理完成');
-  }
-
-  /**
-   * 快速檢查攔截器是否可用（3秒內）
-   */
-  async quickInterceptorCheck() {
-    try {
-      // 3秒快速檢查
-      const timeout = 3000;
-      
-      const checkPromise = this.checkPlayerReady();
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('快速檢查超時')), timeout)
-      );
-      
-      return await Promise.race([checkPromise, timeoutPromise]);
-    } catch (error) {
-      this.log('快速檢查失敗:', error.message);
-      return false;
-    }
-  }
-
-  /**
-   * 檢查播放器是否準備就緒（簡化版）
-   */
-  async checkPlayerReady() {
-    const { sendMessageToPageScript } = await import('./messaging.js');
-    
-    const result = await sendMessageToPageScript({
-      type: 'GET_AVAILABLE_LANGUAGES'
-    });
-    
-    const languages = result?.languages || [];
-    return languages.length > 0;  // 有語言列表 = 可以攔截字幕
   }
 
   log(message, ...args) {

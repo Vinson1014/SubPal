@@ -4,8 +4,6 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 
 const interceptorSource = await readFile(new URL('../content/subtitle-modes/subtitle-interceptor.js', import.meta.url), 'utf8');
-const resultSource = await readFile(new URL('../content/system/capabilities/result.js', import.meta.url), 'utf8');
-const ingressSource = await readFile(new URL('../content/system/capabilities/ttml-acquisition-ingress.js', import.meta.url), 'utf8');
 
 function createPlaybackContext(videoId, epoch) {
   return {
@@ -50,7 +48,31 @@ async function createTTMLHarness() {
   let context = createPlaybackContext('episode-A', 1);
   const rawCache = new Map();
   const rendered = [];
+  const genericPageRpcCalls = [];
+  const playbackCalls = [];
+  const matcherOptions = [];
+  const ingressInstances = [];
   const eventListeners = new Map();
+  const track = {
+    code: 'en',
+    name: 'English',
+    trackId: 'en-track',
+    trackType: 'PRIMARY',
+    rawTrackType: 'PRIMARY'
+  };
+  const playbackResults = new Map();
+  const defaultPlaybackResult = (input) => {
+    switch (input.variant) {
+      case 'available-languages':
+        return { ok: true, value: { variant: input.variant, languages: [track, { ...track, code: 'zh-Hant', trackId: 'zh-track' }] } };
+      case 'current-language':
+      case 'switch-language':
+      case 'switch-track':
+        return { ok: true, value: { variant: input.variant, language: track } };
+      default:
+        throw new Error(`Unexpected Playback variant: ${input.variant}`);
+    }
+  };
   const window = {
     addEventListener(type, listener) {
       const listeners = eventListeners.get(type) ?? new Set();
@@ -59,10 +81,6 @@ async function createTTMLHarness() {
     },
     removeEventListener(type, listener) { eventListeners.get(type)?.delete(listener); },
     listenerCount(type) { return eventListeners.get(type)?.size ?? 0; }
-  };
-  const pageMessage = async ({ type }) => {
-    assert.equal(type, 'GET_ALL_INTERCEPTED_TTML');
-    return { success: true, allTTMLs: Object.fromEntries(rawCache) };
   };
   const sandbox = vm.createContext({
     Date,
@@ -89,7 +107,6 @@ async function createTTMLHarness() {
     }
   });
   const messaging = await createSyntheticModule(sandbox, 'messaging.js', {
-    sendMessageToPageScript: pageMessage,
     sendMessage: async () => ({}),
     registerInternalEventHandler: () => () => {},
     dispatchInternalEvent() {}
@@ -99,30 +116,82 @@ async function createTTMLHarness() {
     getVideoId: () => context.videoId
   });
   const playback = await createSyntheticModule(sandbox, 'playback-context-manager.js', {
-    playbackContextManager: { getCurrentContext: () => ({ ...context }) }
+    playbackContextManager: {
+      getCurrentContext: () => ({ ...context }),
+      getPlayback: () => ({
+        perform(input) {
+          playbackCalls.push(JSON.parse(JSON.stringify(input)));
+          return Promise.resolve(playbackResults.get(input.variant) || defaultPlaybackResult(input));
+        }
+      })
+    }
   });
   const playerAdapter = await createSyntheticModule(sandbox, 'netflix-player-adapter.js', {
     getPlayerAdapter: () => ({ calculatePosition: () => null }),
     setRegionConfigs() {}
   });
   const overlapMatcher = await createSyntheticModule(sandbox, 'dom-overlap-matcher.js', {
-    DOMOverlapMatcher: class DOMOverlapMatcher {}
+    DOMOverlapMatcher: class DOMOverlapMatcher {
+      constructor(options) {
+        this.options = options;
+        matcherOptions.push(options);
+      }
+
+      startWatching() { return true; }
+      stopWatching() {}
+      isWatching() { return false; }
+      collectDOMSample() { return null; }
+      async runMatchOnce() {
+        const rawPool = await this.options.readRawPool();
+        return { matched: false, failureReason: rawPool.ok ? 'no-match' : 'raw-pool-unavailable', allResults: [] };
+      }
+    }
   });
-  const result = new vm.SourceTextModule(resultSource, {
-    context: sandbox,
-    identifier: 'content/system/capabilities/result.js'
+  const ingress = await createSyntheticModule(sandbox, 'ttml-acquisition-ingress.js', {
+    bindTtmlAcquisitionCapture(targetWindow, instance) {
+      const listener = (event) => instance.acceptPhysicalCapture(event.detail);
+      targetWindow.addEventListener('subpal-ttml-acquisition-captured', listener);
+      return () => targetWindow.removeEventListener('subpal-ttml-acquisition-captured', listener);
+    },
+    TtmlAcquisitionIngress: class TtmlAcquisitionIngress {
+      constructor(owner) {
+        this.owner = owner;
+        this.disposeCalls = 0;
+        ingressInstances.push(this);
+      }
+
+      capture(evidence, options) {
+        return this.owner.captureTtmlEvidence(evidence, options);
+      }
+
+      acceptPhysicalCapture(envelope) {
+        return this.capture(envelope?.evidence || envelope, { resolveWaiters: true });
+      }
+
+      async readRawPool() {
+        const entries = {};
+        for (const [cacheKey, entry] of rawCache.entries()) {
+          entries[cacheKey] = {
+            rawContent: entry.rawContent,
+            requestInfo: entry.requestInfo,
+            rawMetadata: entry.rawMetadata || null,
+            metadata: entry.metadata || null,
+            language: entry.language,
+            timestamp: entry.requestInfo?.requestTime || 1
+          };
+        }
+        return { ok: true, value: { entries } };
+      }
+
+      async readDiagnosticSummary() {
+        return { ok: true, value: { recentNonTtmlCandidateCount: 3 } };
+      }
+
+      dispose() {
+        this.disposeCalls += 1;
+      }
+    }
   });
-  const ingress = new vm.SourceTextModule(ingressSource, {
-    context: sandbox,
-    identifier: 'content/system/capabilities/ttml-acquisition-ingress.js'
-  });
-  await result.link(() => { throw new Error('Unexpected result dependency'); });
-  await ingress.link((specifier) => {
-    assert.equal(specifier, './result.js');
-    return result;
-  });
-  await result.evaluate();
-  await ingress.evaluate();
   const dependencies = new Map([
     ['../utils/subtitle-parser.js', parser],
     ['../system/messaging.js', messaging],
@@ -168,8 +237,7 @@ async function createTTMLHarness() {
       return cacheKey;
     },
     async readPageRawCacheKeys() {
-      const response = await pageMessage({ type: 'GET_ALL_INTERCEPTED_TTML' });
-      return Object.keys(response.allTTMLs);
+      return [...rawCache.keys()];
     },
     async reloadCurrentContext() {
       await interceptor.checkExistingCache();
@@ -193,6 +261,24 @@ async function createTTMLHarness() {
     },
     ingressListenerCount() {
       return window.listenerCount('subpal-ttml-acquisition-captured');
+    },
+    genericPageRpcCalls() {
+      return genericPageRpcCalls;
+    },
+    playbackCalls() {
+      return playbackCalls;
+    },
+    matcherOptions() {
+      return matcherOptions;
+    },
+    ingressInstances() {
+      return ingressInstances;
+    },
+    setPlaybackResult(variant, result) {
+      playbackResults.set(variant, result);
+    },
+    interceptor() {
+      return interceptor;
     }
   };
 }
@@ -278,4 +364,105 @@ test('Given a stopped interceptor When late cache capture runs Then it does not 
   harness.stop();
   harness.capture({ videoId: 'episode-A', language: 'zh-Hant', text: 'late capture' });
   assert.equal(harness.ingressListenerCount(), 0);
+});
+
+test('Given an interceptor owns a bound ingress When it stops repeatedly Then capture unbinds, ingress disposes once, and a later lifecycle gets a fresh ingress', async () => {
+  const harness = await createTTMLHarness();
+  const interceptor = harness.interceptor();
+  harness.bindIngress();
+  const first = harness.ingressInstances()[0];
+  assert.equal(harness.ingressListenerCount(), 1);
+
+  harness.stop();
+  harness.stop();
+
+  assert.equal(harness.ingressListenerCount(), 0);
+  assert.equal(first.disposeCalls, 1);
+  assert.equal(interceptor.ttmlAcquisitionIngress, null);
+  const second = interceptor.getTtmlAcquisitionIngress();
+  assert.notEqual(second, first);
+});
+
+test('Given a ready playback context When SubtitleInterceptor reads and mutates language state Then it performs every typed operation with that exact context', async () => {
+  const harness = await createTTMLHarness();
+  const interceptor = harness.interceptor();
+  interceptor.sleep = async () => {};
+
+  assert.equal(await interceptor.waitForPlayerReady(), true);
+  assert.equal(await interceptor.recordDefaultLanguage(), 'en');
+  assert.deepEqual(await interceptor.getCurrentNetflixLanguage(), {
+    code: 'en', name: 'English', trackId: 'en-track', trackType: 'PRIMARY', rawTrackType: 'PRIMARY'
+  });
+  assert.equal((await interceptor.getAvailableNetflixLanguages()).length, 2);
+  assert.equal((await interceptor.captureCurrentNetflixTrack()).trackId, 'en-track');
+  await interceptor.switchNetflixLanguage('zh-Hant', 'test-switch');
+  await interceptor.restoreNetflixTrack({ code: 'en', trackId: 'en-track' }, 'en', 'test-restore');
+
+  const expected = { videoId: 'episode-A', sessionId: 'watch-episode-A', epoch: 1 };
+  assert.deepEqual(harness.playbackCalls(), [
+    { variant: 'available-languages', payload: {}, expected },
+    { variant: 'current-language', payload: {}, expected },
+    { variant: 'current-language', payload: {}, expected },
+    { variant: 'available-languages', payload: {}, expected },
+    { variant: 'current-language', payload: {}, expected },
+    { variant: 'switch-language', payload: { languageCode: 'zh-Hant' }, expected },
+    { variant: 'switch-track', payload: { trackId: 'en-track' }, expected }
+  ]);
+  assert.deepEqual(harness.genericPageRpcCalls(), []);
+});
+
+test('Given typed track restore rejects When SubtitleInterceptor restores the starting track Then it falls back once to the typed language operation', async () => {
+  const harness = await createTTMLHarness();
+  const interceptor = harness.interceptor();
+  harness.setPlaybackResult('switch-track', {
+    ok: false,
+    error: { kind: 'domain-rejected', code: 'track-unavailable', retryable: false }
+  });
+
+  await interceptor.restoreNetflixTrack({ code: 'en', trackId: 'en-track' }, 'en', 'test-fallback');
+
+  const expected = { videoId: 'episode-A', sessionId: 'watch-episode-A', epoch: 1 };
+  assert.deepEqual(harness.playbackCalls(), [
+    { variant: 'switch-track', payload: { trackId: 'en-track' }, expected },
+    { variant: 'switch-language', payload: { languageCode: 'en' }, expected }
+  ]);
+  assert.deepEqual(harness.genericPageRpcCalls(), []);
+});
+
+test('Given raw TTML and a diagnostic summary owned by the ingress When cache, diagnosis, and primary discovery run Then callers use the normalized reader and matcher receives it', async () => {
+  const harness = await createTTMLHarness();
+  const interceptor = harness.interceptor();
+  const cacheKey = harness.capture({ videoId: 'episode-A', language: 'zh-Hant', text: '<tt><p>primary</p></tt>', requestTime: 1 });
+
+  await interceptor.checkExistingCache();
+  assert.equal(await interceptor.hasRawTTMLCandidateForLanguage('zh-Hant'), true);
+  const diagnosis = await interceptor.diagnoseLanguageAvailability('zh-Hant', 'primary');
+  assert.equal(diagnosis.recentNonTTMLCandidateCount, 3);
+  assert.equal(diagnosis.rawEntryCount, 1);
+  assert.equal(diagnosis.rawEntries[0].cacheKey, cacheKey);
+
+  interceptor.isActive = true;
+  interceptor.primarySubtitles = [];
+  interceptor.primarySubtitleMeta = null;
+  interceptor.tryPrimaryDiscoveryMatch = () => Promise.resolve();
+  interceptor.startPrimaryDiscovery();
+
+  assert.equal(harness.matcherOptions().length, 1);
+  assert.equal(typeof harness.matcherOptions()[0].readRawPool, 'function');
+  assert.deepEqual(JSON.parse(JSON.stringify(await harness.matcherOptions()[0].readRawPool())), {
+    ok: true,
+    value: {
+      entries: {
+        [cacheKey]: {
+          rawContent: '<tt><p>primary</p></tt>',
+          requestInfo: createRequestInfo('episode-A', 'zh-Hant', 1),
+          rawMetadata: null,
+          metadata: null,
+          language: 'zh-Hant',
+          timestamp: 1
+        }
+      }
+    }
+  });
+  assert.deepEqual(harness.genericPageRpcCalls(), []);
 });

@@ -21,8 +21,16 @@ test('Given initialized components When final integration starts Then initializa
     this.setExport('sendMessage', async (message) => { sent.push(message); return {}; });
   }, { context });
   const videoInfo = new vm.SyntheticModule(['getVideoId'], function () { this.setExport('getVideoId', () => 'netflix-81234567'); }, { context });
+  const playbackContext = new vm.SyntheticModule(['playbackContextManager'], function () {
+    this.setExport('playbackContextManager', { initialize: async () => true, getCurrentContext: () => ({}) });
+  }, { context });
   const module = new vm.SourceTextModule(source, { context, identifier: 'content/system/initialization-manager.js' });
-  await module.link((specifier) => specifier === './messaging.js' ? messaging : videoInfo);
+  await module.link((specifier) => {
+    if (specifier === './messaging.js') return messaging;
+    if (specifier === '../core/video-info.js') return videoInfo;
+    if (specifier === '../core/playback-context-manager.js') return playbackContext;
+    throw new Error(`Unexpected dependency: ${specifier}`);
+  });
   await module.evaluate();
   const manager = new module.namespace.InitializationManager();
   manager.setupEventFlow = () => {};

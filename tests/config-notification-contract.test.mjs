@@ -246,7 +246,7 @@ async function createSubtitleInterceptorHarness({ languageWrite, dualWrite }) {
       buildTimeIndex() { return []; }, findSubtitleByTime() { return null; }, findSubtitleByTimeIndex() { return null; }, parseSubtitle() { return { subtitles: [], regionConfigs: {} }; }
     })],
     ['../system/messaging.js', await createSyntheticModule(sandbox, 'messaging.js', {
-      dispatchInternalEvent() {}, registerInternalEventHandler: () => () => {}, sendMessage: async () => ({}), sendMessageToPageScript: async () => ({})
+      dispatchInternalEvent() {}, registerInternalEventHandler: () => () => {}, sendMessage: async () => ({})
     })],
     ['../core/video-info.js', await createSyntheticModule(sandbox, 'video-info.js', {
       getCurrentTimestamp: () => 0, getVideoId: () => 'test-video'

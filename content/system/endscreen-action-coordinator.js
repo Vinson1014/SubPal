@@ -2,7 +2,7 @@ const RESOLUTION_CONTEXT_KEYS = ['action', 'slotKey', 'targetType', 'taskID', 't
 const JUMP_EXPECTED_KEYS = ['epoch', 'sessionId', 'targetTimestamp', 'videoId'];
 
 class EndscreenActionCoordinator {
-  constructor({ Dialog, translationBridge, voteBridge, actionConfig, configManager, getPanel, getContext, getRouteGeneration, isCurrentLifecycle, sendPageMessage }) {
+  constructor({ Dialog, translationBridge, voteBridge, actionConfig, configManager, getPanel, getContext, getRouteGeneration, isCurrentLifecycle, playback }) {
     this.Dialog = Dialog;
     this.translationBridge = translationBridge;
     this.voteBridge = voteBridge;
@@ -12,9 +12,10 @@ class EndscreenActionCoordinator {
     this.getContext = getContext;
     this.getRouteGeneration = getRouteGeneration;
     this.isCurrentLifecycle = isCurrentLifecycle;
-    this.sendPageMessage = sendPageMessage;
+    this.playback = playback;
     this.submissionDialog = null;
     this.pendingSubmission = null;
+    this.pendingJump = null;
   }
 
   async handlePanelAction(panel, lifecycle, payload) {
@@ -50,7 +51,7 @@ class EndscreenActionCoordinator {
     }
     if (!Number.isInteger(expected.epoch) || expected.epoch < 0 ||
         typeof expected.videoId !== 'string' || !expected.videoId ||
-        typeof expected.sessionId !== 'string' || !expected.sessionId) {
+        typeof expected.sessionId !== 'string' || !expected.sessionId.startsWith('watch-')) {
       return { status: 'error', error: '跳轉資料無效，請再試一次。', reason: 'invalid-expected-context' };
     }
     if (!Number.isFinite(expected.targetTimestamp) || expected.targetTimestamp < 0) {
@@ -78,13 +79,22 @@ class EndscreenActionCoordinator {
       return { status: 'error', error: '影片狀態已變更，請再試一次。', reason: 'stale-context' };
     }
 
-    try {
-      const result = await this.sendPageMessage({
-        type: 'JUMP_TO_TIMECODE',
-        intent: 'jump-to-timecode',
-        expected,
+    const intent = {
+      variant: 'jump-to-timecode',
+      payload: {
+        targetTimestamp: expected.targetTimestamp,
         ...request
-      });
+      },
+      expected: {
+        videoId: expected.videoId,
+        sessionId: expected.sessionId,
+        epoch: expected.epoch
+      }
+    };
+    const pending = { controller: new AbortController() };
+    this.pendingJump = pending;
+    try {
+      const result = await this.playback.perform(intent, { signal: pending.controller.signal });
       if (!this.isActionCurrent(lifecycleState)) {
         return { status: 'error', error: '任務已失效，請稍後再試。', reason: 'stale-lifecycle' };
       }
@@ -93,41 +103,38 @@ class EndscreenActionCoordinator {
           postContext.sessionId !== expected.sessionId || postContext.epoch !== expected.epoch) {
         return { status: 'error', error: '影片狀態已變更，請再試一次。', reason: 'post-context-mismatch' };
       }
-      const responseMatchesRequest = result?.action === 'jump-to-timecode' && result.requestId === request.requestId &&
-        result.controlId === request.controlId && result.issuedAt === request.issuedAt &&
-        result.targetTimestamp === expected.targetTimestamp && result.expected?.videoId === expected.videoId &&
-        result.expected?.sessionId === expected.sessionId && result.expected?.epoch === expected.epoch;
-      if (!responseMatchesRequest) {
-        return { status: 'error', error: '跳轉回應資料無效，請再試一次。', reason: 'invalid-page-response' };
-      }
-      if (result.status === 'error') {
-        return { status: 'error', error: '無法跳轉至字幕時間點，請稍後再試。', reason: result.reason || 'page-command-failed' };
-      }
-      if (result.status === 'partial' && result.partial === true && typeof result.error === 'string' && result.error &&
-          result.snapshot?.videoId === expected.videoId && result.snapshot?.sessionId === expected.sessionId &&
-          Number.isFinite(result.snapshot.currentTime) && Number.isFinite(result.targetMilliseconds) &&
-          Math.abs(result.snapshot.currentTime - result.targetMilliseconds) <= 1000) {
-        return result;
-      }
-      if (result.success === true && result.status === 'success' && result.snapshot?.videoId === expected.videoId &&
-          result.snapshot?.sessionId === expected.sessionId && Number.isFinite(result.snapshot.currentTime) &&
-          Number.isFinite(result.targetMilliseconds)) {
-        if (Math.abs(result.snapshot.currentTime - result.targetMilliseconds) > 1000) {
-          return { status: 'error', error: '跳轉時間點驗證失敗，請再試一次。', reason: 'post-time-mismatch' };
+      if (result?.ok === true && result.value?.variant === 'jump-to-timecode') {
+        if (result.value.status === 'success') return { status: 'success' };
+        if (result.value.status === 'partial') {
+          return {
+            status: 'partial',
+            error: '已跳轉至字幕時間點，但無法安全還原播放器介面，請使用 Netflix 原生控制。',
+            reason: 'player-ui-restore-failed'
+          };
         }
-        return { status: 'success', ...result };
       }
-      return {
-        status: 'error',
-        error: '無法跳轉至字幕時間點，請稍後再試。',
-        reason: 'page-command-failed'
-      };
+      return this.playbackFailure(result?.error);
     } catch {
-      return {
-        status: 'error',
-        error: '目前無法跳轉至字幕時間點，請繼續觀看。',
-        reason: 'page-transport-failed'
-      };
+      return this.playbackFailure();
+    } finally {
+      if (this.pendingJump === pending) this.pendingJump = null;
+    }
+  }
+
+  playbackFailure(error) {
+    switch (error?.kind) {
+      case 'timeout':
+        return { status: 'error', error: '目前無法跳轉至字幕時間點，請繼續觀看。', reason: 'playback-timeout' };
+      case 'cancelled':
+        return { status: 'error', error: '跳轉操作已取消，請再試一次。', reason: 'playback-cancelled' };
+      case 'disconnected':
+        return { status: 'error', error: '目前無法跳轉至字幕時間點，請繼續觀看。', reason: 'page-adapter-disconnected' };
+      case 'forbidden':
+        return { status: 'error', error: '請由字幕時間點按鈕重新操作。', reason: 'trusted-click-required' };
+      case 'stale-context':
+        return { status: 'error', error: '影片狀態已變更，請再試一次。', reason: 'playback-stale-context' };
+      default:
+        return { status: 'error', error: '無法跳轉至字幕時間點，請稍後再試。', reason: 'page-command-failed' };
     }
   }
 
@@ -289,6 +296,7 @@ class EndscreenActionCoordinator {
   }
 
   cancelPending(error) {
+    this.pendingJump?.controller.abort();
     const pending = this.pendingSubmission;
     if (pending) this.finishSubmission(pending, { status: 'error', error });
     this.submissionDialog?.close();

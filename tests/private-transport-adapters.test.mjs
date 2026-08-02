@@ -13,7 +13,7 @@ async function loadAdapters() {
     catch (error) { if (error?.code === 'ENOENT') return null; throw error; }
   }));
   if (sources.some((source) => source === null)) return null;
-  const context = vm.createContext({ clearTimeout, setTimeout });
+  const context = vm.createContext({ clearTimeout, setTimeout, structuredClone });
   const [result, diagnostics, transports] = sources.map((source, index) => new vm.SourceTextModule(source, {
     context, identifier: paths[index]
   }));
@@ -91,6 +91,95 @@ test('Given absent, malformed, future, and unsupported protocol versions When di
   assert.equal(dispatches, 0);
 });
 
+test('Given hostile private envelopes When validated, dispatched, or transported Then descriptor parsing rejects them without getter reads, receiver calls, or sends', async () => {
+  const adapters = await loadAdapters();
+  assert.ok(adapters, 'private transport adapters are missing');
+  let getterReads = 0;
+  const valid = () => ({ protocolVersion: 1, requestId: 'hostile', kind: 'private-test', payload: {} });
+  const accessor = valid();
+  Object.defineProperty(accessor, 'protocolVersion', {
+    enumerable: true,
+    get() { getterReads += 1; return 1; }
+  });
+  const inherited = Object.assign(Object.create({ protocolVersion: 1 }), { requestId: 'hostile', kind: 'private-test', payload: {} });
+  const symbol = valid();
+  symbol[Symbol('private')] = true;
+  const nonEnumerable = valid();
+  Object.defineProperty(nonEnumerable, 'payload', { value: {}, enumerable: false });
+  const extra = { ...valid(), extra: true };
+  const customPrototype = Object.assign(Object.create({}), valid());
+  const benignProxy = new Proxy(valid(), {});
+  const revoked = Proxy.revocable(valid(), {});
+  revoked.revoke();
+  const opaqueProxy = new Proxy(valid(), { ownKeys() { throw new Error('opaque envelope'); } });
+  const hostile = [accessor, inherited, symbol, nonEnumerable, extra, customPrototype, benignProxy, revoked.proxy, opaqueProxy];
+  const events = createEvents();
+  const dispatched = [];
+  const transport = adapters.createDomTransport({
+    window: { ...events, dispatchEvent(event) { dispatched.push(event); return true; } },
+    makeEvent: (type, detail) => ({ type, detail })
+  });
+  let receiverCalls = 0;
+
+  for (const input of hostile) {
+    const parsed = adapters.validateEnvelope(input);
+    assert.equal(parsed.ok, false);
+    assert.equal((await transport.request(input)).ok, false);
+    assert.equal(adapters.dispatchEnvelope(input, () => { receiverCalls += 1; return { accepted: true }; }).ok, false);
+  }
+  assert.equal(getterReads, 0);
+  assert.equal(receiverCalls, 0);
+  assert.deepEqual(dispatched, []);
+  assert.equal(events.count('responseFromContentScript'), 0);
+});
+
+test('Given nested hostile envelope payloads and contexts When validated, dispatched, or transported Then no nested getter, Proxy, or cycle crosses the transport seam', async () => {
+  const adapters = await loadAdapters();
+  assert.ok(adapters, 'private transport adapters are missing');
+  let getterReads = 0;
+  const valid = () => ({
+    protocolVersion: 1, requestId: 'nested-hostile', kind: 'private-test',
+    payload: { nested: { value: 'safe' } }, context: { nested: { value: 'safe' } }
+  });
+  const payloadAccessor = valid();
+  Object.defineProperty(payloadAccessor.payload.nested, 'value', {
+    enumerable: true,
+    get() { getterReads += 1; return 'unsafe'; }
+  });
+  const contextAccessor = valid();
+  Object.defineProperty(contextAccessor.context.nested, 'value', {
+    enumerable: true,
+    get() { getterReads += 1; return 'unsafe'; }
+  });
+  const benignProxy = valid();
+  benignProxy.payload.nested = new Proxy({ value: 'unsafe' }, {});
+  const revoked = Proxy.revocable({ value: 'unsafe' }, {});
+  revoked.revoke();
+  const revokedProxy = valid();
+  revokedProxy.context.nested = revoked.proxy;
+  const opaqueProxy = valid();
+  opaqueProxy.payload.nested = new Proxy({ value: 'unsafe' }, { ownKeys() { throw new Error('opaque nested value'); } });
+  const cyclic = valid();
+  cyclic.payload.nested.self = cyclic.payload;
+  const events = createEvents();
+  const dispatched = [];
+  const transport = adapters.createDomTransport({
+    window: { ...events, dispatchEvent(event) { dispatched.push(event); return true; } },
+    makeEvent: (type, detail) => ({ type, detail })
+  });
+  let receiverCalls = 0;
+
+  for (const input of [payloadAccessor, contextAccessor, benignProxy, revokedProxy, opaqueProxy, cyclic]) {
+    assert.equal(adapters.validateEnvelope(input).ok, false);
+    assert.equal((await transport.request(input)).ok, false);
+    assert.equal(adapters.dispatchEnvelope(input, () => { receiverCalls += 1; return { accepted: true }; }).ok, false);
+  }
+  assert.equal(getterReads, 0);
+  assert.equal(receiverCalls, 0);
+  assert.deepEqual(dispatched, []);
+  assert.equal(events.count('responseFromContentScript'), 0);
+});
+
 test('Given a normalized Result from the DOM bridge When it settles Then the adapter preserves it instead of nesting it as a successful value', async () => {
   const adapters = await loadAdapters();
   assert.ok(adapters, 'private transport adapters are missing');
@@ -104,35 +193,272 @@ test('Given a normalized Result from the DOM bridge When it settles Then the ada
   assert.deepEqual(plain(await pending), { ok: false, error: { kind: 'disconnected', code: 'background-port-disconnected', retryable: true } });
 });
 
-test('Given page requests When they time out, cancel, respond late, or return partial Then each terminal outcome remains compatible', async () => {
+test('Given page requests When dispatched and answered Then they use one exact same-origin typed envelope and Result response', async () => {
   const adapters = await loadAdapters();
   assert.ok(adapters, 'private transport adapters are missing');
   const events = createEvents();
   const scheduler = createScheduler();
   const posts = [];
+  const pageWindow = {
+    ...events,
+    location: { origin: 'https://www.netflix.com' },
+    postMessage(message, targetOrigin) { posts.push({ message, targetOrigin }); }
+  };
   const transport = adapters.createPageTransport({
-    window: { ...events, postMessage(message) { posts.push(message); } }, setTimeout: scheduler.setTimeout, clearTimeout: scheduler.clearTimeout
+    window: pageWindow, setTimeout: scheduler.setTimeout, clearTimeout: scheduler.clearTimeout
   });
-  const timeout = transport.request(envelope(adapters, 'page-timeout'), { deadlineMs: 10, wire: { messageId: 'page-timeout', type: 'PING' } });
-  scheduler.run(10);
-  assert.deepEqual(plain(await timeout), { ok: false, error: { kind: 'timeout', code: 'page-response-timeout', retryable: true } });
-  const controller = new AbortController();
-  const cancelled = transport.request(envelope(adapters, 'page-cancelled'), {
-    deadlineMs: 20, signal: controller.signal, wire: { messageId: 'page-cancelled', type: 'PING' }
+  const pageEnvelope = adapters.createEnvelope({
+    requestId: 'page-result',
+    kind: 'playback',
+    payload: { variant: 'context-snapshot', payload: {} }
   });
-  controller.abort();
-  events.emit('message', { data: { source: 'subpal-page-script', messageId: 'page-cancelled', success: true } });
-  assert.deepEqual(plain(await cancelled), { ok: false, error: { kind: 'cancelled', code: 'caller-cancelled', retryable: false } });
-  const partial = { success: false, status: 'partial', reason: 'player-ui-restore-timeout' };
-  const success = transport.request(envelope(adapters, 'page-partial'), { deadlineMs: 20, wire: { messageId: 'page-partial', type: 'PING' } });
-  events.emit('message', { data: { source: 'subpal-page-script', messageId: 'page-partial', ...partial } });
-  const partialResult = plain(await success);
-  assert.equal(partialResult.ok, true);
-  assert.equal(partialResult.value.status, 'partial');
-  assert.equal(partialResult.value.reason, partial.reason);
+  const pending = transport.request(pageEnvelope, { deadlineMs: 20 });
+  assert.deepEqual(plain(posts), [{
+    message: {
+      source: 'subpal-content-script',
+      target: 'subpal-page-script',
+      envelope: plain(pageEnvelope)
+    },
+    targetOrigin: 'https://www.netflix.com'
+  }]);
+
+  for (const event of [
+    { source: {}, origin: 'https://www.netflix.com' },
+    { source: pageWindow, origin: 'https://invalid.example' },
+    { source: pageWindow, origin: 'https://www.netflix.com', target: 'wrong-target' }
+  ]) {
+    events.emit('message', {
+      ...event,
+      data: {
+        source: 'subpal-page-script',
+        target: event.target ?? 'subpal-content-script',
+        requestId: 'page-result',
+        response: { ok: true, value: { ignored: true } }
+      }
+    });
+  }
+  events.emit('message', {
+    source: pageWindow,
+    origin: 'https://www.netflix.com',
+    data: {
+      source: 'subpal-page-script',
+      target: 'subpal-content-script',
+      requestId: 'page-result',
+      response: { ok: true, value: { ignored: true }, extra: true }
+    }
+  });
+  assert.equal(events.count('message'), 1);
+  events.emit('message', {
+    source: pageWindow,
+    origin: 'https://www.netflix.com',
+    data: {
+      source: 'subpal-page-script',
+      target: 'subpal-content-script',
+      requestId: 'page-result',
+      response: { ok: true, value: { playback: 'accepted' } }
+    }
+  });
+  assert.deepEqual(plain(await pending), { ok: true, value: { playback: 'accepted' } });
   assert.equal(events.count('message'), 0);
   assert.equal(scheduler.count(), 0);
-  assert.equal(posts.length, 3);
+});
+
+test('Given nested hostile canonical Result values When they arrive Then no getter runs and no pending page request settles', async () => {
+  const adapters = await loadAdapters();
+  assert.ok(adapters, 'private transport adapters are missing');
+  let getterReads = 0;
+  const accessor = {};
+  Object.defineProperty(accessor, 'value', {
+    enumerable: true,
+    get() { getterReads += 1; return 'unsafe'; }
+  });
+  const benignProxy = new Proxy({ value: 'unsafe' }, {});
+  const revoked = Proxy.revocable({ value: 'unsafe' }, {});
+  revoked.revoke();
+  const opaqueProxy = new Proxy({ value: 'unsafe' }, { ownKeys() { throw new Error('opaque nested result'); } });
+  const cyclic = { value: 'unsafe' };
+  cyclic.self = cyclic;
+
+  for (const value of [accessor, benignProxy, revoked.proxy, opaqueProxy, cyclic]) {
+    const events = createEvents();
+    const scheduler = createScheduler();
+    const pageWindow = {
+      ...events,
+      location: { origin: 'https://www.netflix.com' },
+      postMessage() {}
+    };
+    const transport = adapters.createPageTransport({
+      window: pageWindow, setTimeout: scheduler.setTimeout, clearTimeout: scheduler.clearTimeout
+    });
+    const pending = transport.request(adapters.createEnvelope({
+      requestId: 'nested-result', kind: 'playback', payload: { variant: 'context-snapshot', payload: {} }
+    }), { deadlineMs: 20 });
+    events.emit('message', {
+      source: pageWindow,
+      origin: 'https://www.netflix.com',
+      data: {
+        source: 'subpal-page-script', target: 'subpal-content-script', requestId: 'nested-result',
+        response: { ok: true, value: { nested: value } }
+      }
+    });
+    assert.equal(transport.pendingCount(), 1);
+    assert.equal(events.count('message'), 1);
+    transport.stop();
+    assert.deepEqual(plain(await pending), {
+      ok: false, error: { kind: 'disconnected', code: 'page-adapter-disconnected', retryable: true }
+    });
+  }
+  assert.equal(getterReads, 0);
+});
+
+test('Given an in-flight page request When it duplicates, aborts, times out, or stops Then every terminal path cleans up and never replays', async () => {
+  const adapters = await loadAdapters();
+  assert.ok(adapters, 'private transport adapters are missing');
+  const events = createEvents();
+  const scheduler = createScheduler();
+  const posts = [];
+  const pageWindow = {
+    ...events,
+    location: { origin: 'https://www.netflix.com' },
+    postMessage(message, targetOrigin) { posts.push({ message, targetOrigin }); }
+  };
+  const transport = adapters.createPageTransport({
+    window: pageWindow, setTimeout: scheduler.setTimeout, clearTimeout: scheduler.clearTimeout
+  });
+  const command = adapters.createEnvelope({
+    requestId: 'page-pending', kind: 'ttml-acquisition-query', payload: { variant: 'raw-pool', payload: {} }
+  });
+  const pending = transport.request(command, { deadlineMs: 10 });
+  assert.deepEqual(plain(await transport.request(command, { deadlineMs: 10 })), {
+    ok: false, error: { kind: 'invalid', code: 'duplicate-request-id', retryable: false }
+  });
+  assert.equal(posts.length, 1);
+  transport.stop();
+  transport.stop();
+  assert.deepEqual(plain(await pending), {
+    ok: false, error: { kind: 'disconnected', code: 'page-adapter-disconnected', retryable: true }
+  });
+  assert.equal(events.count('message'), 0);
+  assert.equal(scheduler.count(), 0);
+  events.emit('message', {
+    source: pageWindow,
+    origin: 'https://www.netflix.com',
+    data: {
+      source: 'subpal-page-script', target: 'subpal-content-script', requestId: 'page-pending',
+      response: { ok: true, value: { replayed: true } }
+    }
+  });
+  assert.deepEqual(plain(await transport.request(adapters.createEnvelope({
+    requestId: 'page-after-stop', kind: 'playback', payload: { variant: 'context-snapshot', payload: {} }
+  }))), {
+    ok: false, error: { kind: 'disconnected', code: 'page-adapter-disconnected', retryable: true }
+  });
+});
+
+test('Given page request terminal paths When timeout, abort, or send failure occurs Then each settles once without a replay', async () => {
+  const adapters = await loadAdapters();
+  assert.ok(adapters, 'private transport adapters are missing');
+  const events = createEvents();
+  const scheduler = createScheduler();
+  const sent = [];
+  const pageWindow = {
+    ...events,
+    location: { origin: 'https://www.netflix.com' },
+    postMessage(message, targetOrigin) { sent.push({ message, targetOrigin }); }
+  };
+  const transport = adapters.createPageTransport({
+    window: pageWindow, setTimeout: scheduler.setTimeout, clearTimeout: scheduler.clearTimeout
+  });
+  const request = (requestId) => adapters.createEnvelope({
+    requestId, kind: 'playback', payload: { variant: 'context-snapshot', payload: {} }
+  });
+  const timeout = transport.request(request('page-timeout'), { deadlineMs: 10 });
+  scheduler.run(10);
+  assert.deepEqual(plain(await timeout), {
+    ok: false, error: { kind: 'timeout', code: 'page-response-timeout', retryable: true }
+  });
+
+  const controller = new AbortController();
+  const cancelled = transport.request(request('page-cancelled'), { deadlineMs: 10, signal: controller.signal });
+  controller.abort();
+  events.emit('message', {
+    source: pageWindow,
+    origin: 'https://www.netflix.com',
+    data: {
+      source: 'subpal-page-script', target: 'subpal-content-script', requestId: 'page-cancelled',
+      response: { ok: true, value: { replayed: true } }
+    }
+  });
+  assert.deepEqual(plain(await cancelled), {
+    ok: false, error: { kind: 'cancelled', code: 'caller-cancelled', retryable: false }
+  });
+  assert.equal(transport.pendingCount(), 0);
+  assert.equal(events.count('message'), 0);
+  assert.equal(scheduler.count(), 0);
+
+  const failureEvents = createEvents();
+  const failureScheduler = createScheduler();
+  const failingTransport = adapters.createPageTransport({
+    window: {
+      ...failureEvents,
+      location: { origin: 'https://www.netflix.com' },
+      postMessage() { throw new Error('post failed'); }
+    },
+    setTimeout: failureScheduler.setTimeout,
+    clearTimeout: failureScheduler.clearTimeout
+  });
+  assert.deepEqual(plain(await failingTransport.request(request('page-send-failure'))), {
+    ok: false, error: { kind: 'disconnected', code: 'transport-send-failed', retryable: true }
+  });
+  assert.equal(failingTransport.pendingCount(), 0);
+  assert.equal(failureEvents.count('message'), 0);
+  assert.equal(failureScheduler.count(), 0);
+  assert.equal(sent.length, 2);
+});
+
+test('Given a page request with a flattened legacy wire override When flattened replies arrive Then neither can replace the canonical typed transport', async () => {
+  const adapters = await loadAdapters();
+  assert.ok(adapters, 'private transport adapters are missing');
+  const events = createEvents();
+  const scheduler = createScheduler();
+  const posts = [];
+  const pageWindow = {
+    ...events,
+    location: { origin: 'https://www.netflix.com' },
+    postMessage(message, targetOrigin) { posts.push({ message, targetOrigin }); }
+  };
+  const transport = adapters.createPageTransport({
+    window: pageWindow, setTimeout: scheduler.setTimeout, clearTimeout: scheduler.clearTimeout
+  });
+  const command = adapters.createEnvelope({ requestId: 'typed-page', kind: 'ttml-acquisition-query', payload: { variant: 'raw-pool', payload: {} } });
+  const pending = transport.request(command, {
+    deadlineMs: 20,
+    wire: { source: 'subpal-content-script', target: 'subpal-page-script', messageId: 'legacy-page', type: 'PING' }
+  });
+  assert.deepEqual(plain(posts), [{
+    message: { source: 'subpal-content-script', target: 'subpal-page-script', envelope: plain(command) },
+    targetOrigin: 'https://www.netflix.com'
+  }]);
+  events.emit('message', {
+    source: pageWindow,
+    origin: 'https://www.netflix.com',
+    data: { source: 'subpal-page-script', target: 'subpal-content-script', messageId: 'typed-page', success: true }
+  });
+  assert.equal(events.count('message'), 1);
+  events.emit('message', {
+    source: pageWindow,
+    origin: 'https://www.netflix.com',
+    data: {
+      source: 'subpal-page-script', target: 'subpal-content-script', requestId: 'typed-page',
+      response: { ok: true, value: { variant: 'raw-pool', entries: [] } }
+    }
+  });
+  assert.deepEqual(plain(await pending), {
+    ok: true,
+    value: { variant: 'raw-pool', entries: [] }
+  });
+  assert.equal(events.count('message'), 0);
+  assert.equal(scheduler.count(), 0);
 });
 
 test('Given an in-flight Port request When background disconnects and reconnects Then pending calls settle immediately and only future work uses the new Port', async () => {

@@ -16,6 +16,7 @@ const contract = Promise.all([
   readSource('background/api.js'),
   readSource('background/sync.js'),
   readSource('content/system/messaging.js'),
+  readSource('content/system/capabilities/private-transports.js'),
   readSource('content/system/config/config-schema.js'),
   readSource('content/system/isolated-endscreen-tasks.js'),
   readSource('content/ui/ui-manager-new.js'),
@@ -28,6 +29,7 @@ const contract = Promise.all([
   api,
   sync,
   messaging,
+  privateTransports,
   configSchema,
   isolatedEndscreenTasks,
   uiManager,
@@ -40,6 +42,7 @@ const contract = Promise.all([
   isolatedEndscreenTasks,
   manifest,
   messaging,
+  privateTransports,
   pageScript,
   readinessTest,
   sync,
@@ -57,10 +60,10 @@ test('Given current CustomEvent producers When architecture is reviewed Then it 
 });
 
 test('Given current bridge transport values When architecture is reviewed Then it names the current port and page-script source', async () => {
-  const { architecture, content, messaging } = await contract;
+  const { architecture, content, privateTransports } = await contract;
 
   assert.match(content, /subtitle-assistant-channel/);
-  assert.match(messaging, /subpal-content-script/);
+  assert.match(privateTransports, /subpal-content-script/);
   assert.match(architecture, /subtitle-assistant-channel/);
   assert.match(architecture, /subpal-content-script/);
   assert.doesNotMatch(architecture, /subpal-port|subpal-page-context/);

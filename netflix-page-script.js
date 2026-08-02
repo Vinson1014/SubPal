@@ -583,6 +583,10 @@
       }
     }
 
+    getRecentDebugEvents() {
+      return this.debugEvents.slice(-20);
+    }
+
     /**
      * 從 URL 提取視頻 ID
      * @param {string} [pageUrl] - 頁面 URL，預設為 location.href
@@ -1579,7 +1583,7 @@
         interceptedTTMLCount: this.interceptedTTMLs.size,
         interceptedSubtitleCount: this.interceptedSubtitles.size,
         rawTTMLMetadata,
-        recentEvents: this.debugEvents.slice(-20)
+        recentEvents: this.getRecentDebugEvents()
       };
     }
 
@@ -1615,23 +1619,10 @@
   subtitleInterceptor.start();
   document?.addEventListener?.('click', recordTrustedTimecodeClick, true);
 
-  /**
-   * 檢查Netflix API可用性
-   */
   function checkAPIAvailability() {
     try {
-      const hasNetflixAPI = !!(window.netflix && window.netflix.appContext);
-      const hasPlayerApp = !!(hasNetflixAPI && window.netflix.appContext.state.playerApp);
-
-      debugLog('Netflix API可用性檢查:', {
-        hasNetflixAPI,
-        hasPlayerApp,
-        available: hasNetflixAPI && hasPlayerApp
-      });
-
-      return hasNetflixAPI && hasPlayerApp;
-    } catch (error) {
-      console.error('檢查API可用性時出錯:', error);
+      return Boolean(window.netflix?.appContext?.state?.playerApp);
+    } catch {
       return false;
     }
   }
@@ -1694,7 +1685,7 @@
     const requestId = createPageRequestId();
     const issuedAt = Date.now();
     purgeJumpClickLatches(issuedAt);
-    jumpClickLatches.set(requestId, { requestId, control, controlId, issuedAt, expected, action: 'jump-to-timecode', type: 'JUMP_TO_TIMECODE' });
+    jumpClickLatches.set(requestId, { requestId, control, controlId, issuedAt, expected });
     control.setAttribute('data-subpal-jump-request-id', requestId);
     control.setAttribute('data-subpal-jump-issued-at', String(issuedAt));
   }
@@ -1732,8 +1723,7 @@
       latch.expected.sessionId === request.expected.sessionId &&
       latch.expected.epoch === request.expected.epoch &&
       latch.expected.targetTimestamp === request.expected.targetTimestamp;
-    if (latch.controlId !== request.controlId || latch.issuedAt !== request.issuedAt ||
-        latch.action !== request.intent || latch.type !== request.type || !expectedMatches) {
+    if (latch.controlId !== request.controlId || latch.issuedAt !== request.issuedAt || !expectedMatches) {
       return createJumpFailure('click-latch-mismatch', '請由字幕時間點按鈕重新操作。', request);
     }
     return null;
@@ -2107,191 +2097,356 @@
     }
   }
 
+  const PRIVATE_PROTOCOL_VERSION = 1;
+  const PRIVATE_OUTER_KEYS = new Set(['source', 'target', 'envelope']);
+  const PRIVATE_ENVELOPE_KEYS = new Set(['protocolVersion', 'requestId', 'kind', 'payload', 'context']);
+  const PRIVATE_PAYLOAD_KEYS = new Set(['variant', 'payload']);
+  const PRIVATE_CONTEXT_KEYS = new Set(['videoId', 'sessionId', 'epoch']);
+  const PRIVATE_SNAPSHOT_KEYS = new Set([
+    'pageUrlVideoId', 'playerApiVideoId', 'movieId', 'selectedSessionId', 'selectedSessionReason',
+    'sessionSelectionConfidence', 'currentTime', 'duration', 'currentTrack'
+  ]);
+  const PRIVATE_PLAYBACK_VARIANTS = Object.freeze({
+    'context-snapshot': new Set(),
+    'available-languages': new Set(),
+    'current-language': new Set(),
+    'switch-language': new Set(['languageCode']),
+    'switch-track': new Set(['trackId']),
+    'jump-to-timecode': new Set(['targetTimestamp', 'controlId', 'requestId', 'issuedAt'])
+  });
+  const PRIVATE_TTML_VARIANTS = Object.freeze({
+    'raw-pool': new Set(),
+    'diagnostic-summary': new Set()
+  });
+  const PRIVATE_INVALID_TREE = Symbol('invalid-private-tree');
+
+  function isPrivateOrdinaryPrototype(prototype) {
+    if (prototype === Object.prototype) return true;
+    const constructor = Object.getOwnPropertyDescriptor(prototype, 'constructor');
+    return Boolean(constructor && Object.hasOwn(constructor, 'value') && typeof constructor.value === 'function' &&
+      Object.getOwnPropertyDescriptor(constructor.value, 'prototype')?.value === prototype &&
+      Function.prototype.toString.call(constructor.value) === Function.prototype.toString.call(Object));
+  }
+
+  function isPrivateOrdinaryArrayPrototype(prototype) {
+    if (prototype === Array.prototype) return true;
+    const constructor = Object.getOwnPropertyDescriptor(prototype, 'constructor');
+    return Boolean(constructor && Object.hasOwn(constructor, 'value') && typeof constructor.value === 'function' &&
+      Object.getOwnPropertyDescriptor(constructor.value, 'prototype')?.value === prototype &&
+      Function.prototype.toString.call(constructor.value) === Function.prototype.toString.call(Array));
+  }
+
+  function isPrivateCloneablePrimitive(value) {
+    return value === null || ['undefined', 'boolean', 'number', 'string', 'bigint'].includes(typeof value);
+  }
+
+  function materializePrivateOwnData(value, ancestors = new Set()) {
+    try {
+      if (isPrivateCloneablePrimitive(value)) return value;
+      if (typeof value !== 'object' || ancestors.has(value)) return PRIVATE_INVALID_TREE;
+      ancestors.add(value);
+      try {
+        if (Array.isArray(value)) {
+          if (!isPrivateOrdinaryArrayPrototype(Object.getPrototypeOf(value)) || Object.getOwnPropertySymbols(value).length !== 0) {
+            return PRIVATE_INVALID_TREE;
+          }
+          const length = Object.getOwnPropertyDescriptor(value, 'length');
+          const keys = Object.getOwnPropertyNames(value);
+          if (!length || !Object.hasOwn(length, 'value') || length.enumerable || !Number.isSafeInteger(length.value) ||
+            length.value < 0 || keys.length !== length.value + 1) return PRIVATE_INVALID_TREE;
+          const copy = new Array(length.value);
+          for (let index = 0; index < length.value; index += 1) {
+            const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+            if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return PRIVATE_INVALID_TREE;
+            const nested = materializePrivateOwnData(descriptor.value, ancestors);
+            if (nested === PRIVATE_INVALID_TREE) return PRIVATE_INVALID_TREE;
+            copy[index] = nested;
+          }
+          return copy;
+        }
+        const prototype = Object.getPrototypeOf(value);
+        if ((prototype !== null && !isPrivateOrdinaryPrototype(prototype)) || Object.getOwnPropertySymbols(value).length !== 0) {
+          return PRIVATE_INVALID_TREE;
+        }
+        const copy = Object.create(prototype);
+        for (const key of Object.getOwnPropertyNames(value)) {
+          const descriptor = Object.getOwnPropertyDescriptor(value, key);
+          if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return PRIVATE_INVALID_TREE;
+          const nested = materializePrivateOwnData(descriptor.value, ancestors);
+          if (nested === PRIVATE_INVALID_TREE) return PRIVATE_INVALID_TREE;
+          Object.defineProperty(copy, key, { value: nested, enumerable: true, configurable: true, writable: true });
+        }
+        return copy;
+      } finally {
+        ancestors.delete(value);
+      }
+    } catch {
+      return PRIVATE_INVALID_TREE;
+    }
+  }
+
+  function strictPrivateRecord(value, allowedKeys = null, requiredKeys = new Set()) {
+    try {
+      const record = materializePrivateOwnData(value);
+      if (!record || record === PRIVATE_INVALID_TREE || Array.isArray(record)) return null;
+      const keys = Object.getOwnPropertyNames(record);
+      if (
+        (allowedKeys && keys.some(key => !allowedKeys.has(key))) ||
+        [...requiredKeys].some(key => !keys.includes(key))) return null;
+      for (const key of keys) {
+        const descriptor = Object.getOwnPropertyDescriptor(record, key);
+        if (!descriptor || !Object.hasOwn(descriptor, 'value') || descriptor.enumerable !== true) return null;
+      }
+      return record;
+    } catch {
+      return null;
+    }
+  }
+
+  function isPrivateCloneable(value) {
+    try {
+      if (typeof structuredClone === 'function') structuredClone(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function privateOk(value) {
+    return { ok: true, value };
+  }
+
+  function privateFail(kind, code, retryable = false) {
+    return { ok: false, error: { kind, code, retryable } };
+  }
+
+  function readPrivateRequestId(value) {
+    try {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      const descriptor = Object.getOwnPropertyDescriptor(value, 'requestId');
+      return descriptor && Object.hasOwn(descriptor, 'value') && descriptor.enumerable === true &&
+        typeof descriptor.value === 'string' && descriptor.value ? descriptor.value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function readPrivateMessageCorrelation(value) {
+    try {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      const source = Object.getOwnPropertyDescriptor(value, 'source');
+      const target = Object.getOwnPropertyDescriptor(value, 'target');
+      const envelope = Object.getOwnPropertyDescriptor(value, 'envelope');
+      if (!source || !target || !envelope || !Object.hasOwn(source, 'value') || !Object.hasOwn(target, 'value') ||
+        !Object.hasOwn(envelope, 'value') || source.enumerable !== true || target.enumerable !== true || envelope.enumerable !== true ||
+        source.value !== 'subpal-content-script' || target.value !== 'subpal-page-script') return null;
+      return readPrivateRequestId(envelope.value);
+    } catch {
+      return null;
+    }
+  }
+
+  function parsePrivateContext(value) {
+    const context = strictPrivateRecord(value, PRIVATE_CONTEXT_KEYS, PRIVATE_CONTEXT_KEYS);
+    if (!context || typeof context.videoId !== 'string' || !context.videoId ||
+      typeof context.sessionId !== 'string' || !context.sessionId.startsWith('watch-') ||
+      !Number.isInteger(context.epoch) || context.epoch < 0) return null;
+    return context;
+  }
+
+  function parsePrivatePlaybackPayload(variant, value) {
+    const payload = strictPrivateRecord(value, PRIVATE_PLAYBACK_VARIANTS[variant], PRIVATE_PLAYBACK_VARIANTS[variant]);
+    if (!payload) return null;
+    if (variant === 'switch-language' && (typeof payload.languageCode !== 'string' || !payload.languageCode)) return null;
+    if (variant === 'switch-track' && !(typeof payload.trackId === 'string' && payload.trackId ||
+      Number.isInteger(payload.trackId) && payload.trackId >= 0)) return null;
+    if (variant === 'jump-to-timecode' && (!Number.isFinite(payload.targetTimestamp) || payload.targetTimestamp < 0 ||
+      typeof payload.controlId !== 'string' || !payload.controlId || typeof payload.requestId !== 'string' ||
+      !payload.requestId || !Number.isFinite(payload.issuedAt))) return null;
+    return payload;
+  }
+
+  function parsePrivateEnvelope(value) {
+    const envelope = strictPrivateRecord(value, PRIVATE_ENVELOPE_KEYS,
+      new Set(['protocolVersion', 'requestId', 'kind', 'payload']));
+    if (!envelope || envelope.protocolVersion !== PRIVATE_PROTOCOL_VERSION ||
+      typeof envelope.requestId !== 'string' || !envelope.requestId || typeof envelope.kind !== 'string') return null;
+    const query = strictPrivateRecord(envelope.payload, PRIVATE_PAYLOAD_KEYS, PRIVATE_PAYLOAD_KEYS);
+    if (!query || typeof query.variant !== 'string') return null;
+    if (envelope.kind === 'playback') {
+      if (!Object.hasOwn(PRIVATE_PLAYBACK_VARIANTS, query.variant)) return null;
+      const contextBound = query.variant !== 'context-snapshot';
+      if (contextBound !== Object.hasOwn(envelope, 'context')) return null;
+      const payload = parsePrivatePlaybackPayload(query.variant, query.payload);
+      if (!payload) return null;
+      const context = contextBound ? parsePrivateContext(envelope.context) : undefined;
+      return contextBound && !context ? null : { ...envelope, payload, variant: query.variant, context };
+    }
+    if (envelope.kind !== 'ttml-acquisition-query' || !Object.hasOwn(PRIVATE_TTML_VARIANTS, query.variant) ||
+      Object.hasOwn(envelope, 'context') || !strictPrivateRecord(query.payload, PRIVATE_TTML_VARIANTS[query.variant], PRIVATE_TTML_VARIANTS[query.variant])) {
+      return null;
+    }
+    return { ...envelope, payload: {}, variant: query.variant };
+  }
+
+  function parsePrivateMessage(event) {
+    const data = strictPrivateRecord(event?.data);
+    if (!data) {
+      const requestId = readPrivateMessageCorrelation(event?.data);
+      return requestId && event?.source === window && event.origin === window.location.origin ? { type: 'invalid', requestId } : null;
+    }
+    if (data.source !== 'subpal-content-script' || data.target !== 'subpal-page-script') return null;
+    if (!Object.hasOwn(data, 'envelope')) return { type: 'ignored' };
+    if (event?.source !== window || event.origin !== window.location.origin) return { type: 'ignored' };
+    const requestId = readPrivateRequestId(data.envelope);
+    const outer = strictPrivateRecord(event.data, PRIVATE_OUTER_KEYS, PRIVATE_OUTER_KEYS);
+    const envelope = outer && parsePrivateEnvelope(outer.envelope);
+    if (!requestId || !envelope || !isPrivateCloneable(event.data)) return { type: 'invalid', requestId };
+    return { type: 'typed', envelope };
+  }
+
+  function projectPrivateTrack(value) {
+    try {
+      if (!value || typeof value !== 'object') return null;
+      const track = {
+        code: value.code ?? value.bcp47 ?? null,
+        name: value.name ?? value.displayName ?? null,
+        trackId: value.trackId ?? null,
+        trackType: value.trackType ?? null,
+        rawTrackType: value.rawTrackType ?? null
+      };
+      return (track.code === null || typeof track.code === 'string') && (track.name === null || typeof track.name === 'string') &&
+        (track.trackId === null || typeof track.trackId === 'string' || Number.isFinite(track.trackId)) &&
+        (track.trackType === null || typeof track.trackType === 'string') &&
+        (track.rawTrackType === null || typeof track.rawTrackType === 'string') ? track : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function projectPrivateSnapshot(value) {
+    try {
+      if (!value || typeof value !== 'object') return null;
+      const snapshot = {};
+      for (const key of PRIVATE_SNAPSHOT_KEYS) snapshot[key] = value[key];
+      const currentTrack = snapshot.currentTrack === null ? null : projectPrivateTrack(snapshot.currentTrack);
+      if ((snapshot.pageUrlVideoId !== null && typeof snapshot.pageUrlVideoId !== 'string') ||
+        (snapshot.playerApiVideoId !== null && typeof snapshot.playerApiVideoId !== 'string') ||
+        (snapshot.movieId !== null && typeof snapshot.movieId !== 'string') ||
+        (snapshot.selectedSessionId !== null && typeof snapshot.selectedSessionId !== 'string') ||
+        (snapshot.selectedSessionReason !== null && typeof snapshot.selectedSessionReason !== 'string') ||
+        (snapshot.sessionSelectionConfidence !== null && typeof snapshot.sessionSelectionConfidence !== 'string') ||
+        (snapshot.currentTime !== null && !Number.isFinite(snapshot.currentTime)) ||
+        (snapshot.duration !== null && !Number.isFinite(snapshot.duration)) ||
+        (snapshot.currentTrack !== null && !currentTrack)) return null;
+      return { ...snapshot, currentTrack };
+    } catch {
+      return null;
+    }
+  }
+
+  function getPrivatePlaybackSnapshot() {
+    return subtitleInterceptor.getActivePlaybackSnapshot({ preferFreshApi: true });
+  }
+
+  function privateContextMatches(snapshot, context) {
+    const activeVideoId = snapshot?.playerApiVideoId || snapshot?.movieId || snapshot?.pageUrlVideoId || null;
+    return activeVideoId !== null && String(activeVideoId) === context.videoId && snapshot?.selectedSessionId === context.sessionId;
+  }
+
+  async function ensurePrivatePlayerHelper() {
+    if (!playerHelper.isInitialized) return playerHelper.initialize();
+    return playerHelper.hasActiveSession() ? true : playerHelper.reinitialize();
+  }
+
+  async function dispatchPrivatePlayback(envelope) {
+    try {
+      if (envelope.variant === 'context-snapshot') {
+        const playback = projectPrivateSnapshot(getPrivatePlaybackSnapshot());
+        return playback ? privateOk({ playback }) : privateFail('domain-rejected', 'invalid-playback-snapshot');
+      }
+      if (!privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) {
+        return privateFail('stale-context', 'page-context-mismatch');
+      }
+      if (!await ensurePrivatePlayerHelper() || !privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) {
+        return privateFail('stale-context', 'page-context-mismatch');
+      }
+      if (envelope.variant === 'available-languages') {
+        const languages = playerHelper.getAvailableLanguages();
+        const projected = Array.isArray(languages) ? languages.map(projectPrivateTrack) : null;
+        return projected && projected.every(Boolean) ? privateOk({ languages: projected }) : privateFail('domain-rejected', 'invalid-language-response');
+      }
+      if (envelope.variant === 'current-language') {
+        const language = playerHelper.getCurrentLanguage();
+        const projected = language === null ? null : projectPrivateTrack(language);
+        return language === null || projected ? privateOk({ language: projected }) : privateFail('domain-rejected', 'invalid-language-response');
+      }
+      if (envelope.variant === 'switch-language') {
+        if (!await playerHelper.switchToLanguage(envelope.payload.languageCode) ||
+          !privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) return privateFail('stale-context', 'page-context-mismatch');
+      } else if (envelope.variant === 'switch-track') {
+        if (!await playerHelper.switchToTrack(envelope.payload.trackId) ||
+          !privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) return privateFail('stale-context', 'page-context-mismatch');
+      } else {
+        const request = {
+          expected: { ...envelope.context, targetTimestamp: envelope.payload.targetTimestamp },
+          ...envelope.payload
+        };
+        const result = await handleJumpToTimecode(request);
+        if (result?.success === true && result.status === 'success') return privateOk({ status: 'success' });
+        if (result?.status === 'partial' && result.partial === true) return privateOk({ status: 'partial' });
+        if (['trusted-click-required', 'click-latch-missing', 'click-latch-expired', 'click-latch-mismatch'].includes(result?.reason)) {
+          return privateFail('forbidden', 'trusted-click-required');
+        }
+        return privateFail('domain-rejected', 'jump-to-timecode-failed');
+      }
+      const language = playerHelper.getCurrentLanguage();
+      const projected = language === null ? null : projectPrivateTrack(language);
+      return language === null || projected ? privateOk({ language: projected }) : privateFail('domain-rejected', 'invalid-language-response');
+    } catch {
+      return privateFail('domain-rejected', 'private-playback-dispatch-failed');
+    }
+  }
+
+  function dispatchPrivateTtml(envelope) {
+    try {
+      if (envelope.variant === 'raw-pool') return privateOk({ variant: 'raw-pool', entries: subtitleInterceptor.getAllInterceptedTTML() });
+      const count = subtitleInterceptor.getRecentDebugEvents().filter(event =>
+        event?.type === 'CDN_RESPONSE_CANDIDATE' && event.classification?.isTTML === false
+      ).length;
+      return privateOk({ variant: 'diagnostic-summary', count });
+    } catch {
+      return privateFail('domain-rejected', 'private-ttml-dispatch-failed');
+    }
+  }
+
+  async function dispatchPrivateEnvelope(envelope) {
+    return envelope.kind === 'playback' ? dispatchPrivatePlayback(envelope) : dispatchPrivateTtml(envelope);
+  }
+
+  function postPrivateResponse(requestId, response) {
+    window.postMessage({
+      source: 'subpal-page-script',
+      target: 'subpal-content-script',
+      requestId,
+      response
+    }, window.location?.origin);
+  }
+
   /**
    * 消息處理器
    */
   function handleMessage(event) {
-    if (!event?.data || event.source !== window ||
-        event.data.source !== 'subpal-content-script' ||
-        event.data.target !== 'subpal-page-script') {
+    const privateMessage = parsePrivateMessage(event);
+    if (!privateMessage || privateMessage.type === 'ignored') return;
+    if (privateMessage.type === 'invalid') {
+      if (privateMessage.requestId) postPrivateResponse(privateMessage.requestId, privateFail('invalid', 'invalid-private-envelope'));
       return;
     }
-
-    const { type, messageId } = event.data;
-    debugLog('收到消息:', type, messageId);
-
-    let response = {
-      source: 'subpal-page-script',
-      messageId: messageId,
-      success: false,
-      error: null
-    };
-
-    try {
-      switch (type) {
-        case 'PING':
-          response.success = true;
-          break;
-
-        case 'CHECK_API_AVAILABILITY':
-          response.success = true;
-          response.available = checkAPIAvailability();
-          break;
-
-        case 'JUMP_TO_TIMECODE':
-          if (event.data.intent !== 'jump-to-timecode') {
-            response = { ...response, ...createJumpFailure('invalid-command-intent', '不支援的跳轉命令。') };
-            break;
-          }
-          handleJumpToTimecode(event.data).then(result => {
-            window.postMessage({ ...response, ...result }, '*');
-          }).catch(error => {
-            debugLog('跳轉命令處理失敗:', error.message);
-            window.postMessage({ ...response, ...createJumpFailure('command-failed', error.message) }, '*');
-          });
-          return;
-
-        case 'CHECK_PLAYER_READY':
-          response.success = true;
-          response.ready = playerHelper.isInitialized && playerHelper.hasActiveSession();
-          break;
-
-        case 'INITIALIZE_PLAYER_HELPER':
-          playerHelper.initialize().then(success => {
-            response.success = success;
-            if (!success) {
-              response.error = '播放器助手初始化失敗';
-            }
-            window.postMessage(response, '*');
-          }).catch(error => {
-            response.error = error.message;
-            window.postMessage(response, '*');
-          });
-          return; // 異步處理，直接返回
-
-        case 'INITIALIZE_SUBTITLE_INTERCEPTOR':
-          subtitleInterceptor.start();
-          response.success = true;
-          break;
-
-        case 'GET_AVAILABLE_LANGUAGES':
-          response.languages = playerHelper.getAvailableLanguages();
-          response.success = true;
-          break;
-
-        case 'SWITCH_LANGUAGE':
-          playerHelper.switchToLanguage(event.data.languageCode).then(success => {
-            response.success = success;
-            if (!success) {
-              response.error = '語言切換失敗';
-            }
-            window.postMessage(response, '*');
-          }).catch(error => {
-            response.error = error.message;
-            window.postMessage(response, '*');
-          });
-          return; // 異步處理，直接返回
-
-        case 'SWITCH_TRACK':
-          playerHelper.switchToTrack(event.data.trackId).then(success => {
-            response.success = success;
-            if (!success) {
-              response.error = 'trackId 切換失敗';
-            }
-            window.postMessage(response, '*');
-          }).catch(error => {
-            response.error = error.message;
-            window.postMessage(response, '*');
-          });
-          return; // 異步處理，直接返回
-
-        case 'GET_CURRENT_LANGUAGE':
-          response.language = playerHelper.getCurrentLanguage();
-          response.success = true;
-          break;
-
-        case 'GET_SUBTITLE_CONTENT':
-          const cacheKey = event.data.cacheKey;
-          const cachedData = subtitleInterceptor.getInterceptedSubtitles(cacheKey);
-          if (cachedData) {
-            response.subtitles = cachedData.subtitles;
-            response.success = true;
-          } else {
-            response.error = '未找到字幕內容';
-          }
-          break;
-
-        case 'GET_ALL_INTERCEPTED_SUBTITLES':
-          response.allSubtitles = subtitleInterceptor.getAllInterceptedSubtitles();
-          response.success = true;
-          debugLog('返回所有攔截的字幕，數量:', Object.keys(response.allSubtitles).length);
-          break;
-
-        case 'GET_ALL_INTERCEPTED_TTML':
-          response.allTTMLs = subtitleInterceptor.getAllInterceptedTTML();
-          response.success = true;
-          debugLog('返回所有攔截的 raw TTML，數量:', Object.keys(response.allTTMLs).length);
-          break;
-
-        case 'GET_SUBPAL_DEBUG_SNAPSHOT':
-          response.debugSnapshot = subtitleInterceptor.getDebugSnapshot();
-          response.success = true;
-          debugLog('返回 SubPal 診斷快照');
-          break;
-
-        case 'CHECK_INTERCEPTOR_STATUS':
-          response.active = subtitleInterceptor.isActive;
-          response.success = true;
-          break;
-
-        case 'TEST_SUBTITLE_FETCH':
-          response.success = subtitleInterceptor.isActive;
-          response.interceptorActive = subtitleInterceptor.isActive;
-          break;
-
-        case 'GET_SUBTITLE_TRACKS':
-          const languageCode = event.data.languageCode;
-          if (!languageCode) {
-            response.error = '缺少語言代碼參數';
-            break;
-          }
-
-          try {
-            // 獲取指定語言的攔截字幕數據
-            const allSubtitles = subtitleInterceptor.getAllInterceptedSubtitles();
-
-            // 由於緩存鍵格式是 "語言代碼_參數"，需要按語言代碼查找
-            let languageSubtitles = null;
-            for (const [cacheKey, subtitleData] of Object.entries(allSubtitles)) {
-              if (cacheKey.startsWith(languageCode + '_')) {
-                languageSubtitles = subtitleData;
-                break;
-              }
-            }
-
-            if (languageSubtitles && languageSubtitles.subtitles) {
-              response.subtitles = languageSubtitles.subtitles;
-              response.success = true;
-              debugLog(`找到 ${languageCode} 字幕數據，共 ${languageSubtitles.subtitles.length} 條`);
-            } else {
-              debugLog(`未找到 ${languageCode} 的字幕數據，可用的鍵:`, Object.keys(allSubtitles));
-              response.error = `未找到語言 ${languageCode} 的字幕數據`;
-            }
-          } catch (error) {
-            response.error = `獲取字幕軌道失敗: ${error.message}`;
-          }
-          break;
-
-        default:
-          response.error = '未知的消息類型';
-      }
-    } catch (error) {
-      response.error = error.message;
-      console.error('處理消息時出錯:', error);
-    }
-
-    // 發送響應
-    window.postMessage(response, '*');
+    dispatchPrivateEnvelope(privateMessage.envelope).then(
+      response => postPrivateResponse(privateMessage.envelope.requestId, response),
+      () => postPrivateResponse(privateMessage.envelope.requestId, privateFail('domain-rejected', 'private-envelope-dispatch-failed'))
+    );
   }
 
   // 監聽消息

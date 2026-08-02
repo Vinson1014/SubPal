@@ -3,8 +3,6 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 
-const rootUrl = new URL('../', import.meta.url);
-
 function createContext() {
   const appendAttempts = [];
   const window = {
@@ -39,7 +37,19 @@ async function createModule(context, identifier, exports) {
   return module;
 }
 
-async function loadInitializationManager({ waitForPageScript }) {
+async function createPlaybackContextModule(context, playbackContextManager) {
+  return createModule(context, 'content/core/playback-context-manager.js', { playbackContextManager });
+}
+
+function createPlaybackContext({ context, playback, initialize = async () => true } = {}) {
+  return {
+    getCurrentContext: () => context,
+    getPlayback: () => playback,
+    initialize
+  };
+}
+
+async function loadInitializationManager({ waitForPageScript, playbackContextManager = createPlaybackContext() }) {
   const { appendAttempts, context } = createContext();
   let injectionRequests = 0;
   const messaging = await createModule(context, 'content/system/messaging.js', {
@@ -53,9 +63,15 @@ async function loadInitializationManager({ waitForPageScript }) {
   const videoInfo = await createModule(context, 'content/core/video-info.js', {
     getVideoId: () => '81234567'
   });
+  const playbackContext = await createPlaybackContextModule(context, playbackContextManager);
   const source = await readFile(new URL('../content/system/initialization-manager.js', import.meta.url), 'utf8');
   const module = new vm.SourceTextModule(source, { context, identifier: 'content/system/initialization-manager.js' });
-  await module.link((specifier) => specifier === './messaging.js' ? messaging : videoInfo);
+  await module.link((specifier) => {
+    if (specifier === './messaging.js') return messaging;
+    if (specifier === '../core/video-info.js') return videoInfo;
+    if (specifier === '../core/playback-context-manager.js') return playbackContext;
+    throw new Error(`Unexpected initialization dependency: ${specifier}`);
+  });
   await module.evaluate();
 
   return {
@@ -65,61 +81,23 @@ async function loadInitializationManager({ waitForPageScript }) {
   };
 }
 
-async function loadNetflixApiBridge({ waitForPageScript, sendMessageToPageScript }) {
+async function loadModeDetector({ waitForPageScript, playbackContextManager }) {
   const { appendAttempts, context } = createContext();
   let injectionRequests = 0;
   const messaging = await createModule(context, 'content/system/messaging.js', {
-    registerInternalEventHandler() {},
-    sendMessage() {},
-    sendMessageToPageScript,
     waitForPageScript,
     requestPageScriptInjection: async () => {
       injectionRequests += 1;
       appendAttempts.push('legacy-request');
     }
   });
-  const config = await createModule(context, 'content/system/config/config-bridge.js', {
-    configBridge: { get: () => false, subscribe() {} }
-  });
-  const source = await readFile(new URL('../content/system/netflix-api-bridge.js', import.meta.url), 'utf8');
-  const module = new vm.SourceTextModule(source, {
-    context,
-    identifier: 'content/system/netflix-api-bridge.js',
-    importModuleDynamically: async (specifier) => {
-      if (specifier === './config/config-bridge.js') return config;
-      throw new Error(`Unexpected dynamic import: ${specifier}`);
-    }
-  });
-  await module.link((specifier) => {
-    assert.equal(specifier, './messaging.js');
-    return messaging;
-  });
-  await module.evaluate();
-
-  return {
-    appendAttempts,
-    bridge: module.namespace.getNetflixAPIBridge(),
-    injectionRequests: () => injectionRequests
-  };
-}
-
-async function loadModeDetector(sendMessageToPageScript) {
-  const { appendAttempts, context } = createContext();
-  let injectionRequests = 0;
-  const messaging = await createModule(context, 'content/system/messaging.js', {
-    registerInternalEventHandler() {},
-    sendMessage() {},
-    sendMessageToPageScript,
-    requestPageScriptInjection: async () => {
-      injectionRequests += 1;
-      appendAttempts.push('legacy-request');
-    }
-  });
+  const playbackContext = await createPlaybackContextModule(context, playbackContextManager);
   const source = await readFile(new URL('../content/subtitle-modes/mode-detector.js', import.meta.url), 'utf8');
   const module = new vm.SourceTextModule(source, { context, identifier: 'content/subtitle-modes/mode-detector.js' });
   await module.link((specifier) => {
-    assert.equal(specifier, '../system/messaging.js');
-    return messaging;
+    if (specifier === '../system/messaging.js') return messaging;
+    if (specifier === '../core/playback-context-manager.js') return playbackContext;
+    throw new Error(`Unexpected mode dependency: ${specifier}`);
   });
   await module.evaluate();
 
@@ -130,17 +108,11 @@ async function loadModeDetector(sendMessageToPageScript) {
   };
 }
 
-test('Given MAIN requester sources When Todo 7 is complete Then request injection helpers and event registrations are absent', async () => {
-  const sources = await Promise.all([
-    'content/system/initialization-manager.js',
-    'content/system/netflix-api-bridge.js',
-    'content/subtitle-modes/mode-detector.js',
-    'content/system/messaging.js',
-    'content.js'
-  ].map((path) => readFile(new URL(path, rootUrl), 'utf8')));
-
-  for (const source of sources) assert.doesNotMatch(source, /requestPageScriptInjection/);
-  assert.doesNotMatch(sources[4], /subpal-inject-page-script|subpal-request-page-script-injection/);
+test('Given the retired Netflix API bridge When its module is requested Then it is absent', async () => {
+  await assert.rejects(
+    readFile(new URL('../content/system/netflix-api-bridge.js', import.meta.url), 'utf8'),
+    (error) => error?.code === 'ENOENT'
+  );
 });
 
 test('Given MAIN initialization When page readiness succeeds or times out Then it waits once and never requests an append', async (t) => {
@@ -167,52 +139,86 @@ test('Given MAIN initialization When page readiness succeeds or times out Then i
   });
 });
 
-test('Given the Netflix API bridge When it initializes after readiness Then it waits without requesting reinjection', async () => {
+test('Given MAIN initialization When readiness precedes the PlaybackContext snapshot Then it initializes through the typed bootstrap without legacy API or initializer commands', async () => {
   const waits = [];
-  const messages = [];
-  const harness = await loadNetflixApiBridge({
-    waitForPageScript: async (timeout) => { waits.push(timeout); },
-    sendMessageToPageScript: async (message) => {
-      messages.push(message.type);
-      if (message.type === 'CHECK_API_AVAILABILITY') return { success: true, available: true };
-      return { success: true };
+  let initializeCalls = 0;
+  const playbackContextManager = createPlaybackContext({
+    initialize: async () => {
+      initializeCalls += 1;
+      return true;
     }
   });
+  const harness = await loadInitializationManager({
+    waitForPageScript: async (timeout) => { waits.push(timeout); },
+    playbackContextManager
+  });
 
-  assert.equal(await harness.bridge.initialize(), true);
+  assert.equal(await harness.manager.checkNetflixAPI(), true);
   assert.deepEqual(waits, [5000]);
-  assert.deepEqual(messages, ['CHECK_API_AVAILABILITY', 'INITIALIZE_PLAYER_HELPER', 'INITIALIZE_SUBTITLE_INTERCEPTOR']);
+  assert.equal(initializeCalls, 1);
+  assert.equal(harness.manager.state.playbackContextReady, true);
+  assert.equal(harness.manager.state.netflixAPIAvailable, true);
   assert.equal(harness.injectionRequests(), 0);
   assert.deepEqual(harness.appendAttempts, []);
 });
 
-test('Given the mode detector When PING succeeds or fails Then it reports readiness without reinjection', async (t) => {
-  await t.test('PING succeeds', async () => {
-    const messages = [];
-    const harness = await loadModeDetector(async (message) => {
-      messages.push(message.type);
-      return { success: true };
-    });
-
-    assert.equal(await harness.detector.ensurePageScriptInjected(), true);
-    assert.deepEqual(messages, ['PING']);
-    assert.equal(harness.injectionRequests(), 0);
-    assert.deepEqual(harness.appendAttempts, []);
+test('Given a transitioning PlaybackContext When the mode detector checks readiness Then it remains a soft-not-ready interceptor state without fetching languages', async () => {
+  const playbackCalls = [];
+  const playback = { perform(intent) { playbackCalls.push(intent); } };
+  const harness = await loadModeDetector({
+    waitForPageScript: async () => {},
+    playbackContextManager: createPlaybackContext({
+      context: { state: 'transitioning', videoId: '81234567', sessionId: null, epoch: 2 },
+      playback
+    })
   });
 
-  await t.test('PING fails', async () => {
-    const messages = [];
-    const harness = await loadModeDetector(async (message) => {
-      messages.push(message.type);
-      throw new Error('PING unavailable');
-    });
-
-    const result = await harness.detector.detectInterceptModeStatus();
-    assert.deepEqual({ status: result.status, mode: result.mode, reason: result.reason }, {
-      status: 'hard_fail', mode: 'dom', reason: 'page-script-unavailable'
-    });
-    assert.deepEqual(messages, ['PING']);
-    assert.equal(harness.injectionRequests(), 0);
-    assert.deepEqual(harness.appendAttempts, []);
+  const result = await harness.detector.detectInterceptModeStatus();
+  assert.deepEqual({ status: result.status, mode: result.mode, reason: result.reason }, {
+    status: 'soft_not_ready', mode: 'intercept', reason: 'playback-context-not-ready'
   });
+  assert.deepEqual(playbackCalls, []);
+});
+
+test('Given a ready PlaybackContext and typed available languages When the mode detector checks readiness Then it reports intercept-ready with the exact context', async () => {
+  const playbackCalls = [];
+  const context = { state: 'ready', videoId: '81234567', sessionId: 'watch-session-a', epoch: 4 };
+  const playback = {
+    async perform(intent) {
+      playbackCalls.push(intent);
+      return {
+        ok: true,
+        value: {
+          variant: 'available-languages',
+          languages: [{ code: 'en', name: 'English', trackId: 'track-en', trackType: 'PRIMARY', rawTrackType: null }]
+        }
+      };
+    }
+  };
+  const harness = await loadModeDetector({
+    waitForPageScript: async () => {},
+    playbackContextManager: createPlaybackContext({ context, playback })
+  });
+
+  const result = await harness.detector.detectInterceptModeStatus();
+  assert.deepEqual({ status: result.status, mode: result.mode, reason: result.reason }, {
+    status: 'ready', mode: 'intercept', reason: 'intercept-ready'
+  });
+  assert.deepEqual(playbackCalls.map((intent) => JSON.parse(JSON.stringify(intent))), [{
+    variant: 'available-languages',
+    payload: {},
+    expected: { videoId: '81234567', sessionId: 'watch-session-a', epoch: 4 }
+  }]);
+});
+
+test('Given initialization and mode readiness sources When inspected Then no generic API, player, language, or interceptor commands remain', async () => {
+  const [initializationSource, modeSource] = await Promise.all([
+    readFile(new URL('../content/system/initialization-manager.js', import.meta.url), 'utf8'),
+    readFile(new URL('../content/subtitle-modes/mode-detector.js', import.meta.url), 'utf8')
+  ]);
+
+  for (const source of [initializationSource, modeSource]) {
+    assert.doesNotMatch(source, /CHECK_API_AVAILABILITY|INITIALIZE_PLAYER_HELPER|INITIALIZE_SUBTITLE_INTERCEPTOR|PING|CHECK_PLAYER_READY|GET_AVAILABLE_LANGUAGES|TEST_SUBTITLE_FETCH|sendMessageToPageScript/);
+  }
+  assert.doesNotMatch(initializationSource, /quickInterceptorCheck|checkPlayerReady/);
 });

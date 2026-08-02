@@ -8,12 +8,13 @@ import { configBridge } from './config/config-bridge.js';
 import { toAPILanguageCode } from '../utils/language-code.js';
 import { requestCrowdsourcingTasks } from './crowdsourcing-task-client.js';
 import { EndscreenActionCoordinator } from './endscreen-action-coordinator.js';
-import { registerInternalEventHandler, sendMessageToPageScript } from './messaging.js';
+import { registerInternalEventHandler } from './messaging.js';
 import { playbackContextManager } from '../core/playback-context-manager.js';
+import { createPagePlayback } from './capabilities/playback.js';
 
 class IsolatedEndscreenTasks {
   constructor({
-    document, Observer, location, configManager, schedule, cancel, clock, sendMessage, sendPageMessage = sendMessageToPageScript, routeTarget,
+    document, Observer, location, configManager, schedule, cancel, clock, sendMessage, playback = null, createPlayback = createPagePlayback, routeTarget,
     Adapter = EndscreenSignalAdapter, Controller = EndscreenTaskController, Panel = EndscreenTaskPanel,
     Dialog = SubmissionDialog, translation = translationBridge, vote = voteBridge, config = configBridge,
     playbackContextManager: contextManager = playbackContextManager, ownsPlaybackContextManager = false,
@@ -33,6 +34,9 @@ class IsolatedEndscreenTasks {
     this.registerInternalEventHandler = registerEventHandler;
     this.videoIdChangedDisposer = null;
     this.routeTarget = routeTarget ?? document?.defaultView ?? null;
+    this.createPlayback = createPlayback;
+    this.ownsPlayback = playback === null;
+    this.playback = playback;
     this.Adapter = Adapter;
     this.Controller = Controller;
     this.Panel = Panel;
@@ -58,7 +62,7 @@ class IsolatedEndscreenTasks {
       getContext: () => this.getContext(),
       getRouteGeneration: () => this.routeGeneration,
       isCurrentLifecycle: (lifecycle) => this.isCurrentLifecycle(lifecycle),
-      sendPageMessage
+      playback: this.playback
     });
   }
 
@@ -104,6 +108,7 @@ class IsolatedEndscreenTasks {
         await this.initializeOwnedPlaybackContextManager();
         if (!this.isCurrentLifecycle(lifecycle)) return;
       }
+      this.ensureOwnedPlayback();
 
       panel = new this.Panel({ document: this.document, schedule: this.schedule, cancel: this.cancel, configSource: this.configManager });
       this.panel = panel;
@@ -269,6 +274,29 @@ class IsolatedEndscreenTasks {
     this.playbackContextManager.cleanup();
   }
 
+  createOwnedPlayback() {
+    return this.createPlayback({
+      getCurrentContext: () => this.getContext(),
+      window: this.routeTarget ?? undefined,
+      setTimeout: this.schedule,
+      clearTimeout: this.cancel
+    });
+  }
+
+  ensureOwnedPlayback() {
+    if (!this.ownsPlayback || this.playback) return;
+    this.playback = this.createOwnedPlayback();
+    this.actionCoordinator.playback = this.playback;
+  }
+
+  cleanupOwnedPlayback() {
+    if (!this.ownsPlayback || !this.playback) return;
+    const playback = this.playback;
+    this.playback = null;
+    this.actionCoordinator.playback = null;
+    playback.dispose();
+  }
+
   cleanup() {
     const wasStarted = this.started;
     this.lifecycleGeneration += 1;
@@ -288,6 +316,7 @@ class IsolatedEndscreenTasks {
     this.lastTrustedWatchContext = null;
     this.stopAdapter(adapter);
     this.cleanupPanel(panel);
+    this.cleanupOwnedPlayback();
     this.cleanupOwnedPlaybackContextManager();
     if (wasStarted || !this.startPromise) this.startPromise = null;
     this.actionCoordinator.cleanup('任務已失效，請稍後再試。');

@@ -40,39 +40,6 @@ async function loadMessagingModule() {
   return module.namespace;
 }
 
-async function loadMessagingModuleWithMainOnlyPageScript(pageResponse = {
-  success: false,
-  status: 'error',
-  action: 'jump-to-timecode',
-  reason: 'session-mismatch'
-}) {
-  const source = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
-  const listeners = new Map();
-  const posts = [];
-  const window = {
-    addEventListener(type, listener) {
-      if (!listeners.has(type)) listeners.set(type, new Set());
-      listeners.get(type).add(listener);
-    },
-    removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
-    postMessage(message) {
-      posts.push(message);
-      for (const listener of listeners.get('message') || []) listener({ source: window, data: {
-        source: 'subpal-page-script', messageId: message.messageId, ...pageResponse
-      } });
-    }
-  };
-  const context = vm.createContext({ console, window, setTimeout, clearTimeout });
-  const module = new vm.SourceTextModule(source, { context, identifier: 'content/system/messaging.js' });
-  const transports = await loadPrivateTransportModule(context);
-  await module.link((specifier) => {
-    assert.equal(specifier, './capabilities/private-transports.js');
-    return transports;
-  });
-  await module.evaluate();
-  return { messaging: module.namespace, posts };
-}
-
 async function loadMessagingContentBridgeHarness() {
   const source = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
   const listeners = new Map();
@@ -117,7 +84,7 @@ async function loadMessagingContentBridgeHarness() {
   return { messaging: module.namespace, window, CustomEvent };
 }
 
-async function loadMessagingTimeoutHarness({ pageResponse } = {}) {
+async function loadMessagingTimeoutHarness() {
   const source = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
   const listeners = new Map();
   const timers = new Map();
@@ -126,10 +93,6 @@ async function loadMessagingTimeoutHarness({ pageResponse } = {}) {
     addEventListener(type, listener) { (listeners.get(type) ?? listeners.set(type, new Set()).get(type)).add(listener); },
     removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
     dispatchEvent(event) { for (const listener of [...(listeners.get(event.type) ?? [])]) listener(event); return true; },
-    postMessage(message) {
-      if (!pageResponse) return;
-      for (const listener of [...(listeners.get('message') ?? [])]) listener({ data: { source: 'subpal-page-script', messageId: message.messageId, ...pageResponse } });
-    }
   };
   const setTimeout = (callback, delay) => { const id = ++nextTimerId; timers.set(id, { callback, delay }); return id; };
   const clearTimeout = (id) => timers.delete(id);
@@ -222,6 +185,12 @@ test('Given a caller that ignores the disposer When it registers and dispatches 
   assert.deepEqual(events, ['SUBTITLE_READY']);
 });
 
+test('Given an initialized messaging module When its public interface is loaded Then generic page commands are absent', async () => {
+  const messaging = await loadMessagingModule();
+
+  assert.equal(Object.hasOwn(messaging, 'sendMessageToPageScript'), false);
+});
+
 test('Given a VIDEO_ID_CHANGED internal handler When its disposer repeats Then it remains removed', async () => {
   const messaging = await loadMessagingModule();
   const events = [];
@@ -263,56 +232,11 @@ test('Given initialized messaging receives a forged legacy RAW message When brid
   assert.deepEqual(events, [raw]);
 });
 
-test('Given an isolated world without visible MAIN objects When a page command is sent Then postMessage transport reaches MAIN and preserves structured failure', async () => {
-  const { messaging, posts } = await loadMessagingModuleWithMainOnlyPageScript();
-
-  const result = await messaging.sendMessageToPageScript({
-    type: 'JUMP_TO_TIMECODE',
-    intent: 'jump-to-timecode',
-    expected: { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 7, targetTimestamp: 1 }
-  });
-
-  assert.equal(posts.length, 1);
-  assert.equal(posts[0].target, 'subpal-page-script');
-  assert.equal(result.status, 'error');
-  assert.equal(result.reason, 'session-mismatch');
-});
-
-test('Given a parseable partial page response with diagnostics When transported Then it resolves without collapsing into a transport rejection', async () => {
-  const partial = {
-    success: false,
-    status: 'partial',
-    partial: true,
-    action: 'jump-to-timecode',
-    reason: 'player-ui-restore-timeout',
-    error: '已跳轉至字幕時間點，但無法安全還原播放器介面，請使用 Netflix 原生控制。',
-    playerUiRestore: { status: 'failed', reason: 'player-ui-restore-timeout', activated: true }
-  };
-  const { messaging } = await loadMessagingModuleWithMainOnlyPageScript(partial);
-
-  const result = await messaging.sendMessageToPageScript({ type: 'JUMP_TO_TIMECODE', intent: 'jump-to-timecode' });
-
-  assert.equal(result.status, 'partial');
-  assert.equal(result.reason, partial.reason);
-  assert.deepEqual(result.playerUiRestore, partial.playerUiRestore);
-});
-
-test('Given legacy DOM and page callers When private transports terminate Then they reject safe Errors while partial page values remain raw', async () => {
+test('Given a legacy DOM caller When its private transport terminates Then it rejects a safe Error', async () => {
   const dom = await loadMessagingTimeoutHarness();
   const domPending = dom.messaging.sendMessage({ type: 'PING' });
   dom.run(10000);
   await assert.rejects(domPending, (error) => error?.kind === 'timeout' && error.code === 'dom-response-timeout' && error.retryable === true && error.message === 'dom-response-timeout');
-
-  const page = await loadMessagingTimeoutHarness();
-  const pagePending = page.messaging.sendMessageToPageScript({ type: 'PING' });
-  page.run(10000);
-  await assert.rejects(pagePending, (error) => error?.kind === 'timeout' && error.code === 'page-response-timeout' && error.retryable === true && error.message === 'page-response-timeout');
-
-  const partial = { success: false, status: 'partial', reason: 'player-ui-restore-timeout' };
-  const partialPage = await loadMessagingTimeoutHarness({ pageResponse: partial });
-  const partialResult = await partialPage.messaging.sendMessageToPageScript({ type: 'PING' });
-  assert.equal(partialResult.status, partial.status);
-  assert.equal(partialResult.reason, partial.reason);
 });
 
 test('Given current messaging and no DOM response When important messages are sent Then each send dispatches once and times out without replay', async () => {

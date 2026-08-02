@@ -10,7 +10,6 @@
  * 3. 結果只供呼叫端判斷，不直接套用到 active slot
  */
 
-import { sendMessageToPageScript } from '../system/messaging.js';
 import { getCurrentTimestamp, getVideoId } from '../core/video-info.js';
 import { parseSubtitle } from '../utils/subtitle-parser.js';
 import { playbackContextManager } from '../core/playback-context-manager.js';
@@ -19,6 +18,7 @@ class DOMOverlapMatcher {
   constructor(options = {}) {
     // 調試開關
     this.debug = options.debug || false;
+    this.readRawPool = typeof options.readRawPool === 'function' ? options.readRawPool : null;
 
     // Netflix 原生字幕 DOM 選擇器
     this.subtitleSelector = '.player-timedtext-text-container';
@@ -512,24 +512,23 @@ class DOMOverlapMatcher {
   async fetchCandidates(languageCode) {
     let response;
     try {
-      response = await sendMessageToPageScript({
-        type: 'GET_ALL_INTERCEPTED_TTML'
-      });
+      if (!this.readRawPool) throw new Error('raw-pool-reader-unavailable');
+      response = await this.readRawPool();
     } catch (error) {
       this.recordDebugEvent('CANDIDATE_FETCH_ERROR', { error: error.message });
       return [];
     }
 
-    if (!response?.success || !response.allTTMLs) {
+    if (!response?.ok || !response.value?.entries) {
       this.recordDebugEvent('CANDIDATE_FETCH_FAILED', {
-        error: response?.error || 'no-data'
+        error: response?.error?.code || 'no-data'
       });
       return [];
     }
 
     const context = this.getCurrentContext();
     const candidates = [];
-    const entries = Object.entries(response.allTTMLs);
+    const entries = Object.entries(response.value.entries);
 
     for (const [cacheKey, data] of entries) {
       // 語言過濾：使用 base-code fallback matching

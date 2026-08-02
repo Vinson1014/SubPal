@@ -5,10 +5,11 @@
  * 目前先作為診斷與後續 gate 的狀態來源，不直接改變字幕顯示行為。
  */
 
-import { sendMessageToPageScript, registerInternalEventHandler, dispatchInternalEvent } from '../system/messaging.js';
+import { registerInternalEventHandler, dispatchInternalEvent } from '../system/messaging.js';
+import { createPagePlayback } from '../system/capabilities/playback.js';
 
 class PlaybackContextManager {
-  constructor() {
+  constructor({ playback } = {}) {
     this.isInitialized = false;
     this.context = this.createInitialContext();
     this.debugEvents = [];
@@ -17,6 +18,10 @@ class PlaybackContextManager {
     this.pollIntervalMs = 3000;
     this.videoChangedDisposer = null;
     this.videoChangeTimeout = null;
+    this.playback = playback || null;
+    this.ownsPlayback = !playback;
+    this.refreshGeneration = 0;
+    this.pendingRefreshAbortController = null;
   }
 
   createInitialContext() {
@@ -48,6 +53,7 @@ class PlaybackContextManager {
       return true;
     } catch (error) {
       this.disposeEventHandlers();
+      this.disposeOwnedPlayback();
       throw error;
     }
   }
@@ -84,6 +90,7 @@ class PlaybackContextManager {
     const newVideoId = event.newVideoId || event.videoId || null;
     const oldVideoId = event.oldVideoId || this.context.videoId;
 
+    this.invalidatePendingRefresh();
     this.context = {
       ...this.context,
       epoch: this.context.epoch + 1,
@@ -119,45 +126,87 @@ class PlaybackContextManager {
   }
 
   async refreshContext(reason = 'manual') {
-    const response = await sendMessageToPageScript({
-      type: 'GET_SUBPAL_DEBUG_SNAPSHOT'
-    });
+    const { generation, controller } = this.startRefresh();
+    try {
+      const result = await this.getPlayback().perform({
+        variant: 'context-snapshot',
+        payload: {}
+      }, controller.signal);
 
-    const playback = response?.debugSnapshot?.playback || null;
-    const nextContext = this.deriveContextFromPlayback(playback, reason);
-    const changed = this.hasContextChanged(this.context, nextContext);
+      if (generation !== this.refreshGeneration) return this.getCurrentContext();
+      if (!result?.ok) throw new Error(result?.error?.code || 'playback-context-snapshot-failed');
+      if (result.value?.variant !== 'context-snapshot' || !result.value.playback) {
+        throw new Error('invalid-playback-context-snapshot');
+      }
 
-    if (changed) {
-      const shouldAdvanceEpoch =
-        this.context.videoId !== nextContext.videoId ||
-        this.context.sessionId !== nextContext.sessionId;
+      const playback = result.value.playback;
+      const nextContext = this.deriveContextFromPlayback(playback, reason);
+      const changed = this.hasContextChanged(this.context, nextContext);
 
-      nextContext.epoch = shouldAdvanceEpoch ? this.context.epoch + 1 : this.context.epoch;
-      nextContext.startedAt = shouldAdvanceEpoch ? Date.now() : this.context.startedAt;
-      this.context = nextContext;
+      if (changed) {
+        const shouldAdvanceEpoch =
+          this.context.videoId !== nextContext.videoId ||
+          this.context.sessionId !== nextContext.sessionId;
 
-      this.recordDebugEvent('CONTEXT_REFRESHED', {
-        reason,
-        epoch: this.context.epoch,
-        videoId: this.context.videoId,
-        sessionId: this.context.sessionId,
-        state: this.context.state,
-        selectedSessionReason: this.context.selectedSessionReason,
-        sessionSelectionConfidence: this.context.sessionSelectionConfidence,
-        currentTrack: this.context.currentTrack
-      });
+        nextContext.epoch = shouldAdvanceEpoch ? this.context.epoch + 1 : this.context.epoch;
+        nextContext.startedAt = shouldAdvanceEpoch ? Date.now() : this.context.startedAt;
+        this.context = nextContext;
 
-      this.dispatchContextChanged(reason);
-    } else {
-      this.context = {
-        ...this.context,
-        snapshot: playback,
-        updatedAt: Date.now(),
-        source: reason
-      };
+        this.recordDebugEvent('CONTEXT_REFRESHED', {
+          reason,
+          epoch: this.context.epoch,
+          videoId: this.context.videoId,
+          sessionId: this.context.sessionId,
+          state: this.context.state,
+          selectedSessionReason: this.context.selectedSessionReason,
+          sessionSelectionConfidence: this.context.sessionSelectionConfidence,
+          currentTrack: this.context.currentTrack
+        });
+
+        this.dispatchContextChanged(reason);
+      } else {
+        this.context = {
+          ...this.context,
+          snapshot: playback,
+          updatedAt: Date.now(),
+          source: reason
+        };
+      }
+
+      return this.context;
+    } finally {
+      if (this.pendingRefreshAbortController === controller) {
+        this.pendingRefreshAbortController = null;
+      }
     }
+  }
 
-    return this.context;
+  getPlayback() {
+    if (!this.playback && this.ownsPlayback) {
+      this.playback = createPagePlayback({
+        getCurrentContext: () => this.getCurrentContext()
+      });
+    }
+    return this.playback;
+  }
+
+  startRefresh() {
+    this.invalidatePendingRefresh();
+    const controller = new AbortController();
+    this.pendingRefreshAbortController = controller;
+    return { generation: this.refreshGeneration, controller };
+  }
+
+  invalidatePendingRefresh() {
+    this.refreshGeneration += 1;
+    this.pendingRefreshAbortController?.abort();
+    this.pendingRefreshAbortController = null;
+  }
+
+  disposeOwnedPlayback() {
+    if (!this.ownsPlayback || !this.playback) return;
+    this.playback.dispose();
+    this.playback = null;
   }
 
   deriveContextFromPlayback(playback, source) {
@@ -261,6 +310,7 @@ class PlaybackContextManager {
   }
 
   cleanup() {
+    this.invalidatePendingRefresh();
     if (this.videoChangeTimeout) {
       clearTimeout(this.videoChangeTimeout);
       this.videoChangeTimeout = null;
@@ -272,6 +322,7 @@ class PlaybackContextManager {
     }
 
     this.disposeEventHandlers();
+    this.disposeOwnedPlayback();
     this.isInitialized = false;
   }
 }

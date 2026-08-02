@@ -8,12 +8,14 @@
  * 4. 健壯性：多重檢查確保模式選擇的可靠性
  */
 
-import { sendMessageToPageScript, sendMessage, registerInternalEventHandler } from '../system/messaging.js';
+import { waitForPageScript } from '../system/messaging.js';
+import { playbackContextManager as defaultPlaybackContextManager } from '../core/playback-context-manager.js';
 
 class ModeDetector {
-  constructor() {
+  constructor({ playbackContextManager = defaultPlaybackContextManager, playback } = {}) {
     this.debug = false; // 從 ConfigBridge 讀取
-    this.apiCheckTimeout = 5000; // 5秒超時
+    this.playbackContextManager = playbackContextManager;
+    this.playback = playback || null;
     this.retryCount = 0;
     this.maxRetries = 3;
     this.lastCheckResult = null;
@@ -81,9 +83,9 @@ class ModeDetector {
         });
       }
 
-      const scriptInjected = await this.ensurePageScriptInjected();
-      checks.pageScriptInjected = scriptInjected;
-      if (!scriptInjected) {
+      const pageScriptReady = await this.isPageScriptReady();
+      checks.pageScriptReady = pageScriptReady;
+      if (!pageScriptReady) {
         return this.recordCheckResult({
           status: 'hard_fail',
           mode: 'dom',
@@ -92,35 +94,51 @@ class ModeDetector {
         });
       }
 
-      const apiAvailable = await this.checkNetflixAPIAvailability();
-      checks.netflixAPIAvailable = apiAvailable;
-      if (!apiAvailable) {
+      const context = this.playbackContextManager.getCurrentContext();
+      checks.playbackContext = context?.state || 'missing';
+      if (context?.state !== 'ready') {
         return this.recordCheckResult({
           status: 'soft_not_ready',
           mode: 'intercept',
-          reason: 'netflix-api-not-ready',
+          reason: 'playback-context-not-ready',
           checks
         });
       }
 
-      const playerReady = await this.checkPlayerReadiness();
-      checks.playerReady = playerReady;
-      if (!playerReady) {
+      if (!context.videoId || !context.sessionId || !Number.isInteger(context.epoch)) {
         return this.recordCheckResult({
           status: 'soft_not_ready',
           mode: 'intercept',
-          reason: 'player-not-ready',
+          reason: 'playback-context-invalid',
           checks
         });
       }
 
-      const interceptStatus = await this.checkSubtitleInterceptCapabilityStatus();
-      checks.subtitleIntercept = interceptStatus;
-      if (interceptStatus.status !== 'ready') {
+      const languagesResult = await this.getPlayback().perform({
+        variant: 'available-languages',
+        payload: {},
+        expected: {
+          videoId: context.videoId,
+          sessionId: context.sessionId,
+          epoch: context.epoch
+        }
+      });
+      if (!languagesResult?.ok || languagesResult.value?.variant !== 'available-languages') {
         return this.recordCheckResult({
-          status: interceptStatus.status,
-          mode: interceptStatus.status === 'hard_fail' ? 'dom' : 'intercept',
-          reason: interceptStatus.reason,
+          status: 'soft_not_ready',
+          mode: 'intercept',
+          reason: languagesResult?.error?.code || 'languages-unavailable',
+          checks
+        });
+      }
+
+      const languages = languagesResult.value.languages;
+      checks.availableLanguages = Array.isArray(languages) ? languages.length : null;
+      if (!Array.isArray(languages) || languages.length === 0) {
+        return this.recordCheckResult({
+          status: 'soft_not_ready',
+          mode: 'intercept',
+          reason: 'languages-empty',
           checks
         });
       }
@@ -153,153 +171,17 @@ class ModeDetector {
     return result.status === 'ready';
   }
 
-  /**
-   * 以 PING 確認頁面腳本就緒
-   */
-  async ensurePageScriptInjected() {
-    this.log('確認頁面腳本是否就緒...');
-    
-    const result = await this.sendToPageScript({ type: 'PING' }, 1000);
-    if (result && result.success) {
-      this.log('頁面腳本已就緒');
+  async isPageScriptReady() {
+    try {
+      await waitForPageScript(5000);
       return true;
-    }
-
-    this.log('頁面腳本尚未就緒');
-    return false;
-  }
-
-  /**
-   * 檢測 Netflix API 可用性
-   */
-  async checkNetflixAPIAvailability() {
-    this.log('檢測 Netflix API 可用性...');
-    
-    try {
-      const result = await this.sendToPageScript({
-        type: 'CHECK_API_AVAILABILITY'
-      });
-      
-      if (result && result.success && result.available) {
-        this.log('Netflix API 可用');
-        return true;
-      }
-      
-      this.log('Netflix API 不可用:', result?.error);
-      return false;
-      
-    } catch (error) {
-      console.error('檢測 Netflix API 可用性時出錯:', error);
+    } catch {
       return false;
     }
   }
 
-  /**
-   * 檢測播放器準備狀態
-   */
-  async checkPlayerReadiness() {
-    this.log('檢測播放器準備狀態...');
-    
-    try {
-      const result = await this.sendToPageScript({
-        type: 'CHECK_PLAYER_READY'
-      });
-      
-      if (result && result.success && result.ready) {
-        this.log('播放器已準備就緒');
-        return true;
-      }
-      
-      // 如果播放器未準備就緒，等待一段時間再檢查
-      this.log('播放器未準備就緒，等待...');
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      const retryResult = await this.sendToPageScript({
-        type: 'CHECK_PLAYER_READY'
-      });
-      
-      if (retryResult && retryResult.success && retryResult.ready) {
-        this.log('播放器準備就緒（重試成功）');
-        return true;
-      }
-      
-      this.log('播放器準備檢測失敗');
-      return false;
-      
-    } catch (error) {
-      console.error('檢測播放器準備狀態時出錯:', error);
-      return false;
-    }
-  }
-
-  /**
-   * 檢測字幕攔截功能
-   */
-  async checkSubtitleInterceptCapability() {
-    const result = await this.checkSubtitleInterceptCapabilityStatus();
-    return result.status === 'ready';
-  }
-
-  async checkSubtitleInterceptCapabilityStatus() {
-    this.log('檢測字幕攔截功能...');
-
-    try {
-      const languagesResult = await this.sendToPageScript({
-        type: 'GET_AVAILABLE_LANGUAGES'
-      });
-
-      if (!languagesResult || !languagesResult.success) {
-        this.log('可用語言列表暫時不可讀:', languagesResult?.error);
-        return {
-          status: 'soft_not_ready',
-          reason: 'languages-unavailable',
-          languagesCount: 0,
-          error: languagesResult?.error || null
-        };
-      }
-
-      const languages = languagesResult.languages || [];
-      if (languages.length === 0) {
-        this.log('可用語言列表為空，播放器可能仍在切換');
-        return {
-          status: 'soft_not_ready',
-          reason: 'languages-empty',
-          languagesCount: 0
-        };
-      }
-
-      this.log(`檢測到 ${languages.length} 種可用語言`);
-
-      const subtitleTest = await this.sendToPageScript({
-        type: 'TEST_SUBTITLE_FETCH'
-      });
-
-      if (subtitleTest && subtitleTest.success) {
-        this.log('字幕攔截功能正常');
-        return {
-          status: 'ready',
-          reason: 'interceptor-active',
-          languagesCount: languages.length,
-          interceptorActive: !!subtitleTest.interceptorActive
-        };
-      }
-
-      this.log('字幕攔截功能測試暫時未通過:', subtitleTest?.error);
-      return {
-        status: 'soft_not_ready',
-        reason: 'interceptor-not-active',
-        languagesCount: languages.length,
-        error: subtitleTest?.error || null
-      };
-
-    } catch (error) {
-      console.error('檢測字幕攔截功能時出錯:', error);
-      return {
-        status: 'soft_not_ready',
-        reason: 'intercept-capability-error',
-        error: error.message
-      };
-    }
+  getPlayback() {
+    return this.playback || this.playbackContextManager.getPlayback();
   }
 
   /**
@@ -312,25 +194,6 @@ class ModeDetector {
   }
 
   /**
-   * 向頁面腳本發送消息（帶超時）
-   */
-  async sendToPageScript(message, timeout = null) {
-    const actualTimeout = timeout || this.apiCheckTimeout;
-    
-    try {
-      return await Promise.race([
-        sendMessageToPageScript(message),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('通信超時')), actualTimeout)
-        )
-      ]);
-    } catch (error) {
-      this.log(`頁面腳本通信失敗: ${error.message}`);
-      return null;
-    }
-  }
-
-  /**
    * 獲取檢測歷史
    */
   getDetectionHistory() {
@@ -340,7 +203,6 @@ class ModeDetector {
       currentRetryCount: this.retryCount,
       maxRetries: this.maxRetries,
       settings: {
-        apiCheckTimeout: this.apiCheckTimeout,
         debug: this.debug
       }
     };
@@ -375,9 +237,6 @@ class ModeDetector {
    * 設置檢測參數
    */
   configure(options = {}) {
-    if (options.apiCheckTimeout) {
-      this.apiCheckTimeout = options.apiCheckTimeout;
-    }
     if (options.maxRetries !== undefined) {
       this.maxRetries = options.maxRetries;
     }

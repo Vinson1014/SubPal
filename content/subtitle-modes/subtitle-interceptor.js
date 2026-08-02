@@ -9,7 +9,7 @@
  */
 
 import { parseSubtitle, findSubtitleByTime, buildTimeIndex, findSubtitleByTimeIndex } from '../utils/subtitle-parser.js';
-import { sendMessageToPageScript, sendMessage, registerInternalEventHandler, dispatchInternalEvent } from '../system/messaging.js';
+import { registerInternalEventHandler, dispatchInternalEvent } from '../system/messaging.js';
 import { getCurrentTimestamp, getVideoId } from '../core/video-info.js';
 import { playbackContextManager } from '../core/playback-context-manager.js';
 import { getPlayerAdapter, setRegionConfigs } from '../ui/netflix-player-adapter.js';
@@ -265,6 +265,9 @@ class SubtitleInterceptor {
   disposeTtmlAcquisitionIngress() {
     this.disposeTtmlAcquisitionCapture?.();
     this.disposeTtmlAcquisitionCapture = null;
+    const ingress = this.ttmlAcquisitionIngress;
+    this.ttmlAcquisitionIngress = null;
+    ingress?.dispose();
   }
 
   captureRawTTMLEvidence(evidence, options) {
@@ -280,36 +283,79 @@ class SubtitleInterceptor {
     return this.getTtmlAcquisitionIngress().capture(normalized, options);
   }
 
+  getReadyPlaybackRequest() {
+    try {
+      const context = playbackContextManager.getCurrentContext();
+      if (context?.state !== 'ready' || !context.videoId || !context.sessionId?.startsWith('watch-') ||
+          !Number.isInteger(context.epoch) || context.epoch < 0) {
+        return null;
+      }
+
+      const playback = playbackContextManager.getPlayback();
+      if (!playback || typeof playback.perform !== 'function') {
+        return null;
+      }
+
+      return {
+        playback,
+        expected: {
+          videoId: context.videoId,
+          sessionId: context.sessionId,
+          epoch: context.epoch
+        }
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async performPlayback(variant, payload) {
+    const request = this.getReadyPlaybackRequest();
+    if (!request) {
+      return {
+        ok: false,
+        error: { kind: 'stale-context', code: 'playback-context-not-ready', retryable: true }
+      };
+    }
+
+    try {
+      const result = await request.playback.perform({ variant, payload, expected: request.expected });
+      if (result?.ok && result.value?.variant === variant) {
+        return result;
+      }
+      return result?.ok ? {
+        ok: false,
+        error: { kind: 'domain-rejected', code: 'invalid-playback-response', retryable: false }
+      } : result;
+    } catch (error) {
+      return {
+        ok: false,
+        error: { kind: 'domain-rejected', code: 'invalid-playback-response', retryable: false }
+      };
+    }
+  }
+
+  getPlaybackFailureCode(result, fallback) {
+    return result?.error?.code || fallback;
+  }
+
   // 等待播放器準備就緒（簡化版本，假設播放器助手已在 initialization-manager 中初始化）
   async waitForPlayerReady() {
     this.log('檢查播放器準備狀態...');
-    
-    try {
-      // 簡單檢查是否可以獲取到可用語言列表
-      const result = await sendMessageToPageScript({
-        type: 'GET_AVAILABLE_LANGUAGES'
-      });
-      
-      if (result && result.success && result.languages && result.languages.length > 0) {
-        this.log('播放器已準備就緒，可用語言:', result.languages.map(l => l.code));
-        return true;
-      } else {
-        const reason = result?.error || '播放器未準備就緒';
-        this.log('播放器暫時未準備就緒:', reason);
-        this.recordDebugEvent('PLAYER_SOFT_NOT_READY', {
-          reason,
-          languagesCount: result?.languages?.length || 0
-        });
-        return false;
-      }
-      
-    } catch (error) {
-      this.log('檢查播放器狀態時出錯，視為暫時未就緒:', error.message);
-      this.recordDebugEvent('PLAYER_SOFT_NOT_READY', {
-        reason: error.message
-      });
-      return false;
+    const result = await this.performPlayback('available-languages', {});
+    const languages = result?.ok ? result.value.languages : [];
+    if (Array.isArray(languages) && languages.length > 0) {
+      this.log('播放器已準備就緒，可用語言:', languages.map(language => language.code));
+      return true;
     }
+
+    const reason = this.getPlaybackFailureCode(result, 'player-not-ready');
+    this.log('播放器暫時未準備就緒:', reason);
+    this.recordDebugEvent('PLAYER_SOFT_NOT_READY', {
+      reason,
+      languagesCount: languages.length
+    });
+    return false;
   }
 
   // 載入攔截的字幕數據（優化流程：緩存檢查優先 -> 智能語言切換 -> 恢復設定）
@@ -388,11 +434,9 @@ class SubtitleInterceptor {
    * 檢查已緩存的 TTML 數據 - 增加 videoID 驗證
    */
   async checkExistingCache() {
-    const existingTTMLs = await sendMessageToPageScript({
-      type: 'GET_ALL_INTERCEPTED_TTML'
-    });
-    
-    if (existingTTMLs && existingTTMLs.success) {
+    const rawPoolResult = await this.getTtmlAcquisitionIngress().readRawPool();
+    if (rawPoolResult?.ok) {
+      const existingTTMLs = rawPoolResult.value.entries;
       this.log('發現已緩存的TTML數據，開始驗證和處理...');
       
       // 獲取當前影片 ID 用於驗證
@@ -408,7 +452,7 @@ class SubtitleInterceptor {
       let skippedAlreadyProcessed = 0;
       let reprocessedStale = 0;
       
-      Object.entries(existingTTMLs.allTTMLs).forEach(([cacheKey, ttmlData]) => {
+      Object.entries(existingTTMLs).forEach(([cacheKey, ttmlData]) => {
         // 步驟1: 解析緩存鍵驗證 videoID  
         const parsedKey = this.parseCacheKey(cacheKey);
         if (!parsedKey) {
@@ -491,7 +535,10 @@ class SubtitleInterceptor {
       
       return validCacheData;
     }
-    
+
+    this.recordDebugEvent('RAW_TTML_CACHE_READ_FAILED', {
+      reason: this.getPlaybackFailureCode(rawPoolResult, 'ttml-raw-pool-unavailable')
+    });
     return new Map();
   }
 
@@ -501,11 +548,8 @@ class SubtitleInterceptor {
    * await window.subpalApp?.components?.subtitleCoordinator?.interceptor?.debugRawTTMLCache()
    */
   async debugRawTTMLCache() {
-    const response = await sendMessageToPageScript({
-      type: 'GET_ALL_INTERCEPTED_TTML'
-    });
-
-    if (!response?.success) {
+    const rawPoolResult = await this.getTtmlAcquisitionIngress().readRawPool();
+    if (!rawPoolResult?.ok) {
       const result = {
         success: false,
         error: 'page-raw-cache-unavailable'
@@ -515,7 +559,7 @@ class SubtitleInterceptor {
     }
 
     const context = this.getCurrentPlaybackContext();
-    const entries = Object.entries(response.allTTMLs || {}).map(([cacheKey, data]) => {
+    const entries = Object.entries(rawPoolResult.value.entries).map(([cacheKey, data]) => {
       const rawContent = data?.rawContent || '';
       const gate = this.evaluateSubtitleGate(cacheKey, data?.requestInfo);
       const requestInfo = data?.requestInfo || {};
@@ -638,11 +682,13 @@ class SubtitleInterceptor {
    * 記錄 Netflix 預設語言
    */
   async recordDefaultLanguage() {
-    const defaultLanguageResult = await sendMessageToPageScript({
-      type: 'GET_CURRENT_LANGUAGE'
-    });
-    
-    const defaultLanguage = defaultLanguageResult?.language?.code;
+    const result = await this.performPlayback('current-language', {});
+    const defaultLanguage = result?.ok ? result.value.language?.code : undefined;
+    if (!result?.ok) {
+      this.recordDebugEvent('LANGUAGE_ACQUISITION_CURRENT_LANGUAGE_FAILED', {
+        error: this.getPlaybackFailureCode(result, 'current-language-unavailable')
+      });
+    }
     this.log('記錄Netflix預設語言:', defaultLanguage);
     return defaultLanguage;
   }
@@ -1154,31 +1200,25 @@ class SubtitleInterceptor {
   }
 
   async getCurrentNetflixLanguage() {
-    try {
-      const result = await sendMessageToPageScript({
-        type: 'GET_CURRENT_LANGUAGE'
-      });
-      return result?.language || null;
-    } catch (error) {
+    const result = await this.performPlayback('current-language', {});
+    if (!result?.ok) {
       this.recordDebugEvent('LANGUAGE_ACQUISITION_CURRENT_LANGUAGE_FAILED', {
-        error: error.message
+        error: this.getPlaybackFailureCode(result, 'current-language-unavailable')
       });
       return null;
     }
+    return result.value.language || null;
   }
 
   async getAvailableNetflixLanguages() {
-    try {
-      const result = await sendMessageToPageScript({
-        type: 'GET_AVAILABLE_LANGUAGES'
-      });
-      return Array.isArray(result?.languages) ? result.languages : [];
-    } catch (error) {
+    const result = await this.performPlayback('available-languages', {});
+    if (!result?.ok) {
       this.recordDebugEvent('LANGUAGE_ACQUISITION_AVAILABLE_LANGUAGES_FAILED', {
-        error: error.message
+        error: this.getPlaybackFailureCode(result, 'available-languages-unavailable')
       });
       return [];
     }
+    return Array.isArray(result.value.languages) ? result.value.languages : [];
   }
 
   /**
@@ -1186,27 +1226,23 @@ class SubtitleInterceptor {
    * @returns {Promise<Object|null>}
    */
   async captureCurrentNetflixTrack() {
-    try {
-      const result = await sendMessageToPageScript({
-        type: 'GET_CURRENT_LANGUAGE'
+    const result = await this.performPlayback('current-language', {});
+    const track = result?.ok ? result.value.language : null;
+    if (track?.code) {
+      this.recordDebugEvent('SECONDARY_TRACK_CAPTURED', {
+        code: track.code,
+        trackId: track.trackId,
+        trackType: track.trackType,
+        rawTrackType: track.rawTrackType
       });
-      const track = result?.language;
-      if (track && track.code) {
-        this.recordDebugEvent('SECONDARY_TRACK_CAPTURED', {
-          code: track.code,
-          trackId: track.trackId,
-          trackType: track.trackType,
-          rawTrackType: track.rawTrackType
-        });
-        return track;
-      }
-      return null;
-    } catch (error) {
-      this.recordDebugEvent('SECONDARY_TRACK_CAPTURE_FAILED', {
-        error: error.message
-      });
-      return null;
+      return track;
     }
+    if (!result?.ok) {
+      this.recordDebugEvent('SECONDARY_TRACK_CAPTURE_FAILED', {
+        error: this.getPlaybackFailureCode(result, 'current-language-unavailable')
+      });
+    }
+    return null;
   }
 
   /**
@@ -1234,10 +1270,8 @@ class SubtitleInterceptor {
         code: startTrack.code
       });
       try {
-        await sendMessageToPageScript({
-          type: 'SWITCH_TRACK',
-          trackId: startTrack.trackId
-        });
+        const result = await this.performPlayback('switch-track', { trackId: startTrack.trackId });
+        if (!result?.ok) throw new Error(this.getPlaybackFailureCode(result, 'switch-track-failed'));
         this.recordDebugEvent('SECONDARY_TRACK_RESTORE_COMPLETED', {
           reason,
           method: 'trackId',
@@ -1266,10 +1300,8 @@ class SubtitleInterceptor {
     });
 
     try {
-      await sendMessageToPageScript({
-        type: 'SWITCH_LANGUAGE',
-        languageCode: targetCode
-      });
+      const result = await this.performPlayback('switch-language', { languageCode: targetCode });
+      if (!result?.ok) throw new Error(this.getPlaybackFailureCode(result, 'switch-language-failed'));
       this.recordDebugEvent('SECONDARY_TRACK_RESTORE_COMPLETED', {
         reason,
         method: 'languageCode',
@@ -1300,21 +1332,17 @@ class SubtitleInterceptor {
    * @returns {Promise<boolean>}
    */
   async hasRawTTMLCandidateForLanguage(languageCode) {
-    try {
-      const result = await sendMessageToPageScript({
-        type: 'GET_ALL_INTERCEPTED_TTML'
-      });
-      if (!result?.success || !result.allTTMLs) return false;
-      return Object.values(result.allTTMLs).some(data =>
-        this.matchesLanguageForAcquisition(data?.language, languageCode)
-      );
-    } catch (error) {
+    const result = await this.getTtmlAcquisitionIngress().readRawPool();
+    if (!result?.ok) {
       this.recordDebugEvent('RAW_TTML_CANDIDATE_CHECK_FAILED', {
-        error: error.message,
+        error: this.getPlaybackFailureCode(result, 'ttml-raw-pool-unavailable'),
         languageCode
       });
       return false;
     }
+    return Object.values(result.value.entries).some(data =>
+      this.matchesLanguageForAcquisition(data?.language, languageCode)
+    );
   }
 
   findAlternateLanguage(targetLanguage, availableLanguages, preferredLanguage = null) {
@@ -1353,13 +1381,10 @@ class SubtitleInterceptor {
       reason
     });
 
-    const switchResult = await sendMessageToPageScript({
-      type: 'SWITCH_LANGUAGE',
-      languageCode
-    });
+    const switchResult = await this.performPlayback('switch-language', { languageCode });
 
-    if (!switchResult?.success) {
-      throw new Error(switchResult?.error || `switch-language-failed-${languageCode}`);
+    if (!switchResult?.ok) {
+      throw new Error(this.getPlaybackFailureCode(switchResult, `switch-language-failed-${languageCode}`));
     }
 
     await this.sleep(600);
@@ -1454,11 +1479,9 @@ class SubtitleInterceptor {
 
     let rawEntries = [];
     let rawError = null;
-    try {
-      const response = await sendMessageToPageScript({
-        type: 'GET_ALL_INTERCEPTED_TTML'
-      });
-      rawEntries = Object.entries(response?.allTTMLs || {})
+    const rawPoolResult = await this.getTtmlAcquisitionIngress().readRawPool();
+    if (rawPoolResult?.ok) {
+      rawEntries = Object.entries(rawPoolResult.value.entries)
         .filter(([cacheKey, data]) => {
           const parsedKey = this.parseCacheKey(cacheKey);
           return this.matchesLanguageForAcquisition(data?.language || parsedKey?.language, languageCode);
@@ -1466,23 +1489,16 @@ class SubtitleInterceptor {
         .map(([cacheKey, data]) => ({
           cacheKey,
           language: data?.language || null,
-          gate: this.evaluateSubtitleGate(cacheKey, data?.requestInfo),
-          rawMetadata: data?.rawMetadata || data?.metadata || data?.requestInfo?.rawTtmlMetadata || null
+          gate: this.evaluateSubtitleGate(cacheKey, data?.requestInfo)
         }));
-    } catch (error) {
-      rawError = error.message;
+    } else {
+      rawError = this.getPlaybackFailureCode(rawPoolResult, 'ttml-raw-pool-unavailable');
     }
 
     let recentNonTTMLCandidateCount = 0;
-    try {
-      const debugResponse = await sendMessageToPageScript({
-        type: 'GET_SUBPAL_DEBUG_SNAPSHOT'
-      });
-      recentNonTTMLCandidateCount = (debugResponse?.debugSnapshot?.recentEvents || [])
-        .filter(event => event.type === 'CDN_RESPONSE_CANDIDATE' && event.classification?.isTTML === false)
-        .length;
-    } catch (error) {
-      // Debug snapshot 失敗只影響診斷摘要，不影響 acquisition 流程。
+    const diagnosticResult = await this.getTtmlAcquisitionIngress().readDiagnosticSummary();
+    if (diagnosticResult?.ok) {
+      recentNonTTMLCandidateCount = diagnosticResult.value.recentNonTtmlCandidateCount;
     }
 
     const gateReasonCounts = rawEntries.reduce((counts, entry) => {
@@ -1588,10 +1604,8 @@ class SubtitleInterceptor {
     if (defaultLanguage && defaultLanguage !== 'unknown') {
       this.log('切回Netflix預設語言:', defaultLanguage);
       try {
-        await sendMessageToPageScript({
-          type: 'SWITCH_LANGUAGE',
-          languageCode: defaultLanguage
-        });
+        const result = await this.performPlayback('switch-language', { languageCode: defaultLanguage });
+        if (!result?.ok) throw new Error(this.getPlaybackFailureCode(result, 'switch-language-failed'));
         this.log('已成功切回預設語言，不影響用戶設定');
       } catch (error) {
         console.warn('切回預設語言失敗:', error);
@@ -2649,7 +2663,10 @@ class SubtitleInterceptor {
 
     // lazy 初始化 matcher
     if (!this.domOverlapMatcher) {
-      this.domOverlapMatcher = new DOMOverlapMatcher({ debug: this.debug });
+      this.domOverlapMatcher = new DOMOverlapMatcher({
+        debug: this.debug,
+        readRawPool: (...args) => this.getTtmlAcquisitionIngress().readRawPool(...args)
+      });
     }
 
     // 啟動 MutationObserver 反應式比對（若尚未啟動）
@@ -2870,7 +2887,10 @@ class SubtitleInterceptor {
 
     // 確保 matcher 已初始化
     if (!this.domOverlapMatcher) {
-      this.domOverlapMatcher = new DOMOverlapMatcher({ debug: this.debug });
+      this.domOverlapMatcher = new DOMOverlapMatcher({
+        debug: this.debug,
+        readRawPool: (...args) => this.getTtmlAcquisitionIngress().readRawPool(...args)
+      });
     }
 
     // 收集 DOM sample（只收集一次，傳給 findBestMatch 避免重複 collect）
@@ -3380,7 +3400,10 @@ class SubtitleInterceptor {
 
       // Initialize matcher if needed (no startWatching — we do one-shot sampling)
       if (!this.domOverlapMatcher) {
-        this.domOverlapMatcher = new DOMOverlapMatcher({ debug: this.debug });
+        this.domOverlapMatcher = new DOMOverlapMatcher({
+          debug: this.debug,
+          readRawPool: (...args) => this.getTtmlAcquisitionIngress().readRawPool(...args)
+        });
       }
 
       // Collect DOM sample

@@ -1,7 +1,7 @@
 // content/messaging.js
 // 消息傳遞模組 - 抽象層，與 content.js 透過 CustomEvent 通訊
 
-import { PRIVATE_PROTOCOL_VERSION, buildSafeDiagnostic, createDomTransport, createEnvelope, createPageTransport, toCompatibilityError } from './capabilities/private-transports.js';
+import { PRIVATE_PROTOCOL_VERSION, buildSafeDiagnostic, createDomTransport, createEnvelope, toCompatibilityError } from './capabilities/private-transports.js';
 
 // 註冊的消息處理器
 // 修改為支持多個 handler 的結構：type -> Set<handler>
@@ -31,7 +31,6 @@ function getTimeoutForMessageType(type) {
 }
 
 let domTransport = null;
-let pageTransport = null;
 const legacyDomRequestEvent = 'messageToContentScript';
 const legacyDomResponseEvent = 'responseFromContentScript';
 
@@ -45,11 +44,6 @@ function getDomTransport() {
     });
   }
   return domTransport;
-}
-
-function getPageTransport() {
-  if (!pageTransport) pageTransport = createPageTransport({ window });
-  return pageTransport;
 }
 
 function unwrapLegacyResult(result, rejectRawError = true) {
@@ -288,37 +282,6 @@ export function registerMessageHandler(type, handler) {
  */
 export function onMessage(callback) {
   return registerMessageHandler('*', callback);
-}
-
-// === Page Script 通信功能 ===
-
-/**
- * 發送消息到 page script
- * @param {Object} message - 消息對象
- * @returns {Promise<any>}
- */
-export function sendMessageToPageScript(message) {
-  const messageId = `page_msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-  const timeoutMs = getTimeoutForMessageType(message.type);
-  return getPageTransport().request(createEnvelope({
-    requestId: messageId,
-    kind: 'page-script-command',
-    payload: message
-  }), {
-    deadlineMs: timeoutMs,
-    wire: {
-      source: 'subpal-content-script',
-      target: 'subpal-page-script',
-      messageId,
-      ...message
-    }
-  }).then((result) => {
-    debugLog('頁面傳輸已結束', buildSafeDiagnostic({
-      requestId: messageId, capability: 'messaging', operation: 'page-script-command', protocolVersion: PRIVATE_PROTOCOL_VERSION,
-      result, deadlineMs: timeoutMs
-    }));
-    return unwrapLegacyResult(result, false);
-  });
 }
 
 /**
