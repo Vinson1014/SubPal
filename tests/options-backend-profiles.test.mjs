@@ -269,6 +269,7 @@ async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles,
     'activateBackendProfileButton', 'exportBackendProfileButton', 'deleteBackendProfileButton',
     'backendProfileStatus', 'backendProfileIdentity', 'backendProfileQueueCounts', 'backendProfileError',
     'retryAllSyncButton', 'voteQueueCount', 'translationQueueCount', 'replacementEventsQueueCount',
+    'clearVoteQueueButton', 'clearTranslationQueueButton', 'clearReplacementEventsQueueButton',
     'debugModeCheckbox', 'endscreenTasksEnabledCheckbox'
   ].map(id => [id, new FakeElement(id)]));
   const profiles = initialProfiles || [profile('active', true), profile('idle', false)];
@@ -685,4 +686,16 @@ test('Given malformed snapshots or a failed list operation When Options renders 
   });
   assert.equal(unavailable.elements.backendProfileError.textContent, '無法載入後端設定檔。請稍後再試。');
   assert.equal(unavailable.elements.backendProfileError.textContent.includes('raw-server-error-secret'), false);
+});
+
+test('Given retired legacy clear controls When Options receives clicks Then no raw queue storage mutation or destructive UI effect occurs', async () => {
+  const options = await loadOptionsProfilesHarness({ confirmations: [true, true, true] });
+
+  await options.elements.clearVoteQueueButton.dispatch('click');
+  await options.elements.clearTranslationQueueButton.dispatch('click');
+  await options.elements.clearReplacementEventsQueueButton.dispatch('click');
+
+  assert.deepEqual(options.storageCalls.sets, []);
+  assert.deepEqual(options.calls, []);
+  assert.deepEqual(options.alerts, []);
 });

@@ -647,9 +647,6 @@ function setupEventListeners() {
     });
   }
 
-  // 清空隊列按鈕
-  setupClearQueueButtons();
-
   // 重試同步按鈕
   setupRetrySyncButton();
 
@@ -1086,67 +1083,6 @@ function setupBackendProfileControls() {
 }
 
 /**
- * 設置清空隊列按鈕
- * 直接操作 chrome.storage.local，不需要通過 background
- */
-function setupClearQueueButtons() {
-  const clearVoteQueueButton = document.getElementById('clearVoteQueueButton');
-  const clearTranslationQueueButton = document.getElementById('clearTranslationQueueButton');
-  const clearReplacementEventsQueueButton = document.getElementById('clearReplacementEventsQueueButton');
-
-  if (clearVoteQueueButton) {
-    clearVoteQueueButton.addEventListener('click', async () => {
-      if (confirm('確定要清空投票隊列嗎？此操作不可撤銷。')) {
-        try {
-          // 直接清空 chrome.storage.local 中的隊列
-          await chrome.storage.local.set({ voteQueue: [] });
-          console.log('[Options] 投票隊列已清空');
-          alert('投票隊列已清空。');
-          updatePendingDataUI();
-        } catch (error) {
-          console.error('[Options] 清空投票隊列失敗:', error);
-          alert('清空投票隊列失敗：' + error.message);
-        }
-      }
-    });
-  }
-
-  if (clearTranslationQueueButton) {
-    clearTranslationQueueButton.addEventListener('click', async () => {
-      if (confirm('確定要清空翻譯隊列嗎？此操作不可撤銷。')) {
-        try {
-          // 直接清空 chrome.storage.local 中的隊列
-          await chrome.storage.local.set({ translationQueue: [] });
-          console.log('[Options] 翻譯隊列已清空');
-          alert('翻譯隊列已清空。');
-          updatePendingDataUI();
-        } catch (error) {
-          console.error('[Options] 清空翻譯隊列失敗:', error);
-          alert('清空翻譯隊列失敗：' + error.message);
-        }
-      }
-    });
-  }
-
-  if (clearReplacementEventsQueueButton) {
-    clearReplacementEventsQueueButton.addEventListener('click', async () => {
-      if (confirm('確定要清空替換事件隊列嗎？此操作不可撤銷。')) {
-        try {
-          // 直接清空 chrome.storage.local 中的隊列
-          await chrome.storage.local.set({ replacementEventQueue: [] });
-          console.log('[Options] 替換事件隊列已清空');
-          alert('替換事件隊列已清空。');
-          updatePendingDataUI();
-        } catch (error) {
-          console.error('[Options] 清空替換事件隊列失敗:', error);
-          alert('清空替換事件隊列失敗：' + error.message);
-        }
-      }
-    });
-  }
-}
-
-/**
  * 設置「重試同步」按鈕
  * 透過 background 同時觸發三種隊列的失敗+pending 重試
  */
@@ -1225,22 +1161,111 @@ async function resetStyles() {
 
 // ==================== 備份/恢復功能 ====================
 
+async function getBackupConfigSchema() {
+  return await import('./content/system/config/config-schema.js');
+}
+
+function isOrdinaryObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+
+  try {
+    if (Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length > 0) return false;
+    return Object.values(Object.getOwnPropertyDescriptors(value)).every((descriptor) => (
+      descriptor.enumerable && Object.hasOwn(descriptor, 'value')
+    ));
+  } catch {
+    return false;
+  }
+}
+
+function hasExactKeys(value, expectedKeys) {
+  if (!isOrdinaryObject(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === expectedKeys.length && expectedKeys.every((key) => Object.hasOwn(value, key));
+}
+
+function hasExactKeySet(value, expectedKeys) {
+  const keys = Object.keys(value);
+  return keys.length === expectedKeys.length && expectedKeys.every((key) => Object.hasOwn(value, key));
+}
+
+function getBackupFlatKeys(rootKeys) {
+  return Object.keys(DEFAULT_CONFIG).filter((key) => rootKeys.includes(key.split('.')[0]));
+}
+
+function isCanonicalBackupDate(value) {
+  if (typeof value !== 'string') return false;
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.toISOString() === value;
+}
+
+function flattenBackupConfig(value, prefix = '', result = Object.create(null)) {
+  if (!isOrdinaryObject(value)) return null;
+
+  for (const key of Object.keys(value)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    const nested = value[key];
+    if (nested !== null && typeof nested === 'object') {
+      if (Array.isArray(nested) || flattenBackupConfig(nested, path, result) === null) return null;
+    } else {
+      result[path] = nested;
+    }
+  }
+
+  return result;
+}
+
+function buildCanonicalConfig(flatValues) {
+  return flatToNested(flatValues);
+}
+
+async function parseCanonicalBackup(backupData) {
+  const backupSchema = await getBackupConfigSchema();
+  const rootKeys = backupSchema.getBackupConfigKeys();
+  if (!hasExactKeys(backupData, ['version', 'backupDate', 'config']) || backupData.version !== '3.0' || !isCanonicalBackupDate(backupData.backupDate)) {
+    return null;
+  }
+  if (!hasExactKeys(backupData.config, rootKeys)) return null;
+
+  const flatConfig = flattenBackupConfig(backupData.config);
+  const expectedKeys = getBackupFlatKeys(rootKeys);
+  if (!flatConfig || !hasExactKeySet(flatConfig, expectedKeys)) return null;
+
+  for (const key of expectedKeys) {
+    if (!backupSchema.validateConfigValue(key, flatConfig[key]).valid) return null;
+  }
+
+  return buildCanonicalConfig(Object.fromEntries(expectedKeys.map((key) => [key, flatConfig[key]])));
+}
+
+async function createCanonicalBackupConfig(storageConfig) {
+  const backupSchema = await getBackupConfigSchema();
+  const expectedKeys = getBackupFlatKeys(backupSchema.getBackupConfigKeys());
+  const values = {};
+
+  for (const key of expectedKeys) {
+    const value = getNestedValue(storageConfig, key);
+    const canonicalValue = value === undefined ? DEFAULT_CONFIG[key] : value;
+    if (!backupSchema.validateConfigValue(key, canonicalValue).valid) throw new Error('備份設定無效');
+    values[key] = canonicalValue;
+  }
+
+  return buildCanonicalConfig(values);
+}
+
 /**
  * 備份資料
  */
 async function backupData() {
   try {
-    // 提取根鍵（與 loadConfig 相同邏輯）
-    const flatKeys = Object.keys(DEFAULT_CONFIG);
-    const rootKeys = [...new Set(flatKeys.map(k => k.split('.')[0]))];
-
-    // 從 storage 讀取完整的嵌套結構
+    const { getBackupConfigKeys } = await getBackupConfigSchema();
+    const rootKeys = getBackupConfigKeys();
     const result = await chrome.storage.local.get(rootKeys);
 
     const backupData = {
       version: '3.0',
       backupDate: new Date().toISOString(),
-      config: result
+      config: await createCanonicalBackupConfig(result)
     };
 
     const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
@@ -1268,21 +1293,17 @@ function restoreData(file) {
   reader.onload = async (event) => {
     try {
       const backupData = JSON.parse(event.target.result);
-
-      if (backupData.version === '3.0') {
-        // v3.0 格式：直接寫入
-        await chrome.storage.local.set(backupData.config);
-        alert('資料已成功恢復');
-        await restoreOptionsUI();
-      } else if (backupData.version === '2.0' || (backupData.userID && backupData.settings)) {
-        // v2.0 或舊格式：嘗試轉換
-        alert('偵測到舊版本備份格式。\n\n由於配置結構已更新，部分設定可能無法完全恢復。\n建議手動重新設定。');
-      } else {
-        alert('不支援的備份檔案格式');
+      const config = await parseCanonicalBackup(backupData);
+      if (!config) {
+        alert('備份檔案格式無效');
+        return;
       }
-    } catch (e) {
-      console.error('[Options] 恢復失敗:', e);
-      alert('備份檔案解析失敗：' + e.message);
+
+      await chrome.storage.local.set(config);
+      alert('資料已成功恢復');
+      await restoreOptionsUI();
+    } catch {
+      alert('備份檔案格式無效');
     }
   };
   reader.onerror = () => {

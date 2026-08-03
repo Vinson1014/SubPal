@@ -532,20 +532,6 @@ export const CONFIG_SCHEMA = {
 
   api: {},
 
-  // ==================== 用戶資料 ====================
-
-  user: {
-    /**
-     * 用戶 ID
-     */
-    userId: {
-      type: 'string',
-      default: '',
-      description: '用戶 ID',
-      category: 'user'
-    }
-  },
-
   // ==================== 影片資訊 ====================
 
   video: {
@@ -688,6 +674,16 @@ export function getConfigMetadata(key) {
 export function getAllConfigKeys() {
   const flatSchema = flattenSchema(CONFIG_SCHEMA);
   return Object.keys(flatSchema);
+}
+
+/**
+ * 獲取可備份的使用者設定根鍵。
+ *
+ * @returns {string[]} 新的根鍵陣列
+ */
+export function getBackupConfigKeys() {
+  return ['debugMode', 'isEnabled', 'crowdsourcing', 'subtitle']
+    .filter((key) => Object.hasOwn(CONFIG_SCHEMA, key));
 }
 
 /**
