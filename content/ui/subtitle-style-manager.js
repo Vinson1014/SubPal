@@ -255,7 +255,7 @@ class SubtitleStyleManager {
 
   // === 配置管理（配置由 ConfigBridge 管理，此類只訂閱變更） ===
   // 移除 loadSettings(), saveSettings(), updateConfig(), getCurrentConfig()
-  // 配置更新現在通過 ConfigBridge.set() 和自動訂閱處理
+  // 配置更新現在通過 ConfigBridge 的型別化 settings snapshot 與變更訂閱處理
 
   // === 樣式應用 ===
   
