@@ -10,6 +10,31 @@
 
 import { sendMessage } from '../system/messaging.js';
 
+const REPLACEMENT_EVENT_KEYS = new Set(['translationID', 'contributorUserID', 'occurredAt']);
+
+function parseReplacementEvent(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('replacement event payload must be an object');
+  }
+  const keys = Object.getOwnPropertyNames(data);
+  if (Object.getOwnPropertySymbols(data).length !== 0 || keys.length !== REPLACEMENT_EVENT_KEYS.size ||
+      keys.some((key) => !REPLACEMENT_EVENT_KEYS.has(key)) ||
+      keys.some((key) => !Object.getOwnPropertyDescriptor(data, key)?.enumerable)) {
+    throw new Error('replacement event payload contains unsupported fields');
+  }
+  const { translationID, contributorUserID, occurredAt } = data;
+  if (!translationID || typeof translationID !== 'string') {
+    throw new Error('缺少必要參數: translationID 必須是字符串');
+  }
+  if (!contributorUserID || typeof contributorUserID !== 'string') {
+    throw new Error('缺少必要參數: contributorUserID 必須是字符串');
+  }
+  if (!occurredAt || typeof occurredAt !== 'string') {
+    throw new Error('缺少必要參數: occurredAt 必須是 ISO8601 格式字符串');
+  }
+  return { translationID, contributorUserID, occurredAt };
+}
+
 /**
  * 替換事件 Bridge 對象
  */
@@ -51,39 +76,13 @@ export const replacementEventBridge = {
    * @param {Object} data - 替換事件數據
    * @param {string} data.translationID - 翻譯 ID (必填)
    * @param {string} data.contributorUserID - 貢獻者用戶 ID (必填)
-   * @param {string} data.beneficiaryUserID - 受益者用戶 ID (必填)
    * @param {string} data.occurredAt - 發生時間，ISO8601 格式 (必填)
    * @returns {Promise<Object>} - 返回 { itemId, message }
    */
   async enqueue(data) {
     this.log('enqueue 方法被調用，參數:', data);
 
-    // 參數驗證
-    const { translationID, contributorUserID, beneficiaryUserID, occurredAt } = data;
-
-    if (!translationID || typeof translationID !== 'string') {
-      const error = new Error('缺少必要參數: translationID 必須是字符串');
-      this.log('參數驗證失敗:', error.message);
-      throw error;
-    }
-
-    if (!contributorUserID || typeof contributorUserID !== 'string') {
-      const error = new Error('缺少必要參數: contributorUserID 必須是字符串');
-      this.log('參數驗證失敗:', error.message);
-      throw error;
-    }
-
-    if (!beneficiaryUserID || typeof beneficiaryUserID !== 'string') {
-      const error = new Error('缺少必要參數: beneficiaryUserID 必須是字符串');
-      this.log('參數驗證失敗:', error.message);
-      throw error;
-    }
-
-    if (!occurredAt || typeof occurredAt !== 'string') {
-      const error = new Error('缺少必要參數: occurredAt 必須是 ISO8601 格式字符串');
-      this.log('參數驗證失敗:', error.message);
-      throw error;
-    }
+    const { translationID, contributorUserID, occurredAt } = parseReplacementEvent(data);
 
     try {
       this.log('發送 typed replacement-event contribution intent 到 content script');
@@ -93,7 +92,6 @@ export const replacementEventBridge = {
         payload: {
           translationID,
           contributorUserID,
-          beneficiaryUserID,
           occurredAt
         }
       });

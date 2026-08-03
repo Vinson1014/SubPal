@@ -869,18 +869,9 @@ class SubtitleReplacer {
    */
   async recordReplacementEvent(translationID, contributorUserID) {
     try {
-      // 獲取當前用戶 ID（受益者）
-      const beneficiaryUserID = this.configBridge?.get('user.userId');
-
-      // 如果沒有用戶 ID，跳過記錄
-      if (!beneficiaryUserID) {
-        this.log('未找到用戶 ID，跳過記錄替換事件');
-        return;
-      }
-
       // 檢查是否重複（15分鐘窗口）
-      if (this.isDuplicateReplacementEvent(translationID, beneficiaryUserID)) {
-        this.log('跳過重複的替換事件:', { translationID, beneficiaryUserID });
+      if (this.isDuplicateReplacementEvent(translationID)) {
+        this.log('跳過重複的替換事件:', { translationID });
         return;
       }
 
@@ -888,7 +879,6 @@ class SubtitleReplacer {
       const now = Date.now();
       this.recentReplacementEvents.push({
         translationID,
-        beneficiaryUserID,
         timestamp: now
       });
 
@@ -908,11 +898,10 @@ class SubtitleReplacer {
       await replacementEventBridge.enqueue({
         translationID,
         contributorUserID,
-        beneficiaryUserID,
         occurredAt
       });
 
-      this.log('替換事件已記錄:', { translationID, contributorUserID, beneficiaryUserID });
+      this.log('替換事件已記錄:', { translationID, contributorUserID });
 
     } catch (error) {
       // 錯誤已在 createReplacedSubtitle 中處理，這裡只記錄詳細信息
@@ -923,16 +912,14 @@ class SubtitleReplacer {
   /**
    * 檢查是否為重複的替換事件（15分鐘窗口）
    * @param {string} translationID - 翻譯 ID
-   * @param {string} beneficiaryUserID - 受益者用戶 ID
    * @returns {boolean} 是否重複
    */
-  isDuplicateReplacementEvent(translationID, beneficiaryUserID) {
+  isDuplicateReplacementEvent(translationID) {
     const now = Date.now();
     const windowStart = now - this.DEDUP_WINDOW_MS;
 
     return this.recentReplacementEvents.some(event =>
       event.translationID === translationID &&
-      event.beneficiaryUserID === beneficiaryUserID &&
       event.timestamp >= windowStart
     );
   }
