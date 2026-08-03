@@ -553,7 +553,7 @@ class TutorialManager {
     }
 
     this.popupDetectionHandler = message => {
-      if (message?.type === 'POPUP_API_REQUEST') {
+      if (message?.type === 'POPUP_ACTIVE_PROFILE_STATS') {
         this.completePopupGuide();
       }
 

@@ -617,10 +617,8 @@ test('Given replacement-event retries are disabled When its request receives 401
   assert.equal(requests, 1);
 });
 
-test('Given active profile B and caller-supplied popup identities When API proxy calls run Then only encoded B identity and credentials reach the backend', async () => {
+test('Given a trusted popup and retired API proxy messages When they are received Then they are invalid without backend or storage effects', async () => {
   const callerIdentity = '../caller-a?token=malicious';
-  const registrationToken = 'registration-token-must-stay-private';
-  const registrationSecret = 'registration-extra-secret';
   const activeProfile = {
     id: 'profile-b',
     endpoint: 'https://backend-b.example.test/v2',
@@ -637,7 +635,6 @@ test('Given active profile B and caller-supplied popup identities When API proxy
       }
     }
   };
-  const logs = [];
   const requests = [];
   const popupSender = {
     id: 'subpal-extension-id',
@@ -646,17 +643,8 @@ test('Given active profile B and caller-supplied popup identities When API proxy
   };
   const background = await loadBackgroundWithRealApi(async (url, options) => {
     requests.push({ url, options });
-    if (url.endsWith('/users') && options.method === 'POST') {
-      return response({
-        success: true,
-        token: registrationToken,
-        jwt: registrationSecret,
-        userId: activeProfile.userId,
-        credentials: { token: registrationSecret }
-      });
-    }
     return response({ success: true, data: { profile: 'b' } });
-  }, { logs, storage });
+  }, { storage });
 
   const stats = await sendRuntimeMessage(background, {
     type: 'POPUP_API_REQUEST',
@@ -669,20 +657,15 @@ test('Given active profile B and caller-supplied popup identities When API proxy
     params: { userId: callerIdentity }
   }, popupSender);
 
-  assert.deepEqual(JSON.parse(JSON.stringify(stats)), { success: true, data: { success: true, data: { profile: 'b' } } });
-  assert.deepEqual(JSON.parse(JSON.stringify(registration)), { success: true, data: { registered: true } });
-  assert.equal(requests[0].url, 'https://backend-b.example.test/v2/users/b%20user%2F..%2Fid');
-  assert.equal(requests[0].options.headers.Authorization, 'Bearer jwt-for-profile-b');
-  assert.equal(requests[1].url, 'https://backend-b.example.test/v2/users');
-  assert.equal(requests[1].options.headers.Authorization, 'Bearer jwt-for-profile-b');
-  assert.deepEqual(JSON.parse(requests[1].options.body), { userID: activeProfile.userId });
-  assert.equal(storage.backendProfiles.byId[activeProfile.id].jwt, registrationToken);
-  assert.equal(JSON.stringify({ registration, requests, logs }).includes(callerIdentity), false);
-  assert.equal(JSON.stringify({ registration, requests, logs }).includes(registrationToken), false);
-  assert.equal(JSON.stringify({ registration, requests, logs }).includes(registrationSecret), false);
+  const invalid = { ok: false, error: { kind: 'invalid', code: 'popup-active-profile-stats', retryable: false } };
+  assert.deepEqual(JSON.parse(JSON.stringify(stats)), invalid);
+  assert.deepEqual(JSON.parse(JSON.stringify(registration)), invalid);
+  assert.deepEqual(requests, []);
+  assert.equal(storage.backendProfiles.byId[activeProfile.id].jwt, 'jwt-for-profile-b');
+  assert.equal(JSON.stringify({ registration, requests }).includes(callerIdentity), false);
 });
 
-test('Given a trusted popup registration failure When the backend returns hostile details Then the popup receives only a sanitized failure', async () => {
+test('Given a trusted popup and a retired registration proxy message When it contains hostile details Then it is invalid without exposing them', async () => {
   const secret = 'registration-token and backend identity must not escape';
   const logs = [];
   const background = await loadBackgroundWithRealApi(async () => ({
@@ -703,8 +686,8 @@ test('Given a trusted popup registration failure When the backend returns hostil
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(response)), {
-    success: false,
-    error: 'API request failed with status 422'
+    ok: false,
+    error: { kind: 'invalid', code: 'popup-active-profile-stats', retryable: false }
   });
   assert.equal(JSON.stringify({ response, logs }).includes(secret), false);
 });
@@ -1884,4 +1867,147 @@ test('Given profile migration rejects When a storage event is observed Then no s
   await new Promise(setImmediate);
 
   assert.deepEqual(listener.syncCalls, []);
+});
+
+test('Given a retired popup API proxy request When it reaches background Then it returns a normalized invalid result without API or credential effects', async () => {
+  const calls = [];
+  const storage = {
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'legacy-profile',
+      byId: {
+        'legacy-profile': { id: 'legacy-profile', endpoint: apiBaseUrl, userId: 'legacy-user', jwt: 'legacy-jwt' }
+      }
+    }
+  };
+  const background = await loadBackgroundWithRealApi(async (_url, options) => {
+    calls.push(options);
+    return response({ success: true, data: { profile: 'legacy-profile' } });
+  }, {
+    storage
+  });
+
+  const result = await sendRuntimeMessage(background, {
+    type: 'POPUP_API_REQUEST',
+    api: 'fetchUserStats',
+    params: { userId: 'caller-supplied-user' }
+  }, { id: 'subpal-extension-id', url: 'chrome-extension://test/popup.html', origin: 'chrome-extension://test' });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    ok: false,
+    error: { kind: 'invalid', code: 'popup-active-profile-stats', retryable: false }
+  });
+  assert.deepEqual(calls, []);
+  assert.equal(storage.backendProfiles.byId['legacy-profile'].jwt, 'legacy-jwt');
+});
+
+test('Given a missing active-profile credential When the exact trusted Popup requests stats Then background registers and stores credentials only for that active profile', async () => {
+  const calls = [];
+  const storage = {
+    storage: {
+      backendProfiles: {
+        schemaVersion: 1,
+        activeProfileId: 'profile-a',
+        byId: {
+          'profile-a': { id: 'profile-a', endpoint: apiBaseUrl, userId: 'user-a', jwt: null },
+          'profile-b': { id: 'profile-b', endpoint: apiBaseUrl, userId: 'user-b', jwt: null }
+        }
+      }
+    }
+  };
+  const background = await loadBackgroundWithRealApi(async (url, options) => {
+    calls.push({ url, options });
+    if (url.endsWith('/users')) return response({ success: true, token: 'registered-token' });
+    return response({ success: true, data: { points: 1, statistics: { translationSubmissions: 2, translationViews: 3, upvotesReceived: 4, subtitlesReplaced: 5 } } });
+  }, { storage: storage.storage });
+
+  const result = await sendRuntimeMessage(background, { type: 'POPUP_ACTIVE_PROFILE_STATS' }, {
+    id: 'subpal-extension-id', url: 'chrome-extension://test/popup.html', origin: 'chrome-extension://test'
+  });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    ok: true,
+    value: {
+      scope: 'active-backend-profile-user', backendProfileId: 'profile-a', userIdMasked: 'us...-a',
+      totals: { points: 1, translationSubmissions: 2, translationViews: 3, upvotesReceived: 4, subtitlesReplaced: 5 }
+    }
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(storage.storage.backendProfiles.byId['profile-a'].jwt, 'registered-token');
+  assert.equal(storage.storage.backendProfiles.byId['profile-b'].jwt, null);
+});
+
+test('Given the exact trusted Popup request When active profiles change between calls Then background resolves each profile independently and returns only the fixed masked projection', async () => {
+  const storage = {
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'profile-a',
+      byId: {
+        'profile-a': { id: 'profile-a', endpoint: apiBaseUrl, userId: 'user-a', jwt: 'jwt-a' },
+        'profile-b': { id: 'profile-b', endpoint: apiBaseUrl, userId: 'user-b', jwt: 'jwt-b' }
+      }
+    }
+  };
+  const background = await loadBackgroundWithRealApi(async (url) => response({
+    success: true,
+    data: url.endsWith('user-a')
+      ? { points: 1, statistics: { translationSubmissions: 2, translationViews: 3, upvotesReceived: 4, subtitlesReplaced: 5 } }
+      : { points: 6, statistics: { translationSubmissions: 7, translationViews: 8, upvotesReceived: 9, subtitlesReplaced: 10 } }
+  }), { storage });
+  const sender = { id: 'subpal-extension-id', url: 'chrome-extension://test/popup.html', origin: 'chrome-extension://test' };
+  const expected = (profileId, userIdMasked, totals) => ({
+    ok: true,
+    value: { scope: 'active-backend-profile-user', backendProfileId: profileId, userIdMasked, totals }
+  });
+
+  const first = await sendRuntimeMessage(background, { type: 'POPUP_ACTIVE_PROFILE_STATS' }, sender);
+  storage.backendProfiles.activeProfileId = 'profile-b';
+  const second = await sendRuntimeMessage(background, { type: 'POPUP_ACTIVE_PROFILE_STATS' }, sender);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(first)), expected('profile-a', 'us...-a', {
+    points: 1, translationSubmissions: 2, translationViews: 3, upvotesReceived: 4, subtitlesReplaced: 5
+  }));
+  assert.deepEqual(JSON.parse(JSON.stringify(second)), expected('profile-b', 'us...-b', {
+    points: 6, translationSubmissions: 7, translationViews: 8, upvotesReceived: 9, subtitlesReplaced: 10
+  }));
+});
+
+test('Given malformed, spoofed, or retired popup routes When they reach background Then each produces a sanitized normalized failure without API or credential side effects', async () => {
+  const registrations = [];
+  const storage = {
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'profile-a',
+      byId: { 'profile-a': { id: 'profile-a', endpoint: apiBaseUrl, userId: 'user-a', jwt: null } }
+    }
+  };
+  const background = await loadBackgroundWithRealApi(async (_url, options) => {
+    registrations.push(options);
+    return response({ success: true, token: 'must-not-persist' });
+  }, { storage });
+  const trusted = { id: 'subpal-extension-id', url: 'chrome-extension://test/popup.html', origin: 'chrome-extension://test' };
+  const invalidAttempts = [
+    [{ type: 'POPUP_ACTIVE_PROFILE_STATS', extra: true }, trusted],
+    [{ type: 'POPUP_API_REQUEST', api: 'registerUser', params: { userId: 'forged' } }, trusted],
+    [Object.assign(Object.create({ type: 'POPUP_ACTIVE_PROFILE_STATS' }), {}), trusted],
+    [new Proxy({ type: 'POPUP_ACTIVE_PROFILE_STATS' }, { ownKeys() { throw new Error('proxy trap'); } }), trusted]
+  ];
+
+  for (const [request, sender] of invalidAttempts) {
+    const result = await sendRuntimeMessage(background, request, sender);
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+      ok: false,
+      error: { kind: 'invalid', code: 'popup-active-profile-stats', retryable: false }
+    });
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(await sendRuntimeMessage(
+    background,
+    { type: 'POPUP_ACTIVE_PROFILE_STATS' },
+    { ...trusted, url: 'chrome-extension://test/options.html' }
+  ))), {
+    ok: false,
+    error: { kind: 'forbidden', code: 'popup-active-profile-access', retryable: false }
+  });
+  assert.deepEqual(registrations, []);
+  assert.equal(storage.backendProfiles.byId['profile-a'].jwt, null);
 });

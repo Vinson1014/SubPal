@@ -2,126 +2,141 @@
 import { configManager } from './content/system/config/config-manager.js';
 import { SUPPORTED_LANGUAGES } from './content/system/config/config-schema.js';
 
-// 狀態變數
 let isEnabled = true;
-let replacementCount = 0;
-let currentVideoId = '';
-let isTestModeEnabled = false; // 已移除，功能不再需要
-let testRules = []; // 已移除，功能不再需要
-let debugMode = false; // 已移除，功能移至設定頁面
+let activeProfileUserMask = '--';
+let activeProfileTotals = createEmptyProfileTotals();
+let activeProfileStatsRequest = null;
 
-// 新增：積分、貢獻數、統計數據
-let score = 0;
-let contribCount = 0;
-let replaceCount = 0;
-let userId = '';
-let translationSubmissions = 0;
-let translationViews = 0;
-let upvotesReceived = 0;
-let subtitlesReplaced = 0;
+const POPUP_ACTIVE_PROFILE_STATS_REQUEST = Object.freeze({ type: 'POPUP_ACTIVE_PROFILE_STATS' });
+const POPUP_ACTIVE_PROFILE_STATS_RESULT = 'POPUP_ACTIVE_PROFILE_STATS_RESULT';
+const POPUP_STATS_TIMEOUT_MS = 5000;
+const ACTIVE_PROFILE_STATS_SCOPE = 'active-backend-profile-user';
+const PROFILE_TOTAL_KEYS = Object.freeze([
+    'points',
+    'translationSubmissions',
+    'translationViews',
+    'upvotesReceived',
+    'subtitlesReplaced'
+]);
 
-// ===== userID 相關 =====
-
-/**
- * 取得 userID（使用 configManager）
- * 註冊 API 範例：呼叫後端 /users，送出 userID 與 nickname
- */
-function getUserId() {
-    return configManager.get('user.userId');
+function createEmptyProfileTotals() {
+    return {
+        points: 0,
+        translationSubmissions: 0,
+        translationViews: 0,
+        upvotesReceived: 0,
+        subtitlesReplaced: 0
+    };
 }
 
-/**
- * 註冊/初始化用戶到後端並獲取統計數據
- * @param {string} userId - 用戶 ID
- * @param {string} [nickname] - 暱稱
- * @returns {Promise<Object>} 回傳用戶數據
- */
-async function registerUser(userId, nickname) {
-    return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({
-            type: 'POPUP_API_REQUEST',
-            api: 'registerUser',
-            params: { userId, nickname }
-        }, (response) => {
-            if (chrome.runtime.lastError) {
-                console.error('Error sending message:', chrome.runtime.lastError.message);
-                reject(new Error('無法連接到背景服務'));
-                return;
-            }
-            if (response.success) {
-                resolve(response.data);
-            } else {
-                reject(new Error(response.error || '註冊失敗'));
-            }
-        });
-    });
-}
-
-/**
- * 獲取用戶統計數據
- * @param {string} userId - 用戶 ID
- * @returns {Promise<Object>} 回傳用戶數據
- */
-async function fetchUserStats(userId) {
-    return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({
-            type: 'POPUP_API_REQUEST',
-            api: 'fetchUserStats',
-            params: { userId }
-        }, (response) => {
-            if (chrome.runtime.lastError) {
-                console.error('Error sending message:', chrome.runtime.lastError.message);
-                reject(new Error('無法連接到背景服務'));
-                return;
-            }
-            if (response.success) {
-                resolve(response.data);
-            } else {
-                reject(new Error(response.error || '獲取統計數據失敗'));
-            }
-        });
-    });
-}
-
-// 遮蔽 userID 顯示（前4+****+後4）
-function maskUserId(id) {
-    if (!id || id.length < 8) return id;
-    return id.slice(0, 4) + '****' + id.slice(-4);
-}
-
-// 複製 userID
-function copyUserId() {
-    if (!userId) return;
-    navigator.clipboard.writeText(userId).then(() => {
-        showToast('userID 已複製');
-    });
-}
-
-// 重設 userID（使用 configManager）
-async function resetUserId() {
-    if (!confirm('確定要重設 userID？此操作無法還原。')) return;
-    const newId = crypto.randomUUID();
+function isRecord(value) {
     try {
-        // 使用 configManager 設置新的 userId
-        await configManager.set('user.userId', newId);
-        // 清除舊的 JWT
-        await new Promise((resolve) => {
-            chrome.storage.local.remove('jwt', resolve);
-        });
-        userId = newId;
-        updateUserIdUI();
-        showToast('userID 已重設，請重啟瀏覽器以應用更改。');
-    } catch (error) {
-        console.error('[Popup] 重設 userID 失敗:', error);
-        showToast('重設失敗: ' + error.message);
+        return Boolean(value) &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            Object.prototype.toString.call(value) === '[object Object]';
+    } catch (_error) {
+        return false;
     }
 }
 
-// 更新 userID 顯示
-function updateUserIdUI() {
-    const userIdSpan = document.getElementById('user-id');
-    if (userIdSpan) {
-        userIdSpan.textContent = maskUserId(userId);
+function normalizeProfileTotal(value) {
+    const total = Number(value);
+    return Number.isFinite(total) && total >= 0 ? total : 0;
+}
+
+function createProfileStatsFailure(kind, code, retryable) {
+    return { ok: false, error: { kind, code, retryable } };
+}
+
+function isMaskedIdentity(value) {
+    return typeof value === 'string' && (value.includes('...') || value.includes('****'));
+}
+
+function normalizeActiveProfileStatsResult(result) {
+    try {
+        if (!isRecord(result) || typeof result.ok !== 'boolean') {
+            return createProfileStatsFailure('domain-rejected', 'popup-stats-response', false);
+        }
+
+        if (!result.ok) {
+            const error = result.error;
+            if (
+                !isRecord(error) ||
+                typeof error.kind !== 'string' ||
+                typeof error.code !== 'string' ||
+                typeof error.retryable !== 'boolean'
+            ) {
+                return createProfileStatsFailure('domain-rejected', 'popup-stats-response', false);
+            }
+            return createProfileStatsFailure(error.kind, error.code, error.retryable);
+        }
+
+        const value = result.value;
+        if (
+            !isRecord(value) ||
+            value.scope !== ACTIVE_PROFILE_STATS_SCOPE ||
+            !isMaskedIdentity(value.userIdMasked) ||
+            !isRecord(value.totals)
+        ) {
+            return createProfileStatsFailure('domain-rejected', 'popup-stats-response', false);
+        }
+
+        const totals = createEmptyProfileTotals();
+        for (const key of PROFILE_TOTAL_KEYS) {
+            totals[key] = normalizeProfileTotal(value.totals[key]);
+        }
+
+        return { ok: true, value: { userIdMasked: value.userIdMasked, totals } };
+    } catch (_error) {
+        return createProfileStatsFailure('domain-rejected', 'popup-stats-response', false);
+    }
+}
+
+function applyActiveProfileStatsResult(result) {
+    if (!result.ok) {
+        showToast('無法取得設定檔貢獻統計資料。');
+        return;
+    }
+
+    activeProfileUserMask = result.value.userIdMasked;
+    activeProfileTotals = result.value.totals;
+    updateUI();
+}
+
+function requestActiveProfileStats() {
+    if (activeProfileStatsRequest) {
+        return;
+    }
+
+    const request = { settled: false, timeoutId: null, settle: null };
+    const settle = (result) => {
+        if (request.settled || activeProfileStatsRequest !== request) {
+            return;
+        }
+
+        request.settled = true;
+        clearTimeout(request.timeoutId);
+        activeProfileStatsRequest = null;
+        applyActiveProfileStatsResult(normalizeActiveProfileStatsResult(result));
+    };
+
+    request.settle = settle;
+    activeProfileStatsRequest = request;
+    request.timeoutId = setTimeout(() => {
+        settle(createProfileStatsFailure('timeout', 'popup-stats-timeout', true));
+    }, POPUP_STATS_TIMEOUT_MS);
+
+    try {
+        chrome.runtime.sendMessage(POPUP_ACTIVE_PROFILE_STATS_REQUEST, (response) => {
+            if (chrome.runtime.lastError) {
+                settle(createProfileStatsFailure('disconnected', 'background-runtime-disconnected', true));
+                return;
+            }
+            settle(response);
+        });
+    } catch (_error) {
+        settle(createProfileStatsFailure('disconnected', 'background-runtime-disconnected', true));
     }
 }
 
@@ -149,26 +164,20 @@ function updateUI() {
         mainToggle.checked = isEnabled;
     }
 
-    // userID
-    updateUserIdUI();
+    const profileUserElement = document.getElementById('profile-user-id');
+    if (profileUserElement) profileUserElement.textContent = activeProfileUserMask;
 
-    // 積分、貢獻、替換數 (僅使用 API 回傳的統計數據)
     const scoreElement = document.getElementById('score');
-    if (scoreElement) scoreElement.textContent = score;
+    if (scoreElement) scoreElement.textContent = activeProfileTotals.points;
     const contribElement = document.getElementById('contrib-count');
-    if (contribElement) contribElement.textContent = contribCount;
+    if (contribElement) contribElement.textContent = activeProfileTotals.translationSubmissions;
     const replaceElement = document.getElementById('replace-count');
-    if (replaceElement) replaceElement.textContent = subtitlesReplaced; // 僅使用 API 回傳值
+    if (replaceElement) replaceElement.textContent = activeProfileTotals.subtitlesReplaced;
 
-    // 統計數據 (僅更新存在的元素)
     const viewsElement = document.getElementById('translation-views');
-    if (viewsElement) viewsElement.textContent = translationViews;
+    if (viewsElement) viewsElement.textContent = activeProfileTotals.translationViews;
     const upvotesElement = document.getElementById('upvotes-received');
-    if (upvotesElement) upvotesElement.textContent = upvotesReceived;
-
-    // 影片資訊
-    const videoElement = document.getElementById('currentVideo');
-    if (videoElement) videoElement.textContent = currentVideoId || '未偵測到影片';
+    if (upvotesElement) upvotesElement.textContent = activeProfileTotals.upvotesReceived;
 }
 
 // ===== Toast =====
@@ -358,23 +367,23 @@ function setupSubtitleCardListeners() {
     }
 
     // 訂閱配置變更
-    configManager.subscribe('subtitle.dualModeEnabled', (key, newValue) => {
+    configManager.subscribe('subtitle.dualModeEnabled', (_key, newValue) => {
         updateSubtitleModeUI(newValue);
     });
 
-    configManager.subscribe('subtitle.primaryLanguage', (key, newValue) => {
+    configManager.subscribe('subtitle.primaryLanguage', (_key, newValue) => {
         if (primarySelect && primarySelect.value !== newValue) {
             primarySelect.value = newValue;
         }
     });
 
-    configManager.subscribe('subtitle.secondaryLanguage', (key, newValue) => {
+    configManager.subscribe('subtitle.secondaryLanguage', (_key, newValue) => {
         if (secondarySelect && secondarySelect.value !== newValue) {
             secondarySelect.value = newValue;
         }
     });
 
-    configManager.subscribe('subtitle.style.primary.fontSize', (key, newValue) => {
+    configManager.subscribe('subtitle.style.primary.fontSize', (_key, newValue) => {
         if (fontSizeSlider && parseInt(fontSizeSlider.value) !== newValue) {
             fontSizeSlider.value = newValue;
             if (fontSizeValue) fontSizeValue.textContent = `${newValue}px`;
@@ -385,84 +394,12 @@ function setupSubtitleCardListeners() {
 // ===== 事件綁定 =====
 
 document.addEventListener('DOMContentLoaded', async () => {
-    // 1. 首先初始化 configManager
     await initializeConfig();
 
-    // 2. 從 configManager 獲取 userId（遷移由 background.js 處理）
-    userId = getUserId();
-    if (!userId) {
-        console.log('[Popup] userId 尚未設置，等待 updateUserData 處理');
-    }
-
-    // 3. 主動向後端請求資料並更新數據
-    await updateUserData();
-
-    // 4. 從 configManager 獲取初始設置
     getInitialSettings();
-
-    // 5. 設置配置變更訂閱
     setupConfigSubscriptions();
-
-    // 6. 初始化字幕設定卡片
     initSubtitleCard();
     setupSubtitleCardListeners();
-
-    // 複製 userID
-    document.getElementById('copy-userid').addEventListener('click', copyUserId);
-
-// 主動更新用戶數據的函數
-async function updateUserData() {
-    try {
-        // 首先嘗試註冊用戶
-        let userData = await registerUser(userId, '');
-        score = userData.points || 0;
-        if (userData.statistics) {
-            translationSubmissions = userData.statistics.translationSubmissions || 0;
-            translationViews = userData.statistics.translationViews || 0;
-            upvotesReceived = userData.statistics.upvotesReceived || 0;
-            subtitlesReplaced = userData.statistics.subtitlesReplaced || 0;
-            contribCount = translationSubmissions; // 假設累積貢獻等於提交翻譯數量
-            replaceCount = subtitlesReplaced; // 已自動替換等於替換字幕數量
-            console.log('註冊後更新數據 - 已自動替換:', replaceCount);
-        } else {
-            console.warn('後端未返回統計數據，使用預設值');
-            translationSubmissions = 0;
-            translationViews = 0;
-            upvotesReceived = 0;
-            subtitlesReplaced = 0;
-            contribCount = 0;
-            replaceCount = 0;
-        }
-        updateUI();
-        // 隨後立即再次獲取最新數據
-        userData = await fetchUserStats(userId);
-        score = userData.points || 0;
-        if (userData.statistics) {
-            translationSubmissions = userData.statistics.translationSubmissions || 0;
-            translationViews = userData.statistics.translationViews || 0;
-            upvotesReceived = userData.statistics.upvotesReceived || 0;
-            subtitlesReplaced = userData.statistics.subtitlesReplaced || 0;
-            contribCount = translationSubmissions; // 假設累積貢獻等於提交翻譯數量
-            replaceCount = subtitlesReplaced; // 已自動替換等於替換字幕數量
-            console.log('獲取最新數據後更新 - 已自動替換:', replaceCount);
-        } else {
-            console.warn('後端未返回統計數據，使用預設值');
-            translationSubmissions = 0;
-            translationViews = 0;
-            upvotesReceived = 0;
-            subtitlesReplaced = 0;
-            contribCount = 0;
-            replaceCount = 0;
-        }
-        updateUI();
-    } catch (e) {
-        console.error('更新用戶數據失敗:', e);
-        showToast('更新數據失敗: ' + e.message);
-    }
-}
-
-    // 重設 userID
-    document.getElementById('reset-userid').addEventListener('click', resetUserId);
 
     // 設定按鈕
     document.getElementById('settings-btn').addEventListener('click', () => {
@@ -499,14 +436,10 @@ async function updateUserData() {
     function getInitialSettings() {
         try {
             isEnabled = configManager.get('isEnabled');
-            currentVideoId = configManager.get('video.currentVideoId') || '';
             updateUI();
-            console.log('[Popup] 已從 configManager 獲取初始設置:', { isEnabled, currentVideoId });
         } catch (error) {
             console.error('[Popup] 從 configManager 獲取初始設置失敗:', error);
-            // 使用預設值
             isEnabled = true;
-            currentVideoId = '';
             updateUI();
         }
     }
@@ -523,33 +456,19 @@ async function updateUserData() {
             updateUI();
         });
 
-        // 訂閱 currentVideoId 變更
-        configManager.subscribe('video.currentVideoId', (key, newValue, oldValue) => {
-            console.log(`[Popup] ${key} 從 ${oldValue} 變更為 ${newValue}`);
-            currentVideoId = newValue || '';
-            updateUI();
-        });
     }
 
-    // 監聽來自 background 的狀態更新消息 (可選，如果需要即時同步)
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        if (message.type === 'UPDATE_STATS') {
-            // 更新替換計數等統計信息
-            if (message.replacementCount !== undefined) {
-                replaceCount = message.replacementCount;
+    chrome.runtime.onMessage.addListener((message) => {
+        try {
+            if (isRecord(message) && message.type === POPUP_ACTIVE_PROFILE_STATS_RESULT) {
+                activeProfileStatsRequest?.settle(message.result);
             }
-            if (message.videoId) {
-                currentVideoId = message.videoId;
-            }
-            updateUI();
+        } catch (_error) {
+            return false;
         }
-        // 可以添加更多消息類型來同步其他狀態
+        return false;
     });
 
-    // 定時更新統計數據 (每分鐘一次)
-    setInterval(async () => {
-        if (userId) {
-            await updateUserData();
-        }
-    }, 60000);
+    requestActiveProfileStats();
+    setInterval(requestActiveProfileStats, 60000);
 });

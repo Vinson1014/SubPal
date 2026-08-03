@@ -311,10 +311,10 @@ async function createToggleHarness() {
       };
       windowEvents.addEventListener('responseFromContentScript', listener);
       windowEvents.dispatchEvent(new CustomEvent('messageToContentScript', {
-        detail: { messageId: 'content-ready', message: { type: 'CONFIG_GET_ALL' } }
+        detail: { messageId: 'content-ready', message: { category: 'settings-read', variant: 'snapshot', payload: {} } }
       }));
       windowEvents.removeEventListener('responseFromContentScript', listener);
-      if (response?.success) return;
+      if (response?.ok) return;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error('content ConfigManager did not initialize');

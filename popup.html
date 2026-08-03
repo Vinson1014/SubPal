@@ -142,36 +142,20 @@
         .card:hover {
             border-color: rgba(161, 161, 170, 0.2);
         }
-        .user-info {
+        .profile-user-info {
             display: flex;
             align-items: center;
             gap: 8px;
             margin-bottom: 10px;
             flex-wrap: wrap;
         }
-        .user-id {
+        .profile-user-id {
             font-family: 'Consolas', 'Monaco', monospace;
             font-size: 0.95em;
             background: rgba(161, 161, 170, 0.08);
             padding: 3px 10px;
             border-radius: var(--radius-sm);
             border: 1px solid var(--color-border);
-        }
-        #copy-userid, #reset-userid {
-            background: rgba(161, 161, 170, 0.08);
-            border: 1px solid var(--color-border);
-            border-radius: var(--radius-sm);
-            padding: 4px 10px;
-            cursor: pointer;
-            transition: all var(--transition-fast);
-            font-size: 0.9em;
-            color: var(--color-gray);
-            font-family: inherit;
-        }
-        #copy-userid:hover, #reset-userid:hover {
-            background: var(--color-green-dim);
-            border-color: rgba(20, 184, 166, 0.3);
-            color: var(--color-green);
         }
         .score-info, .contribution-info {
             font-size: 1.05em;
@@ -479,18 +463,6 @@
             font-weight: 600;
             color: var(--color-green);
         }
-        .video-info {
-            margin-bottom: 12px;
-            font-size: 0.9em;
-            background: var(--color-card-bg);
-            padding: 10px 14px;
-            border-radius: var(--radius-md);
-            border: 1px solid var(--color-border);
-            color: var(--color-gray);
-        }
-        .video-info span {
-            color: var(--color-gray-light);
-        }
         hr {
             border: none;
             border-top: 1px solid var(--color-border);
@@ -597,19 +569,16 @@
     </div>
     
     <div class="card">
-        <div class="user-info">
-            <span>userID: <span class="user-id" id="user-id">******</span></span>
-            <button id="copy-userid" title="複製 userID">複製</button>
-            <button id="reset-userid" title="重設 userID">重設</button>
+        <div class="profile-user-info">
+            <span>目前後端設定檔使用者（已遮蔽）：<span class="profile-user-id" id="profile-user-id">--</span></span>
         </div>
         <div class="score-info">
-            目前積分：<b id="score">**</b>
+            目前後端設定檔使用者的全域積分：<b id="score">0</b>
         </div>
-        <!-- 恢復 userID 功能已移至設定頁面 -->
         <hr>
         <div class="contribution-info">
-            累積貢獻：<b id="contrib-count">**</b> 條字幕<br>
-            已自動替換：<b id="replace-count">**</b> 條字幕
+            目前後端設定檔使用者的全域翻譯貢獻：<b id="contrib-count">0</b> 條字幕<br>
+            目前後端設定檔使用者的全域字幕替換：<b id="replace-count">0</b> 條字幕
         </div>
     </div>
 
@@ -691,19 +660,16 @@
                 <line x1="12" y1="20" x2="12" y2="4"/>
                 <line x1="6" y1="20" x2="6" y2="14"/>
             </svg>
-            統計數據
+            目前後端設定檔使用者的全域統計
         </h3>
         <div class="stat-item">
-            <span class="stat-label">貢獻被顯示次數</span>
+            <span class="stat-label">全域貢獻被顯示次數</span>
             <span class="stat-value" id="translation-views">0</span>
         </div>
         <div class="stat-item">
-            <span class="stat-label">獲得讚數</span>
+            <span class="stat-label">全域獲得讚數</span>
             <span class="stat-value" id="upvotes-received">0</span>
         </div>
-    </div>
-    <div class="video-info">
-        目前影片：<span id="currentVideo">未偵測到影片</span>
     </div>
     <!-- 社群連結 -->
     <div class="community-links">
