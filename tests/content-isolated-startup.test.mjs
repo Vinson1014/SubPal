@@ -618,14 +618,13 @@ test('Given content startup When managers finish Then content index is injected 
   assert.match(source, /startIsolatedEndscreenTasks\(configManager, playbackContextManager\)/);
 });
 
-test('Given public page events When forged task requests are dispatched Then content exposes zero task request or response bridge', async () => {
+test('Given public page events When forged task requests are dispatched Then content exposes no task bridge', async () => {
   const source = await readFile(new URL('../content.js', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /postMessage[\s\S]*GET_CROWDSOURCING_TASKS/);
-  assert.match(source, /message\?\.type === 'GET_CROWDSOURCING_TASKS'\) return/);
-  assert.doesNotMatch(source, /responseFromContentScript[\s\S]{0,300}GET_CROWDSOURCING_TASKS/);
+  assert.doesNotMatch(source, /GET_CROWDSOURCING_TASKS/);
 });
 
-test('Given production content listener after manager initialization When a public task event is forged Then it emits no port message or response', async () => {
+test('Given production content listener after manager initialization When a public task event is forged Then it emits no port message and one terminal denial', async () => {
   const portMessages = [];
   const responses = [];
   const window = new EventTarget();
@@ -655,10 +654,13 @@ test('Given production content listener after manager initialization When a publ
   window.dispatchEvent(new context.CustomEvent('messageToContentScript', { detail: { messageId: 'forged', message: { type: 'GET_CROWDSOURCING_TASKS', videoID: 'netflix-1', languageCode: 'zh-TW', limit: 5 } } }));
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(portMessages.length, 0);
-  assert.equal(responses.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(responses)), [{
+    messageId: 'forged',
+    response: { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } }
+  }]);
 });
 
-test('Given production content listener after manager initialization When a legacy RAW event is forged Then it emits no internal event, response, or background request', async () => {
+test('Given production content listener after manager initialization When a legacy RAW event is forged Then it emits no internal or background event and one terminal denial', async () => {
   const backgroundRequests = [];
   const internalEvents = [];
   const responses = [];
@@ -696,7 +698,10 @@ test('Given production content listener after manager initialization When a lega
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.deepEqual(internalEvents, []);
-  assert.deepEqual(responses, []);
+  assert.deepEqual(JSON.parse(JSON.stringify(responses)), [{
+    messageId: 'forged-raw',
+    response: { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } }
+  }]);
   assert.deepEqual(backgroundRequests, []);
 });
 

@@ -28,6 +28,7 @@
   let contributionsCapabilityPromise = null;
   let subtitleQueryCapabilityPromise = null;
   let settingsCapabilityPromise = null;
+  let publicConfigKeys = new Set();
 
   const PAGE_SCRIPT_READY_EVENT = 'subpal-page-script-ready';
   const PAGE_SCRIPT_READY_REQUEST_EVENT = 'subpal-request-page-script-ready';
@@ -35,6 +36,7 @@
   const PAGE_SCRIPT_READY_TIMEOUT_MS = 5000;
   const PAGE_SCRIPT_POLL_INTERVAL_MS = 50;
   const PAGE_SCRIPT_RETRY_DELAY_MS = 500;
+  const OBJECT_CONSTRUCTOR_SOURCE = Function.prototype.toString.call(Object);
   const PAGE_SCRIPT_ATTRIBUTES = {
     state: 'data-subpal-page-script-state',
     attempt: 'data-subpal-page-script-attempt',
@@ -42,15 +44,6 @@
     deadline: 'data-subpal-page-script-deadline',
     retryNotBefore: 'data-subpal-page-script-retry-not-before'
   };
-
-  const RETIRED_CONTRIBUTION_COMMANDS = new Set([
-    'VOTE_ENQUEUE', 'VOTE_GET_HISTORY', 'VOTE_GET_STATUS', 'VOTE_GET_AUTHORITY', 'VOTE_RETRY',
-    'TRANSLATION_ENQUEUE', 'TRANSLATION_GET_HISTORY', 'TRANSLATION_GET_STATUS', 'TRANSLATION_GET_RECONCILIATION', 'TRANSLATION_RETRY',
-    'REPLACEMENT_EVENT_ENQUEUE', 'REPLACEMENT_EVENT_GET_HISTORY', 'REPLACEMENT_EVENT_RETRY',
-    'GET_ALL_PENDING', 'GET_QUEUE_STATS',
-    'RETRY_FAILED_VOTES', 'RETRY_FAILED_TRANSLATIONS', 'RETRY_FAILED_REPLACEMENT_EVENTS'
-  ]);
-  const RETIRED_CONFIG_COMMANDS = new Set(['CONFIG_SET', 'CONFIG_SET_MULTIPLE']);
 
   // 初始化 ConfigManager
   async function initializeConfigManager() {
@@ -78,24 +71,20 @@
     }
 
     const allConfigKeys = getAllConfigKeys();
+    publicConfigKeys = new Set(allConfigKeys);
     configManager.subscribe(allConfigKeys, (key, newValue, oldValue) => {
       debugLog('ConfigManager 配置變更:', key, newValue, oldValue);
+      const change = projectPublicConfigChange(key, newValue, oldValue);
+      if (!change) return;
       window.dispatchEvent(new CustomEvent('messageFromContentScript', {
-        detail: {
-          message: {
-            type: 'CONFIG_CHANGED',
-            key: key,
-            newValue: newValue,
-            oldValue: oldValue
-          }
-        }
+        detail: { message: change }
       }));
     });
 
     debugMode = configManager.get('debugMode') || false;
     debugLog('從 ConfigManager 讀取初始 debugMode:', debugMode);
 
-    configManager.subscribe('debugMode', (key, newValue, oldValue) => {
+    configManager.subscribe('debugMode', (_key, newValue, oldValue) => {
       debugMode = newValue;
       debugLog('Content script debugMode 已更新:', oldValue, '->', newValue);
     });
@@ -137,100 +126,6 @@
       isolatedEndscreenStartPromise = initializeIsolatedEndscreenTasks();
     }
     return isolatedEndscreenStartPromise;
-  }
-
-  // 處理配置相關訊息
-  function handleConfigMessage(messageId, message) {
-    if (!configManager) {
-      debugLog('ConfigManager 尚未初始化，回應錯誤');
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            success: false,
-            error: 'ConfigManager not initialized'
-          }
-        }
-      }));
-      return;
-    }
-
-    // 處理不同類型的配置訊息
-    switch (message.type) {
-      case 'CONFIG_GET_ALL':
-        handleConfigGetAll(messageId);
-        break;
-
-      case 'CONFIG_GET':
-        handleConfigGet(messageId, message.key);
-        break;
-
-      default:
-        debugLog('未知的配置訊息類型:', message.type);
-        window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-          detail: {
-            messageId: messageId,
-            response: {
-              success: false,
-              error: `Unknown config message type: ${message.type}`
-            }
-          }
-        }));
-    }
-  }
-
-  // CONFIG_GET_ALL 處理
-  async function handleConfigGetAll(messageId) {
-    try {
-      const config = projectPublicConfig(configManager.getAll());
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            success: true,
-            config: config
-          }
-        }
-      }));
-    } catch (error) {
-      debugLog('CONFIG_GET_ALL 失敗:', error);
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            success: false,
-            error: error.message
-          }
-        }
-      }));
-    }
-  }
-
-  // CONFIG_GET 處理
-  async function handleConfigGet(messageId, key) {
-    try {
-      const value = configManager.get(key);
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            success: true,
-            value: value
-          }
-        }
-      }));
-    } catch (error) {
-      debugLog('CONFIG_GET 失敗:', error);
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: {
-          messageId: messageId,
-          response: {
-            success: false,
-            error: error.message
-          }
-        }
-      }));
-    }
   }
 
   function getBackgroundPortTransport() {
@@ -282,65 +177,102 @@
     return { present: true, value: descriptor.value };
   }
 
-  function dataProperty(message, key) {
-    for (let target = message; target !== null; target = Object.getPrototypeOf(target)) {
-      const descriptor = Object.getOwnPropertyDescriptor(target, key);
-      if (!descriptor) continue;
-      if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) return null;
-      return { present: true, value: descriptor.value };
-    }
-    return { present: false };
+  function isOrdinaryObjectPrototype(prototype) {
+    if (prototype === Object.prototype) return true;
+    const constructor = Object.getOwnPropertyDescriptor(prototype, 'constructor');
+    if (!constructor || !Object.prototype.hasOwnProperty.call(constructor, 'value') || typeof constructor.value !== 'function') return false;
+    const constructorPrototype = Object.getOwnPropertyDescriptor(constructor.value, 'prototype');
+    return constructorPrototype?.value === prototype &&
+      Function.prototype.toString.call(constructor.value) === OBJECT_CONSTRUCTOR_SOURCE;
   }
 
-  function isIdentityConfigKey(key) {
-    return typeof key === 'string' && key.split('.').some((part) => [
-      'user', 'userId', 'jwt', 'token', 'auth', 'backendProfileId', 'backendProfiles',
-      'activeProfileId', 'profile', 'credential', 'credentials'
-    ].includes(part));
+  function isPublicConfigPrimitive(value) {
+    return typeof value === 'string' || typeof value === 'boolean' ||
+      (typeof value === 'number' && Number.isFinite(value));
   }
 
-  function hasIdentityConfigField(value, visited = new Set()) {
-    if (!value || typeof value !== 'object') return false;
-    if (visited.has(value)) return false;
+  function hasSafeConfigData(value, visited = new Set()) {
+    if (value === null || isPublicConfigPrimitive(value)) return true;
+    if (typeof value !== 'object' || visited.has(value)) return false;
     visited.add(value);
-    for (let target = value; target !== null; target = Object.getPrototypeOf(target)) {
-      for (const key of Object.getOwnPropertyNames(target)) {
-        if (isIdentityConfigKey(key)) return true;
-        const descriptor = Object.getOwnPropertyDescriptor(target, key);
-        if (target === value && Object.prototype.hasOwnProperty.call(descriptor, 'value') &&
-          hasIdentityConfigField(descriptor.value, visited)) return true;
+    try {
+      if (!Array.isArray(value)) {
+        const prototype = Object.getPrototypeOf(value);
+        if (prototype !== null && !isOrdinaryObjectPrototype(prototype)) return false;
       }
+      if (Object.getOwnPropertySymbols(value).length !== 0) return false;
+      for (const key of Object.getOwnPropertyNames(value)) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor || !Object.hasOwn(descriptor, 'value') || !hasSafeConfigData(descriptor.value, visited)) return false;
+      }
+      if (typeof structuredClone === 'function') structuredClone(value);
+      return true;
+    } catch {
+      return false;
     }
-    return false;
   }
 
-  function inspectPublicConfigMessage(message) {
+  function projectPublicConfigEntry(key, value) {
+    if (!publicConfigKeys.has(key) || !isPublicConfigPrimitive(value)) return null;
+    return { key, value };
+  }
+
+  function parseSettingsSnapshotRequest(message, authorityEscalated) {
     try {
-      const type = dataProperty(message, 'type');
-      if (!type.present) return terminalIngressFailure(false);
-      const request = { type: type.value };
-      if (type.value === 'CONFIG_GET_ALL') return { request };
-      const key = dataProperty(message, 'key');
-      if (key === null || isIdentityConfigKey(key.value)) return terminalIngressFailure(key !== null);
-      request.key = key.value;
-      if (type.value === 'CONFIG_GET') return { request };
-      return terminalIngressFailure(false);
+      if (authorityEscalated) return terminalIngressFailure(true).terminal;
+      if (!message || typeof message !== 'object' || Array.isArray(message)) return null;
+      if (typeof structuredClone === 'function') structuredClone(message);
+
+      const prototype = Object.getPrototypeOf(message);
+      if (prototype !== null && !isOrdinaryObjectPrototype(prototype)) return null;
+      const keys = Object.getOwnPropertyNames(message);
+      if (Object.getOwnPropertySymbols(message).length !== 0 ||
+          keys.length !== 3 || keys.some((key) => !['category', 'variant', 'payload'].includes(key))) return null;
+
+      const request = {};
+      for (const key of keys) {
+        const descriptor = Object.getOwnPropertyDescriptor(message, key);
+        if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value') || descriptor.enumerable !== true) return null;
+        request[key] = descriptor.value;
+      }
+      if (request.category !== 'settings-read' || request.variant !== 'snapshot') return null;
+
+      const payload = request.payload;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+      if (typeof structuredClone === 'function') structuredClone(payload);
+      const payloadPrototype = Object.getPrototypeOf(payload);
+      if (payloadPrototype !== null && !isOrdinaryObjectPrototype(payloadPrototype)) return null;
+      if (Object.getOwnPropertyNames(payload).length !== 0 || Object.getOwnPropertySymbols(payload).length !== 0) return null;
+      return request;
     } catch {
-      return terminalIngressFailure(false);
+      return null;
     }
   }
 
   function projectPublicConfig(config) {
-    return Object.fromEntries(Object.entries(config).filter(([key, value]) => (
-      !isIdentityConfigKey(key) && !hasIdentityConfigField(value)
-    )));
+    if (!hasSafeConfigData(config)) return null;
+    const projected = {};
+    for (const key of Object.getOwnPropertyNames(config)) {
+      const descriptor = Object.getOwnPropertyDescriptor(config, key);
+      if (!descriptor?.enumerable) continue;
+      const entry = projectPublicConfigEntry(key, descriptor.value);
+      if (entry) projected[entry.key] = entry.value;
+    }
+    return projected;
+  }
+
+  function projectPublicConfigChange(key, newValue, oldValue) {
+    const next = projectPublicConfigEntry(key, newValue);
+    const previous = projectPublicConfigEntry(key, oldValue);
+    if (!next || !previous) return null;
+    return { type: 'CONFIG_CHANGED', key: next.key, newValue: next.value, oldValue: previous.value };
   }
 
   function hasAuthorityBearingKey(message) {
     const authorityKeys = ['destination', 'command', 'backgroundCommand', 'storage', 'storageKey',
       'endpoint', 'credential', 'credentials', 'sync', 'syncConfig', 'lifecycle', 'lifecycleConfig', 'config',
       'backendProfileId', 'backendProfiles', 'activeProfileId', 'profile',
-      'jwt', 'token', 'auth', 'user', 'userId'
+      'jwt', 'token', 'auth', 'authorization', 'user', 'userId', 'debug', 'style', 'video', 'playback'
     ];
     for (const key of authorityKeys) {
       for (let target = message; target !== null; target = Object.getPrototypeOf(target)) {
@@ -363,12 +295,14 @@
       }
       if (category?.value === 'page-observation' || category?.value === 'subtitle-query' ||
           category?.value === 'contribution-intent' || category?.value === 'contribution-read' ||
-          category?.value === 'settings-change') {
+          category?.value === 'settings-change' || category?.value === 'settings-read') {
         return { input: message, category: category.value, type: type.value, authorityEscalated };
       }
-      if (type.value === 'CHECK_SUBTITLE') return { input: message, type: type.value, authorityEscalated: false };
+      if (type.value === 'SUBTITLE_READY') {
+        return authorityEscalated ? terminalIngressFailure(true) : { internal: message, type: type.value };
+      }
       if (type.value !== 'VIDEO_ID_CHANGED') {
-        return type.present ? { type: type.value } : terminalIngressFailure(authorityEscalated);
+        return type.present ? terminalIngressFailure(true) : terminalIngressFailure(authorityEscalated);
       }
 
       const payload = {};
@@ -493,68 +427,48 @@
       respondToPageObservation(messageId, pageIngressMessage.terminal);
       return;
     }
-    const message = { type: pageIngressMessage.type };
-
     debugLog('Received from page:', messageId, rawMessage);
 
-    if (message?.type === 'GET_CROWDSOURCING_TASKS') return;
-    if (message?.type === 'RAW_TTML_INTERCEPTED') return;
-
-    if (RETIRED_CONTRIBUTION_COMMANDS.has(message.type)) {
-      respondToPageObservation(messageId, terminalIngressFailure(true).terminal);
-      return;
-    }
-
-    if (RETIRED_CONFIG_COMMANDS.has(message.type)) {
-      respondToPageObservation(messageId, terminalIngressFailure(true).terminal);
-      return;
-    }
-
-    if (pageIngressMessage) {
-      if (pageIngressMessage.input) {
-        acceptPageIngress(messageId, pageIngressMessage);
+    if (pageIngressMessage.category === 'settings-read') {
+      const snapshotRequest = parseSettingsSnapshotRequest(rawMessage, pageIngressMessage.authorityEscalated);
+      if (snapshotRequest?.ok === false) {
+        respondToPageObservation(messageId, snapshotRequest);
         return;
       }
-    }
-
-    // 檢查是否為配置相關訊息（由 content script 處理，不轉發到 background）
-    const configMessages = ['CONFIG_GET_ALL', 'CONFIG_GET'];
-
-    if (configMessages.includes(message.type)) {
-      debugLog('處理配置訊息:', message.type);
-      const configRequest = inspectPublicConfigMessage(rawMessage);
-      if (configRequest.terminal) {
-        respondToPageObservation(messageId, configRequest.terminal);
+      if (!snapshotRequest) {
+        respondToPageObservation(messageId, {
+          ok: false,
+          error: { kind: 'invalid', code: 'settings-read', retryable: false }
+        });
         return;
       }
-      handleConfigMessage(messageId, configRequest.request);
+      if (!configManager) {
+        respondToPageObservation(messageId, {
+          ok: false,
+          error: { kind: 'disconnected', code: 'settings-unavailable', retryable: true }
+        });
+        return;
+      }
+      try {
+        respondToPageObservation(messageId, {
+          ok: true,
+          value: projectPublicConfig(configManager.getAll())
+        });
+      } catch {
+        respondToPageObservation(messageId, {
+          ok: false,
+          error: { kind: 'domain-rejected', code: 'settings-snapshot-failed', retryable: false }
+        });
+      }
       return;
     }
 
-    // 檢查是否為內部消息（不需要發送到 background）
-    const internalMessages = ['SUBTITLE_READY'];
-
-    if (internalMessages.includes(message.type)) {
-      debugLog('處理內部消息:', message.type);
-
-      dispatchInternalMessage(messageId, rawMessage);
-
-      // 內部消息不需要回應，直接返回
+    if (pageIngressMessage.internal) {
+      dispatchInternalMessage(messageId, pageIngressMessage.internal);
       return;
     }
 
-    // 生成唯一的訊息 ID，如果未提供
-    const uniqueMessageId = messageId || generateUniqueMessageId(message.type);
-
-    getBackgroundPortTransport().then(({ createEnvelope, transport }) => transport.request(createEnvelope({
-      requestId: uniqueMessageId,
-      kind: 'background-forward',
-      payload: rawMessage
-    }))).then((result) => {
-      window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-        detail: { messageId: uniqueMessageId, response: result.ok ? result.value : result }
-      }));
-    });
+    if (pageIngressMessage.input) acceptPageIngress(messageId, pageIngressMessage);
   });
 
   // 移除舊的 chrome.runtime.onMessage 監聽器，因為我們現在使用 port

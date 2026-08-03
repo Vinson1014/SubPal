@@ -210,7 +210,7 @@ async function createContentHarness({ backendProfiles = {} } = {}) {
         subscribe() {}
       }
     }),
-    schema: await createModule(context, 'config-schema.js', { getAllConfigKeys: () => [] }),
+    schema: await createModule(context, 'config-schema.js', { getAllConfigKeys: () => ['subtitle.primaryLanguage'] }),
     messaging: await createModule(context, 'messaging.js', { initMessaging: async () => {} }),
     isolated: await createModule(context, 'isolated-endscreen-tasks.js', { startIsolatedEndscreenTasks: async () => {} }),
     playback: await createModule(context, 'playback-context-manager.js', { playbackContextManager: {} })
@@ -980,7 +980,7 @@ test('Given any content-local profile record When MAIN submits a contribution in
   }
 });
 
-test('Given MAIN CONFIG messages target identity fields When the isolated bridge receives them Then forbidden requests reach neither config nor storage and GET_ALL projects identity away', async () => {
+test('Given retired generic MAIN config messages When the isolated bridge receives them Then every request is forbidden without config, storage, Port, or internal-event effects', async () => {
   const harness = await createContentHarness();
   const forbidden = { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } };
   const deniedAttempts = [
@@ -1000,22 +1000,63 @@ test('Given MAIN CONFIG messages target identity fields When the isolated bridge
     assert.deepEqual(harness.baseline(), before.effects);
   }
 
-  const before = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
-  const response = await harness.dispatchAndWait('get-all-public-config', { type: 'CONFIG_GET_ALL' });
-  assert.deepEqual(plain(response), {
-    messageId: 'get-all-public-config',
-    response: { success: true, config: { 'subtitle.primaryLanguage': 'zh-Hant' } }
-  });
-  assert.equal(harness.bridgeEvents.length, before.events);
-  assert.equal(harness.responses.length, before.responses + 1);
-  assert.deepEqual(harness.baseline(), { ...before.effects, configCalls: before.effects.configCalls + 1 });
+  for (const attempt of [
+    { id: 'get-all-public-config', message: { type: 'CONFIG_GET_ALL' } },
+    { id: 'get-public-config', message: { type: 'CONFIG_GET', key: 'subtitle.primaryLanguage' } }
+  ]) {
+    const before = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
+    const response = await harness.dispatchAndWait(attempt.id, attempt.message);
+    assert.deepEqual(plain(response), { messageId: attempt.id, response: forbidden });
+    assert.equal(harness.bridgeEvents.length, before.events);
+    assert.equal(harness.responses.length, before.responses + 1);
+    assert.deepEqual(harness.baseline(), before.effects);
+  }
+});
 
-  const getBefore = { events: harness.bridgeEvents.length, responses: harness.responses.length, effects: harness.baseline() };
-  const getResponse = await harness.dispatchAndWait('get-public-config', { type: 'CONFIG_GET', key: 'subtitle.primaryLanguage' });
-  assert.deepEqual(plain(getResponse), {
-    messageId: 'get-public-config', response: { success: true, value: 'zh-Hant' }
+test('Given an exact MAIN settings snapshot request When content receives it Then content returns the public ConfigManager snapshot without invoking PageIngress', async () => {
+  const harness = await createContentHarness();
+  const before = harness.baseline();
+
+  const response = await harness.dispatchAndWait('settings-snapshot', {
+    category: 'settings-read', variant: 'snapshot', payload: {}
   });
-  assert.equal(harness.bridgeEvents.length, getBefore.events);
-  assert.equal(harness.responses.length, getBefore.responses + 1);
-  assert.deepEqual(harness.baseline(), { ...getBefore.effects, configCalls: getBefore.effects.configCalls + 1 });
+
+  assert.deepEqual(plain(response), {
+    messageId: 'settings-snapshot', response: { ok: true, value: { 'subtitle.primaryLanguage': 'zh-Hant' } }
+  });
+  assert.deepEqual(harness.baseline(), { ...before, configCalls: before.configCalls + 1 });
+});
+
+test('Given a settings snapshot envelope When PageIngress is called directly Then it rejects the content-local route without dispatching or reading settings', async () => {
+  const ingress = await loadPageIngress();
+  const calls = [];
+  const request = { category: 'settings-read', variant: 'snapshot', payload: {} };
+  const settings = { snapshot(input) { calls.push(plain(input)); } };
+
+  assert.deepEqual(plain(await ingress.PageIngress.accept(request, { settings })), {
+    ok: false,
+    error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false }
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('Given hostile MAIN settings snapshot envelopes When the isolated bridge receives them Then it rejects before ConfigManager, storage, Port, or internal-event effects', async () => {
+  const harness = await createContentHarness();
+  const attempts = [
+    { id: 'settings-read-extra', message: { category: 'settings-read', variant: 'snapshot', payload: {}, extra: true } },
+    { id: 'settings-read-inherited', message: Object.assign(Object.create({ variant: 'snapshot' }), { category: 'settings-read', payload: {} }) },
+    { id: 'settings-read-accessor', message: { category: 'settings-read', get variant() { throw new Error('variant getter'); }, payload: {} } },
+    { id: 'settings-read-proxy', message: new Proxy({ category: 'settings-read', variant: 'snapshot', payload: {} }, { ownKeys() { throw new Error('own keys'); } }) }
+  ];
+
+  for (const attempt of attempts) {
+    const before = { effects: harness.baseline(), events: harness.bridgeEvents.length };
+    const response = await harness.dispatchAndWait(attempt.id, attempt.message);
+    assert.deepEqual(plain(response), {
+      messageId: attempt.id,
+      response: { ok: false, error: { kind: 'invalid', code: 'settings-read', retryable: false } }
+    });
+    assert.deepEqual(harness.baseline(), before.effects);
+    assert.equal(harness.bridgeEvents.length, before.events);
+  }
 });
