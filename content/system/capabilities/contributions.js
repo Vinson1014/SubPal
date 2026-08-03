@@ -32,7 +32,7 @@ const VARIANTS = Object.freeze({
   },
   'enqueue-replacement-event': {
     method: 'enqueueReplacementEvent',
-    keys: new Set(['translationID', 'contributorUserID', 'beneficiaryUserID', 'occurredAt'])
+    keys: new Set(['translationID', 'contributorUserID', 'occurredAt'])
   }
 });
 
@@ -128,7 +128,7 @@ function parseTranslation(payload) {
 
 function parseReplacementEvent(payload) {
   return isNonEmptyString(payload.translationID) && isNonEmptyString(payload.contributorUserID) &&
-    isNonEmptyString(payload.beneficiaryUserID) && isNonEmptyString(payload.occurredAt) ? payload : null;
+    isNonEmptyString(payload.occurredAt) ? payload : null;
 }
 
 function parseIntent(input) {

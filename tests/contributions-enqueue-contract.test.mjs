@@ -52,6 +52,19 @@ function voteIntent() {
   };
 }
 
+function replacementEventIntent(extraPayload = {}) {
+  return {
+    category: 'contribution-intent',
+    variant: 'enqueue-replacement-event',
+    payload: {
+      translationID: 'translation-1',
+      contributorUserID: 'contributor-1',
+      occurredAt: '2026-08-01T00:00:00.000Z',
+      ...extraPayload
+    }
+  };
+}
+
 test('Given a profile-bound vote whose storage write is pending When Contributions enqueues it Then success waits for persistence and returns only queued-locally with its operation ID', async () => {
   const createContributions = await loadContributions();
   const storageWrite = deferred();
@@ -108,6 +121,37 @@ test('Given cancellation before the private handoff When Contributions enqueues 
     ok: false,
     error: { kind: 'cancelled', code: 'caller-cancelled-before-persistence', retryable: false }
   });
+});
+
+test('Given an identity-free replacement event When Contributions enqueues it Then it forwards exactly its event fields and rejects caller identity authority', async () => {
+  const createContributions = await loadContributions();
+  const calls = [];
+  const contributions = createContributions({
+    persist(intent) {
+      calls.push(intent);
+      return { ok: true, value: { status: 'queued-locally', operationId: 'replacement-1' } };
+    }
+  });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(await contributions.enqueue(replacementEventIntent()))), {
+    ok: true,
+    value: { status: 'queued-locally', operationId: 'replacement-1' }
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{
+    variant: 'enqueue-replacement-event',
+    payload: replacementEventIntent().payload
+  }]);
+
+  for (const authority of [
+    { beneficiaryUserID: 'forged-beneficiary' }, { userId: 'forged-user' }, { profile: 'forged-profile' },
+    { endpoint: 'https://forged.example.test' }, { jwt: 'forged-jwt' }, { credential: 'forged-credential' }
+  ]) {
+    assert.deepEqual(JSON.parse(JSON.stringify(await contributions.enqueue(replacementEventIntent(authority)))), {
+      ok: false,
+      error: { kind: 'invalid', code: 'contribution-payload', retryable: false }
+    });
+  }
+  assert.equal(calls.length, 1);
 });
 
 test('Given the private transport times out When Contributions persists Then it owns the ten-second deadline and normalizes the terminal code', async () => {
