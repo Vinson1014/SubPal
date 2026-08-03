@@ -14,6 +14,35 @@
  */
 
 import { sendMessage, onMessage } from '../messaging.js';
+import { createSettingsSnapshotClient, validateSettingsSnapshotResult } from '../capabilities/settings-snapshot.js';
+
+const CONFIG_CHANGED_KEYS = new Set(['type', 'key', 'newValue', 'oldValue']);
+
+function parseConfigChange(message) {
+  try {
+    if (!message || typeof message !== 'object' || Array.isArray(message)) return null;
+    const keys = Object.getOwnPropertyNames(message);
+    if (Object.getOwnPropertySymbols(message).length !== 0 || keys.length !== CONFIG_CHANGED_KEYS.size ||
+        keys.some((key) => !CONFIG_CHANGED_KEYS.has(key))) return null;
+    const values = {};
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(message, key);
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return null;
+      values[key] = descriptor.value;
+    }
+    if (values.type !== 'CONFIG_CHANGED' || typeof values.key !== 'string') return null;
+    const next = validateSettingsSnapshotResult({ ok: true, value: { [values.key]: values.newValue } });
+    if (!next.ok) return null;
+    const previous = values.oldValue === undefined
+      ? undefined
+      : validateSettingsSnapshotResult({ ok: true, value: { [values.key]: values.oldValue } });
+    if (previous && !previous.ok) return null;
+    if (typeof structuredClone === 'function') structuredClone(message);
+    return { key: values.key, newValue: next.value[values.key], oldValue: previous?.value[values.key] };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * ConfigBridge 類
@@ -35,6 +64,11 @@ export class ConfigBridge {
 
     // 消息監聽取消函數
     this.unsubscribeMessage = null;
+
+    this.createSettingsSnapshotClient = options.createSettingsSnapshotClient || createSettingsSnapshotClient;
+    this.settingsSnapshotClient = null;
+    this.initializationPromise = null;
+    this.lifecycleGeneration = 0;
   }
 
   /**
@@ -48,40 +82,47 @@ export class ConfigBridge {
       this.log('ConfigBridge 已經初始化');
       return;
     }
+    if (this.initializationPromise) return this.initializationPromise;
 
     this.log('開始初始化 ConfigBridge...');
-
-    try {
-      // 1. 從 content script 獲取所有配置
-      const result = await sendMessage({
-        type: 'CONFIG_GET_ALL'
-      });
-
-      if (!result.success) {
-        throw new Error(result.error || '獲取配置失敗');
-      }
-
-      // 2. 載入配置到緩存
-      const config = result.config || {};
-      for (const [key, value] of Object.entries(config)) {
-        this.cache.set(key, value);
-      }
-
-      this.log(`已載入 ${this.cache.size} 個配置項`);
-
-      // 3. 監聽配置變更通知
-      this.unsubscribeMessage = onMessage((message) => {
-        if (message.type === 'CONFIG_CHANGED') {
-          this.handleConfigChange(message.key, message.newValue, message.oldValue);
+    const lifecycle = this.lifecycleGeneration;
+    const initialization = (async () => {
+      let client;
+      try {
+        client = this.createSettingsSnapshotClient();
+        this.settingsSnapshotClient = client;
+        const result = validateSettingsSnapshotResult(await client.read());
+        if (lifecycle !== this.lifecycleGeneration || !result.ok) throw new Error('settings snapshot unavailable');
+        for (const [key, value] of Object.entries(result.value)) this.cache.set(key, value);
+        if (lifecycle !== this.lifecycleGeneration) throw new Error('settings snapshot unavailable');
+        this.unsubscribeMessage = onMessage((message) => {
+          const change = parseConfigChange(message);
+          if (change) this.handleConfigChange(change.key, change.newValue, change.oldValue);
+        });
+        if (lifecycle !== this.lifecycleGeneration) throw new Error('settings snapshot unavailable');
+        this.isInitialized = true;
+        this.log(`已載入 ${this.cache.size} 個配置項`);
+        this.log('ConfigBridge 初始化完成');
+      } catch {
+        if (lifecycle === this.lifecycleGeneration) {
+          this.cache.clear();
+          this.unsubscribeMessage?.();
+          this.unsubscribeMessage = null;
         }
-      });
-
-      this.isInitialized = true;
-      this.log('ConfigBridge 初始化完成');
-
-    } catch (error) {
-      this.error('ConfigBridge 初始化失敗:', error);
-      throw error;
+        this.error('ConfigBridge 初始化失敗');
+        throw new Error('settings snapshot unavailable');
+      } finally {
+        if (this.settingsSnapshotClient === client) {
+          client?.dispose();
+          this.settingsSnapshotClient = null;
+        }
+      }
+    })();
+    this.initializationPromise = initialization;
+    try {
+      return await initialization;
+    } finally {
+      if (this.initializationPromise === initialization) this.initializationPromise = null;
     }
   }
 
@@ -249,21 +290,21 @@ export class ConfigBridge {
    * @param {any} newValue - 新值
    * @param {any} oldValue - 舊值
    */
-  handleConfigChange(key, newValue, oldValue) {
+  handleConfigChange(key, newValue, _oldValue) {
     this.log(`收到配置變更通知: ${key}`);
 
     // 更新緩存
     this.cache.set(key, newValue);
 
     // 通知訂閱者
-    this.notifySubscribers(key, newValue, oldValue);
+    this.notifySubscribers(key, newValue, _oldValue);
   }
 
   /**
    * 通知訂閱者
    * @private
    */
-  notifySubscribers(key, newValue, oldValue) {
+  notifySubscribers(key, newValue, _oldValue) {
     const callbacks = this.subscribers.get(key);
     if (!callbacks || callbacks.size === 0) {
       return;
@@ -309,6 +350,11 @@ export class ConfigBridge {
    * 清理資源
    */
   cleanup() {
+    this.lifecycleGeneration += 1;
+    this.initializationPromise = null;
+    this.settingsSnapshotClient?.dispose();
+    this.settingsSnapshotClient = null;
+
     // 取消消息監聽
     if (this.unsubscribeMessage) {
       this.unsubscribeMessage();

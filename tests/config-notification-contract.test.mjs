@@ -9,6 +9,7 @@ const configBridgeUrl = new URL('../content/system/config/config-bridge.js', imp
 const configSchemaUrl = new URL('../content/system/config/config-schema.js', import.meta.url);
 const messagingUrl = new URL('../content/system/messaging.js', import.meta.url);
 const settingsUrl = new URL('../content/system/capabilities/settings.js', import.meta.url);
+const settingsSnapshotUrl = new URL('../content/system/capabilities/settings-snapshot.js', import.meta.url);
 const subtitleInterceptorUrl = new URL('../content/subtitle-modes/subtitle-interceptor.js', import.meta.url);
 
 function clone(value) {
@@ -116,7 +117,10 @@ class ObservableStorage {
   cleanup() {}
 }
 
-async function loadConfigModules(transport) {
+async function loadConfigModules(transport, createSnapshotClient = () => ({
+  dispose() {},
+  read: () => transport.sendMessage({ category: 'settings-read', variant: 'snapshot', payload: {} })
+})) {
   const context = vm.createContext({ console, setTimeout, clearTimeout, structuredClone });
   const moduleCache = new Map();
   const messagingModule = new vm.SyntheticModule(
@@ -129,9 +133,31 @@ async function loadConfigModules(transport) {
   );
   await messagingModule.link(() => {});
   await messagingModule.evaluate();
+  const settingsSnapshotModule = new vm.SyntheticModule(
+    ['createSettingsSnapshotClient', 'validateSettingsSnapshotResult'],
+    function initializeSettingsSnapshotExports() {
+      this.setExport('createSettingsSnapshotClient', createSnapshotClient);
+      this.setExport('validateSettingsSnapshotResult', (result) => {
+        if (!result || typeof result !== 'object' || Object.keys(result).length !== 2 || typeof result.ok !== 'boolean') {
+          return { ok: false, error: { kind: 'invalid', code: 'settings-snapshot-malformed', retryable: false } };
+        }
+        if (!result.ok) return result;
+        if (!result.value || typeof result.value !== 'object' || Array.isArray(result.value) ||
+            Object.hasOwn(result.value, 'jwt') || Object.hasOwn(result.value, 'unknown') ||
+            result.value['subtitle.primaryLanguage'] === 'not-a-language') {
+          return { ok: false, error: { kind: 'invalid', code: 'settings-snapshot-malformed', retryable: false } };
+        }
+        return result;
+      });
+    },
+    { context, identifier: settingsSnapshotUrl.href }
+  );
+  await settingsSnapshotModule.link(() => {});
+  await settingsSnapshotModule.evaluate();
 
   async function loadModule(url) {
     if (url.href === messagingUrl.href) return messagingModule;
+    if (url.href === settingsSnapshotUrl.href) return settingsSnapshotModule;
     if (moduleCache.has(url.href)) return moduleCache.get(url.href);
 
     const source = await readFile(url, 'utf8');
@@ -176,8 +202,11 @@ async function createConfigHarness() {
     async sendMessage(message) {
       requests.push(clone(message));
       switch (message.type || message.category) {
-        case 'CONFIG_GET_ALL':
-          return { success: true, config: manager.getAll() };
+        case 'settings-read':
+          if (message.variant === 'snapshot' && Object.keys(message.payload || {}).length === 0) {
+            return { ok: true, value: manager.getAll() };
+          }
+          return { ok: false, error: { kind: 'invalid', code: 'settings-read', retryable: false } };
         case 'settings-change': {
           const result = await settings.change(message);
           if (!result.ok) throw Object.assign(new Error(result.error.code), result.error);
@@ -565,4 +594,160 @@ test('Given a throwing ConfigManager subscriber When another subscriber observes
 
   assert.deepEqual(values, [['debugMode', true]]);
   assert.equal(manager.get('debugMode'), true);
+});
+
+test('Given a retired generic ConfigBridge response When initialization runs Then it rejects the response rather than caching it', async () => {
+  const requests = [];
+  const { ConfigBridge } = await loadConfigModules({
+    async sendMessage(message) {
+      requests.push(clone(message));
+      return { success: true, config: { 'subtitle.primaryLanguage': 'zh-Hant' } };
+    },
+    onMessage() { return () => {}; }
+  });
+  const bridge = new ConfigBridge();
+
+  await assert.rejects(bridge.initialize(), /settings snapshot unavailable/);
+
+  assert.deepEqual(requests, [{ category: 'settings-read', variant: 'snapshot', payload: {} }]);
+  assert.equal(bridge.isInitialized, false);
+});
+
+test('Given ConfigBridge initialization When MAIN exposes a settings snapshot Result Then it sends only the exact typed request and caches its Result value', async () => {
+  const requests = [];
+  const { ConfigBridge } = await loadConfigModules({
+    async sendMessage(message) {
+      requests.push(clone(message));
+      return { ok: true, value: { 'subtitle.primaryLanguage': 'zh-Hant' } };
+    },
+    onMessage() { return () => {}; }
+  });
+  const bridge = new ConfigBridge();
+
+  await bridge.initialize();
+
+  assert.deepEqual(requests, [{ category: 'settings-read', variant: 'snapshot', payload: {} }]);
+  assert.equal(bridge.get('subtitle.primaryLanguage'), 'zh-Hant');
+});
+
+test('Given a closed snapshot client When ConfigBridge initializes Then it accepts only its canonical Result, disposes the client, and never invokes generic initialization messaging', async () => {
+  const notifications = new Set();
+  let genericCalls = 0;
+  let disposals = 0;
+  const client = {
+    async read() {
+      return { ok: true, value: { 'subtitle.primaryLanguage': 'zh-Hant', isEnabled: true } };
+    },
+    dispose() {
+      disposals += 1;
+    }
+  };
+  const { ConfigBridge } = await loadConfigModules({
+    async sendMessage() {
+      genericCalls += 1;
+      throw new Error('generic initialization must stay unused');
+    },
+    onMessage(callback) {
+      notifications.add(callback);
+      return () => notifications.delete(callback);
+    }
+  }, () => client);
+  const bridge = new ConfigBridge({ createSettingsSnapshotClient: () => client });
+
+  await bridge.initialize();
+
+  assert.equal(genericCalls, 0);
+  assert.equal(disposals, 1);
+  assert.equal(bridge.get('subtitle.primaryLanguage'), 'zh-Hant');
+  assert.equal(bridge.get('isEnabled'), true);
+  assert.equal(notifications.size, 1);
+});
+
+test('Given raw, legacy, malformed, or authority-bearing snapshot client values When ConfigBridge initializes Then it rejects safely without caching or subscribing', async () => {
+  const invalidResults = [
+    { 'subtitle.primaryLanguage': 'zh-Hant' },
+    { success: true, config: { 'subtitle.primaryLanguage': 'zh-Hant' } },
+    { ok: true, value: { 'subtitle.primaryLanguage': 'zh-Hant' }, extra: true },
+    { ok: true, value: { jwt: 'private-token' } },
+    { ok: false, error: { kind: 'disconnected', code: 'private-secret', retryable: true } }
+  ];
+
+  for (const result of invalidResults) {
+    let disposals = 0;
+    let subscriptions = 0;
+    const client = { async read() { return result; }, dispose() { disposals += 1; } };
+    const { ConfigBridge } = await loadConfigModules({
+      async sendMessage() { throw new Error('generic initialization must stay unused'); },
+      onMessage() { subscriptions += 1; return () => {}; }
+    }, () => client);
+    const bridge = new ConfigBridge({ createSettingsSnapshotClient: () => client });
+
+    await assert.rejects(bridge.initialize(), /settings snapshot unavailable/);
+    assert.equal(bridge.isInitialized, false);
+    assert.deepEqual(bridge.cache.size, 0);
+    assert.equal(subscriptions, 0);
+    assert.equal(disposals, 1);
+  }
+});
+
+test('Given cleanup during a pending snapshot read When the client responds late Then ConfigBridge remains uninitialized, empty, and unsubscribed', async () => {
+  const pending = createDeferred();
+  let disposals = 0;
+  let subscriptions = 0;
+  const client = { read() { return pending.promise; }, dispose() { disposals += 1; } };
+  const { ConfigBridge } = await loadConfigModules({
+    async sendMessage() { throw new Error('generic initialization must stay unused'); },
+    onMessage() { subscriptions += 1; return () => {}; }
+  }, () => client);
+  const bridge = new ConfigBridge({ createSettingsSnapshotClient: () => client });
+  const initialization = bridge.initialize();
+
+  bridge.cleanup();
+  pending.resolve({ ok: true, value: { 'subtitle.primaryLanguage': 'zh-Hant' } });
+
+  await assert.rejects(initialization, /settings snapshot unavailable/);
+  assert.equal(disposals, 1);
+  assert.equal(bridge.isInitialized, false);
+  assert.equal(bridge.cache.size, 0);
+  assert.equal(subscriptions, 0);
+});
+
+test('Given malformed CONFIG_CHANGED messages When ConfigBridge receives them Then it validates before cache mutation or subscriber notification', async () => {
+  const notifications = new Set();
+  const client = {
+    async read() {
+      return { ok: true, value: { 'subtitle.primaryLanguage': 'zh-Hant' } };
+    },
+    dispose() {}
+  };
+  const { ConfigBridge } = await loadConfigModules({
+    async sendMessage() { throw new Error('generic initialization must stay unused'); },
+    onMessage(callback) {
+      notifications.add(callback);
+      return () => notifications.delete(callback);
+    }
+  }, () => client);
+  const bridge = new ConfigBridge({ createSettingsSnapshotClient: () => client });
+  await bridge.initialize();
+  const values = [];
+  bridge.subscribe('subtitle.primaryLanguage', (value) => values.push(value));
+
+  const accessor = { type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', oldValue: 'zh-Hant' };
+  Object.defineProperty(accessor, 'newValue', { enumerable: true, get() { throw new Error('must not read'); } });
+  for (const message of [
+    { type: 'CONFIG_CHANGED', key: 'unknown', newValue: true, oldValue: false },
+    { type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'not-a-language', oldValue: 'zh-Hant' },
+    { type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant', extra: true },
+    accessor
+  ]) {
+    for (const notify of notifications) notify(message);
+  }
+
+  assert.equal(bridge.get('subtitle.primaryLanguage'), 'zh-Hant');
+  assert.deepEqual(values, []);
+  for (const notify of notifications) {
+    notify({ type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant' });
+  }
+  assert.equal(bridge.get('subtitle.primaryLanguage'), 'ja');
+  assert.deepEqual(values, ['ja']);
 });
