@@ -5,7 +5,7 @@ const CONTRIBUTION_CATEGORY = 'contribution-intent';
 const PROFILE_STORE_KEY = 'backendProfiles';
 const ENVELOPE_KEYS = new Set(['category', 'variant', 'payload']);
 const AUTHORITY_KEYS = new Set([
-  'backendProfileId', 'operationId', 'endpoint', 'jwt', 'token', 'auth', 'credential', 'credentials',
+  'backendProfileId', 'beneficiaryUserID', 'profileId', 'profileID', 'operationId', 'endpoint', 'jwt', 'token', 'auth', 'authorization', 'credential', 'credentials',
   'destination', 'command', 'backgroundCommand', 'storage', 'storageKey', 'sync', 'syncConfig',
   'lifecycle', 'lifecycleConfig', 'config', 'backendProfiles', 'activeProfileId', 'profile', 'user', 'userId'
 ]);
@@ -22,7 +22,7 @@ const VARIANTS = Object.freeze({
   },
   'enqueue-replacement-event': {
     queueKey: 'replacementEventQueue',
-    keys: new Set(['translationID', 'contributorUserID', 'beneficiaryUserID', 'occurredAt'])
+    keys: new Set(['translationID', 'contributorUserID', 'occurredAt'])
   }
 });
 
@@ -109,7 +109,7 @@ function parseTranslation(payload) {
 
 function parseReplacementEvent(payload) {
   return isNonEmptyString(payload.translationID) && isNonEmptyString(payload.contributorUserID) &&
-    isNonEmptyString(payload.beneficiaryUserID) && isNonEmptyString(payload.occurredAt) ? payload : null;
+    isNonEmptyString(payload.occurredAt) ? payload : null;
 }
 
 export function parseContributionIntent(input) {
@@ -234,16 +234,16 @@ function queueTranslation(queue, payload, backendProfileId) {
   return { queue: append(queue, record), operationId };
 }
 
-function queueReplacementEvent(queue, payload, backendProfileId) {
+function queueReplacementEvent(queue, payload, profile) {
   const operationId = createOperationId();
   return {
     queue: append(queue, {
       id: operationId,
       operationId,
-      backendProfileId,
+      backendProfileId: profile.id,
       translationID: payload.translationID,
       contributorUserID: payload.contributorUserID,
-      beneficiaryUserID: payload.beneficiaryUserID,
+      beneficiaryUserID: profile.userId,
       occurredAt: payload.occurredAt,
       status: 'pending',
       createdAt: Date.now(),
@@ -465,7 +465,7 @@ export async function enqueueContribution(storage, input) {
       ? queueVote(queue, intent.payload, profile.id)
       : intent.variant === 'enqueue-translation'
         ? queueTranslation(queue, intent.payload, profile.id)
-        : queueReplacementEvent(queue, intent.payload, profile.id);
+        : queueReplacementEvent(queue, intent.payload, profile);
     await storage.set({ [queueKey]: queued.queue });
     return { status: 'queued-locally', operationId: queued.operationId };
   });

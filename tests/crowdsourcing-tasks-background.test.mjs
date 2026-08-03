@@ -44,20 +44,17 @@ test('Given a private subtitle query When it is sent over the content Port Then 
   }));
 });
 
-test('Given a pending subtitle query When the real content Port disconnects Then the caller rejects with the normalized Port code', async () => {
+test('Given a pending private subtitle query When the real content Port disconnects Then the caller rejects with the normalized Port code', async () => {
   const pendingSubtitle = deferred();
   const background = await loadBackgroundWithApi({
     async fetchSubtitles() { return pendingSubtitle.promise; }
   });
   const transport = await loadRealContentTransport(background);
-  const request = transport.sendLegacyMessage({
-    type: 'SUBTITLE_QUERY',
-    query: {
-      videoId: 'netflix-81234567',
-      timestamp: 12,
-      duration: 180,
-      context: { videoId: 'netflix-81234567', sessionId: 'watch-session-1', epoch: 7 }
-    }
+  const request = transport.requestPrivateSubtitle({
+    videoId: 'netflix-81234567',
+    timestamp: 12,
+    duration: 180,
+    context: { videoId: 'netflix-81234567', sessionId: 'watch-session-1', epoch: 7 }
   });
   await new Promise(setImmediate);
   transport.disconnectContentPort();
@@ -256,7 +253,7 @@ test('Given the real endscreen messaging transport When an authorized task query
   assert.equal(transport.portMessages.length, 0);
 });
 
-test('Given Netflix page code dispatches the public message event When it requests crowdsourcing tasks Then no privileged runtime request or sensitive response is exposed', async () => {
+test('Given Netflix page code dispatches a retired public task request When content receives it Then no privileged request runs and only a terminal denial returns', async () => {
   let apiCalls = 0;
   const background = await loadBackgroundWithApi({
     async fetchSubtitles() { throw new Error('unexpected subtitle call'); },
@@ -280,7 +277,10 @@ test('Given Netflix page code dispatches the public message event When it reques
   assert.equal(transport.runtimeMessages.length, 0);
   assert.equal(transport.portMessages.length, 0);
   assert.equal(apiCalls, 0);
-  assert.equal(responses.length, 0);
+  assert.deepEqual(plain(responses), [{
+    messageId: 'oracle-poc',
+    response: { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } }
+  }]);
 });
 
 test('Given the real endscreen messaging transport When the API returns no tasks Then the controller dispatches an empty batch without using the generic port', async () => {

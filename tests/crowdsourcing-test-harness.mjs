@@ -550,6 +550,19 @@ export async function loadRealContentTransport(background, sender = netflixSende
     EndscreenTaskController: controllerModule.namespace.EndscreenTaskController,
     sendMessage: taskClientModule.namespace.requestCrowdsourcingTasks,
     sendLegacyMessage: messagingModule.namespace.sendMessage,
+    requestPrivateSubtitle(query) {
+      const transport = transportsModule.namespace.createPortTransport({ connect: () => port });
+      transport.start();
+      return transport.request(transportsModule.namespace.createEnvelope({
+        requestId: 'private-subtitle-disconnect-test',
+        kind: 'subtitle-query',
+        payload: { type: 'SUBTITLE_QUERY', query }
+      })).then((result) => {
+        transport.stop();
+        if (!result.ok) throw transportsModule.namespace.toCompatibilityError(result);
+        return result.value;
+      });
+    },
     disconnectContentPort() { port.disconnect(); },
     portMessages,
     runtimeMessages,

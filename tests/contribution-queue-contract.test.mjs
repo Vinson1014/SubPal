@@ -40,6 +40,7 @@ function createStorage(initial, options = {}) {
     local: {
       async get(keys) {
         const requested = Array.isArray(keys) ? keys : [keys];
+        await options.beforeQueueRead?.({ keys: requested, values });
         return Object.fromEntries(requested.map((key) => [key, clone(values[key])]));
       },
       async set(updates) {
@@ -88,15 +89,15 @@ function translationIntent() {
   };
 }
 
-function replacementIntent() {
+function replacementIntent(extraPayload = {}) {
   return {
     category: 'contribution-intent',
     variant: 'enqueue-replacement-event',
     payload: {
       translationID: 'translation-1',
       contributorUserID: 'contributor-1',
-      beneficiaryUserID: 'beneficiary-1',
-      occurredAt: '2026-08-01T00:00:00.000Z'
+      occurredAt: '2026-08-01T00:00:00.000Z',
+      ...extraPayload
     }
   };
 }
@@ -206,4 +207,60 @@ test('Given the same translation is queued under different profiles When each pr
 
   assert.notEqual(first.operationId, second.operationId);
   assert.deepEqual(storage.data().voteQueue.map((record) => record.backendProfileId).sort(), ['profile-a', 'profile-b']);
+});
+
+test('Given an identity-free replacement event When it crosses the queue boundary Then the active profile atomically supplies both persisted identities', async () => {
+  const storage = createStorage({ backendProfiles: profileStore(), replacementEventQueue: [] });
+
+  const result = await enqueueContribution(storage.local, replacementIntent());
+
+  assert.equal(result.operationId, storage.data().replacementEventQueue[0].operationId);
+  assert.deepEqual(storage.data().replacementEventQueue.map(({ translationID, contributorUserID, occurredAt, backendProfileId, beneficiaryUserID }) => ({
+    translationID, contributorUserID, occurredAt, backendProfileId, beneficiaryUserID
+  })), [{
+    translationID: 'translation-1', contributorUserID: 'contributor-1', occurredAt: '2026-08-01T00:00:00.000Z',
+    backendProfileId: 'profile-a', beneficiaryUserID: 'user-a'
+  }]);
+});
+
+test('Given A is active when a replacement event begins and B becomes active at the queue read When the mutation persists Then both stored identities bind to B and a later switch cannot rewrite them', async () => {
+  let switched = false;
+  const storage = createStorage({ backendProfiles: profileStore('profile-a'), replacementEventQueue: [] }, {
+    async beforeQueueRead({ keys, values }) {
+      if (!switched && keys.includes('replacementEventQueue')) {
+        switched = true;
+        values.backendProfiles = profileStore('profile-b');
+      }
+    }
+  });
+
+  await enqueueContribution(storage.local, replacementIntent());
+  await storage.local.set({ backendProfiles: profileStore('profile-a') });
+
+  assert.equal(switched, true);
+  assert.deepEqual(storage.data().replacementEventQueue.map(({ backendProfileId, beneficiaryUserID }) => ({ backendProfileId, beneficiaryUserID })), [
+    { backendProfileId: 'profile-b', beneficiaryUserID: 'user-b' }
+  ]);
+});
+
+test('Given replacement intent caller authority or an unavailable profile When enqueue is requested Then the queue receives no write', async () => {
+  const storage = createStorage({ backendProfiles: profileStore(), replacementEventQueue: [] });
+  for (const authority of [
+    { beneficiaryUserID: 'forged-beneficiary' }, { userId: 'forged-user' }, { profile: 'forged-profile' },
+    { endpoint: 'https://forged.example.test' }, { jwt: 'forged-jwt' }, { credential: 'forged-credential' }
+  ]) {
+    await assert.rejects(enqueueContribution(storage.local, replacementIntent(authority)), /invalid contribution intent/i);
+  }
+  assert.equal(storage.data().replacementEventQueue.length, 0);
+
+  const unavailable = createStorage({
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'profile-a',
+      byId: { 'profile-a': { id: 'profile-a', endpoint: 'https://user:secret@a.example.test', userId: 'user-a', jwt: null } }
+    },
+    replacementEventQueue: []
+  });
+  await assert.rejects(enqueueContribution(unavailable.local, replacementIntent()), /active backend profile/i);
+  assert.equal(unavailable.data().replacementEventQueue.length, 0);
 });
