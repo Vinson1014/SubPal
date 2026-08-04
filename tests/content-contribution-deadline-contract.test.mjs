@@ -208,6 +208,79 @@ function createLinkedContributionPort(background, sent) {
   };
 }
 
+test('Given each approved MAIN enqueue intent When it crosses the linked private Port Then the canonical wire and persisted queue receipt agree', async (t) => {
+  const cases = [
+    {
+      variant: 'enqueue-vote',
+      queueKey: 'voteQueue',
+      payload: {
+        videoId: 'netflix-81234567', timestamp: 12.5, voteType: 'upvote',
+        translationID: 'translation-1', voteState: 'like'
+      }
+    },
+    {
+      variant: 'enqueue-translation',
+      queueKey: 'translationQueue',
+      payload: {
+        videoId: 'netflix-81234567', timestamp: 12.5, original: 'Original subtitle',
+        translation: 'Improved subtitle', languageCode: 'zh-TW', submissionReason: 'quality'
+      }
+    },
+    {
+      variant: 'enqueue-replacement-event',
+      queueKey: 'replacementEventQueue',
+      payload: {
+        translationID: 'translation-1', contributorUserID: 'contributor-1',
+        occurredAt: '2026-08-01T00:00:00.000Z'
+      }
+    }
+  ];
+  const queueKeys = ['voteQueue', 'translationQueue', 'replacementEventQueue'];
+
+  for (const { variant, queueKey, payload } of cases) {
+    await t.test(`${variant} -> ${queueKey}`, async () => {
+      const sent = [];
+      const storage = {
+        backendProfiles: {
+          schemaVersion: 1,
+          activeProfileId: 'default',
+          byId: { default: { id: 'default', endpoint: 'https://api.example.test', userId: 'user-1', jwt: null } }
+        },
+        voteQueue: [],
+        translationQueue: [],
+        replacementEventQueue: []
+      };
+      const background = await loadBackgroundWithApi({}, { realContributionQueue: true, storage });
+      const harness = await loadContentContributionHarness({
+        connect: () => createLinkedContributionPort(background, sent)
+      });
+
+      const result = plain(await harness.dispatch(`integrated-${variant}`, {
+        category: 'contribution-intent', variant, payload
+      }));
+      const record = storage[queueKey][0];
+
+      assert.deepEqual(result, {
+        ok: true,
+        value: { status: 'queued-locally', operationId: record?.operationId }
+      });
+      assert.deepEqual(sent.map(({ message }) => message), [{
+        type: 'CONTRIBUTION_ENQUEUE',
+        intent: { category: 'contribution-intent', variant, payload }
+      }]);
+      assert.equal(typeof record.operationId, 'string');
+      assert.equal(record.operationId.length > 0, true);
+      assert.equal(result.value.operationId, record.operationId);
+      assert.equal(record.status, 'pending');
+      assert.deepEqual(Object.fromEntries(queueKeys.map((key) => [key, storage[key].length])), {
+        voteQueue: queueKey === 'voteQueue' ? 1 : 0,
+        translationQueue: queueKey === 'translationQueue' ? 1 : 0,
+        replacementEventQueue: queueKey === 'replacementEventQueue' ? 1 : 0
+      });
+    });
+  }
+});
+
 test('Given a content contribution uses the private Port When persistence times out and reconnects Then Contributions owns the deadline and later work stays independent', async () => {
   const harness = await loadContentContributionHarness();
   const expired = harness.dispatch('contribution-expired');

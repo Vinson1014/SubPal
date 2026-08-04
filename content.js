@@ -352,7 +352,10 @@
           return transport.request(createEnvelope({
             requestId,
             kind: 'contribution-enqueue',
-            payload: { type: 'CONTRIBUTION_ENQUEUE', intent }
+            payload: {
+              type: 'CONTRIBUTION_ENQUEUE',
+              intent: { category: 'contribution-intent', variant: intent.variant, payload: intent.payload }
+            }
           }), options);
         },
         readProjection(projection, options) {
