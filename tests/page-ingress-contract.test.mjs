@@ -57,6 +57,7 @@ async function loadSettingsModule(context) {
       await schema.link(() => { throw new Error('config-schema.js must not import dependencies'); });
       await settings.link((specifier) => {
         if (specifier === './result.js') return result;
+        if (specifier === './private-transports.js') return createPrivateTransportModule(context);
         if (specifier === '../config/config-schema.js') return schema;
         throw new Error(`Unexpected settings dependency: ${specifier}`);
       });
@@ -108,10 +109,12 @@ async function loadContributionsModule(context) {
     sourceOrNull('content/system/capabilities/contributions.js')
   ]);
   const result = new vm.SourceTextModule(resultSource, { context });
+  const privateTransports = await createPrivateTransportModule(context);
   const contributions = new vm.SourceTextModule(contributionsSource, { context });
   await result.link(() => { throw new Error('result.js has no dependencies'); });
   await contributions.link((specifier) => {
     if (specifier === './result.js') return result;
+    if (specifier === './private-transports.js') return privateTransports;
     throw new Error(`Unexpected Contributions dependency: ${specifier}`);
   });
   await result.evaluate(); await contributions.evaluate();

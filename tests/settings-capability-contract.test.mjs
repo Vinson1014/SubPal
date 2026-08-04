@@ -82,16 +82,23 @@ async function loadSettings() {
     context,
     identifier: 'content/system/capabilities/settings.js'
   });
+  const transports = new vm.SyntheticModule(['createDomTransport', 'createEnvelope'], function initializeTransports() {
+    this.setExport('createDomTransport', () => ({ request: async () => ({ ok: false, error: { kind: 'disconnected', code: 'test', retryable: true } }) }));
+    this.setExport('createEnvelope', (value) => value);
+  }, { context, identifier: 'content/system/capabilities/private-transports.js' });
 
   await result.link(() => { throw new Error('result.js has no dependencies'); });
   await schema.link(() => { throw new Error('config-schema.js has no dependencies'); });
+  await transports.link(() => { throw new Error('private transports have no dependencies'); });
   await settings.link((specifier) => {
     if (specifier === './result.js') return result;
+    if (specifier === './private-transports.js') return transports;
     if (specifier === '../config/config-schema.js') return schema;
     throw new Error(`Unexpected settings dependency: ${specifier}`);
   });
   await result.evaluate();
   await schema.evaluate();
+  await transports.evaluate();
   await settings.evaluate();
   return settings.namespace.createSettings;
 }

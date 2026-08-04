@@ -86,7 +86,7 @@ async function loadClient() {
     throw new Error(`Unexpected snapshot client dependency: ${specifier}`);
   });
   await Promise.all([result.evaluate(), diagnostics.evaluate(), transports.evaluate(), schema.evaluate(), client.evaluate()]);
-  return client.namespace.createSettingsSnapshotClient;
+  return client.namespace;
 }
 
 function createContentRoute() {
@@ -124,7 +124,7 @@ function invalidSnapshot() {
 }
 
 test('Given the private content route When a settings client reads Then it exposes only read/dispose, sends the exact request, and returns a validated non-identity snapshot', async () => {
-  const createSettingsSnapshotClient = await loadClient();
+  const { createSettingsSnapshotClient } = await loadClient();
   const clock = createClock();
   const route = createContentRoute();
   const client = createSettingsSnapshotClient(clientOptions(route, clock));
@@ -149,7 +149,7 @@ test('Given the private content route When a settings client reads Then it expos
 });
 
 test('Given raw, legacy, malformed, authority-bearing, symbolic, accessor, or invalid schema replies When a settings client reads Then each becomes one normalized malformed Result without getter reads', async () => {
-  const createSettingsSnapshotClient = await loadClient();
+  const { createSettingsSnapshotClient } = await loadClient();
   let accessorReads = 0;
   const accessorSnapshot = {};
   Object.defineProperty(accessorSnapshot, 'subtitle.primaryLanguage', {
@@ -194,7 +194,7 @@ test('Given raw, legacy, malformed, authority-bearing, symbolic, accessor, or in
 });
 
 test('Given a timeout or disposed in-flight read When content replies late Then the client stays terminal, removes listeners/timers, and a new client can resume independently', async () => {
-  const createSettingsSnapshotClient = await loadClient();
+  const { createSettingsSnapshotClient } = await loadClient();
   const clock = createClock();
   const route = createContentRoute();
   const client = createSettingsSnapshotClient(clientOptions(route, clock));
@@ -227,4 +227,64 @@ test('Given a timeout or disposed in-flight read When content replies late Then 
     resumedRoute.respond(event.detail.messageId, { ok: true, value: { isEnabled: false } });
   });
   assert.deepEqual(plain(await resumed.read()), { ok: true, value: { isEnabled: false } });
+});
+
+test('Given strict live settings notifications When valid and hostile events arrive Then only exact cloneable CONFIG_CHANGED payloads call the subscriber without getters', async () => {
+  const { subscribeSettingsChanges } = await loadClient();
+  assert.equal(typeof subscribeSettingsChanges, 'function', 'settings notification seam is missing');
+  const events = createEvents();
+  const values = [];
+  let getterReads = 0;
+  const accessor = { type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', oldValue: 'zh-Hant' };
+  Object.defineProperty(accessor, 'newValue', { enumerable: true, get() { getterReads += 1; return 'ja'; } });
+  const symbolic = { type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant' };
+  symbolic[Symbol('identity')] = true;
+  const inherited = Object.create({ type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant' });
+  subscribeSettingsChanges((change) => values.push(change), { window: events });
+
+  for (const message of [
+    { type: 'CONFIG_CHANGED', key: 'unknown', newValue: true, oldValue: false },
+    { type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant', extra: true },
+    accessor, symbolic, inherited, new Proxy({ type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant' }, {})
+  ]) {
+    events.emit('messageFromContentScript', { detail: { message } });
+  }
+  events.emit('messageFromContentScript', { detail: { message: { type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant' } } });
+
+  assert.deepEqual(plain(values), [{ key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant' }]);
+  assert.equal(getterReads, 0);
+});
+
+test('Given a first-write settings notification When oldValue is own enumerable undefined Then the subscriber receives it once', async () => {
+  const { subscribeSettingsChanges } = await loadClient();
+  const events = createEvents();
+  const values = [];
+  subscribeSettingsChanges((change) => values.push(change), { window: events });
+
+  events.emit('messageFromContentScript', {
+    detail: { message: { type: 'CONFIG_CHANGED', key: 'isEnabled', newValue: true, oldValue: undefined } }
+  });
+
+  assert.equal(values.length, 1);
+  assert.equal(values[0].key, 'isEnabled');
+  assert.equal(values[0].newValue, true);
+  assert.equal(Object.hasOwn(values[0], 'oldValue'), true);
+  assert.equal(values[0].oldValue, undefined);
+});
+
+test('Given two settings subscriptions When one disposer repeats Then it removes only its own listener once', async () => {
+  const { subscribeSettingsChanges } = await loadClient();
+  const events = createEvents();
+  const first = [];
+  const second = [];
+  const disposeFirst = subscribeSettingsChanges((change) => first.push(change), { window: events });
+  subscribeSettingsChanges((change) => second.push(change), { window: events });
+
+  assert.equal(events.count('messageFromContentScript'), 2);
+  disposeFirst();
+  disposeFirst();
+  assert.equal(events.count('messageFromContentScript'), 1);
+  events.emit('messageFromContentScript', { detail: { message: { type: 'CONFIG_CHANGED', key: 'isEnabled', newValue: false, oldValue: true } } });
+  assert.deepEqual(first, []);
+  assert.deepEqual(plain(second), [{ key: 'isEnabled', newValue: false, oldValue: true }]);
 });

@@ -1,4 +1,5 @@
-import { fail, ok } from './result.js';
+import { fail, isResult, ok } from './result.js';
+import { createDomTransport, createEnvelope } from './private-transports.js';
 import { validateConfigValue } from '../config/config-schema.js';
 
 const SETTINGS_CATEGORY = 'settings-change';
@@ -156,6 +157,90 @@ export function createSettings({ write, setTimeout = globalThis.setTimeout, clea
           () => settle(fail('domain-rejected', 'settings-write-failed', true))
         );
       });
+    }
+  });
+}
+
+function pageChangeFailure(response) {
+  if (!isResult(response)) return fail('domain-rejected', 'settings-change-response-invalid', false);
+  if (response.ok) return null;
+  if (response.error.kind === 'timeout') return fail('timeout', 'settings-change-timeout', true);
+  if (response.error.kind === 'disconnected') return fail('disconnected', 'settings-change-disconnected', true);
+  if (response.error.kind === 'cancelled') return fail('cancelled', 'settings-change-cancelled', false);
+  if (response.error.kind === 'domain-rejected' && response.error.code === 'settings-validation-failed' && !response.error.retryable) {
+    return fail('domain-rejected', 'settings-validation-failed', false);
+  }
+  if (response.error.kind === 'domain-rejected' && response.error.code === 'settings-write-failed' && response.error.retryable) {
+    return fail('domain-rejected', 'settings-write-failed', true);
+  }
+  return fail('domain-rejected', 'settings-change-response-invalid', false);
+}
+
+function requestFromSnapshot(snapshot) {
+  if (snapshot.variant === 'subtitle-languages') {
+    return {
+      category: SETTINGS_CATEGORY,
+      variant: snapshot.variant,
+      payload: { primaryLanguage: snapshot.primaryLanguage, secondaryLanguage: snapshot.secondaryLanguage }
+    };
+  }
+  return { category: SETTINGS_CATEGORY, variant: snapshot.variant, payload: { enabled: snapshot.enabled } };
+}
+
+function normalizePageChangeResponse(response, expected) {
+  const failure = pageChangeFailure(response);
+  if (failure) return failure;
+  const keys = expected.variant === 'subtitle-languages'
+    ? new Set(['variant', 'primaryLanguage', 'secondaryLanguage'])
+    : new Set(['variant', 'enabled']);
+  const acknowledgement = strictOwnRecord(response.value, keys, keys);
+  if (acknowledgement.status !== 'ok' || acknowledgement.value.variant !== expected.variant) {
+    return fail('domain-rejected', 'settings-change-response-invalid', false);
+  }
+  for (const key of keys) {
+    if (acknowledgement.value[key] !== expected[key]) return fail('domain-rejected', 'settings-change-response-invalid', false);
+  }
+  return ok(expected);
+}
+
+function createRequestId(window) {
+  return window.crypto?.randomUUID?.() ?? `page-settings-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+export function createPageSettings({
+  window = globalThis.window,
+  createRequestId: requestId = () => createRequestId(window),
+  setTimeout = globalThis.setTimeout,
+  clearTimeout = globalThis.clearTimeout
+} = {}) {
+  const transport = createDomTransport({
+    window,
+    makeEvent: (type, detail) => new CustomEvent(type, { detail }),
+    strictResult: true,
+    setTimeout,
+    clearTimeout
+  });
+  return Object.freeze({
+    change(input, cancellation) {
+      const parsed = parseSettingsChange(input);
+      if (!parsed.ok || parsed.value.uncloneable) {
+        return Promise.resolve(parsed.ok ? fail('invalid', 'settings-change', false) : parsed);
+      }
+      let id;
+      try {
+        id = requestId();
+      } catch {
+        return Promise.resolve(fail('disconnected', 'settings-change-disconnected', true));
+      }
+      if (typeof id !== 'string' || !id) return Promise.resolve(fail('disconnected', 'settings-change-disconnected', true));
+      const request = requestFromSnapshot(parsed.value.snapshot);
+      const signal = cancellation?.signal ?? cancellation;
+      return transport.request(createEnvelope({ requestId: id, kind: SETTINGS_CATEGORY, payload: request }), {
+        deadlineMs: SETTINGS_DEADLINE_MS,
+        signal,
+        wire: { messageId: id, message: request }
+      }).then((response) => normalizePageChangeResponse(response, parsed.value.snapshot), () =>
+        fail('disconnected', 'settings-change-disconnected', true));
     }
   });
 }

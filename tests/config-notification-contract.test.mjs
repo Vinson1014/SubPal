@@ -134,9 +134,10 @@ async function loadConfigModules(transport, createSnapshotClient = () => ({
   await messagingModule.link(() => {});
   await messagingModule.evaluate();
   const settingsSnapshotModule = new vm.SyntheticModule(
-    ['createSettingsSnapshotClient', 'validateSettingsSnapshotResult'],
+    ['createSettingsSnapshotClient', 'subscribeSettingsChanges', 'validateSettingsSnapshotResult'],
     function initializeSettingsSnapshotExports() {
       this.setExport('createSettingsSnapshotClient', createSnapshotClient);
+      this.setExport('subscribeSettingsChanges', transport.subscribeSettingsChanges ?? transport.onMessage);
       this.setExport('validateSettingsSnapshotResult', (result) => {
         if (!result || typeof result !== 'object' || Object.keys(result).length !== 2 || typeof result.ok !== 'boolean') {
           return { ok: false, error: { kind: 'invalid', code: 'settings-snapshot-malformed', retryable: false } };
@@ -172,12 +173,10 @@ async function loadConfigModules(transport, createSnapshotClient = () => ({
     return module;
   }
 
-  const [configManagerModule, configBridgeModule, configSchemaModule, settingsModule] = await Promise.all([
-    loadModule(configManagerUrl),
-    loadModule(configBridgeUrl),
-    loadModule(configSchemaUrl),
-    loadModule(settingsUrl)
-  ]);
+  const configManagerModule = await loadModule(configManagerUrl);
+  const configBridgeModule = await loadModule(configBridgeUrl);
+  const configSchemaModule = await loadModule(configSchemaUrl);
+  const settingsModule = await loadModule(settingsUrl);
   await Promise.all([
     configManagerModule.evaluate(),
     configBridgeModule.evaluate(),
@@ -219,6 +218,11 @@ async function createConfigHarness() {
     onMessage(callback) {
       messages.add(callback);
       return () => messages.delete(callback);
+    },
+    subscribeSettingsChanges(callback) {
+      const listener = (message) => callback({ key: message.key, newValue: message.newValue, oldValue: message.oldValue });
+      messages.add(listener);
+      return () => messages.delete(listener);
     }
   };
   const { ConfigManager, ConfigBridge, createSettings, getAllConfigKeys } = await loadConfigModules(transport);
@@ -236,7 +240,18 @@ async function createConfigHarness() {
     }
   });
 
-  const bridge = new ConfigBridge();
+  const bridge = new ConfigBridge({
+    createPageSettings: () => ({
+      async change(input) {
+        try {
+          return { ok: true, value: await transport.sendMessage(input) };
+        } catch (error) {
+          return { ok: false, error: { kind: error.kind, code: error.code, retryable: error.retryable } };
+        }
+      }
+    }),
+    subscribeSettingsChanges: transport.subscribeSettingsChanges
+  });
   await bridge.initialize();
   return { bridge, manager, requests, storage };
 }
@@ -605,7 +620,10 @@ test('Given a retired generic ConfigBridge response When initialization runs The
     },
     onMessage() { return () => {}; }
   });
-  const bridge = new ConfigBridge();
+  const bridge = new ConfigBridge({
+    createPageSettings: () => ({ change: async () => ({ ok: true, value: {} }) }),
+    subscribeSettingsChanges: () => () => {}
+  });
 
   await assert.rejects(bridge.initialize(), /settings snapshot unavailable/);
 
@@ -622,7 +640,10 @@ test('Given ConfigBridge initialization When MAIN exposes a settings snapshot Re
     },
     onMessage() { return () => {}; }
   });
-  const bridge = new ConfigBridge();
+  const bridge = new ConfigBridge({
+    createPageSettings: () => ({ change: async () => ({ ok: true, value: {} }) }),
+    subscribeSettingsChanges: () => () => {}
+  });
 
   await bridge.initialize();
 
@@ -652,7 +673,14 @@ test('Given a closed snapshot client When ConfigBridge initializes Then it accep
       return () => notifications.delete(callback);
     }
   }, () => client);
-  const bridge = new ConfigBridge({ createSettingsSnapshotClient: () => client });
+  const bridge = new ConfigBridge({
+    createPageSettings: () => ({ change: async () => ({ ok: true, value: {} }) }),
+    createSettingsSnapshotClient: () => client,
+    subscribeSettingsChanges(callback) {
+      notifications.add(callback);
+      return () => notifications.delete(callback);
+    }
+  });
 
   await bridge.initialize();
 
@@ -712,7 +740,7 @@ test('Given cleanup during a pending snapshot read When the client responds late
   assert.equal(subscriptions, 0);
 });
 
-test('Given malformed CONFIG_CHANGED messages When ConfigBridge receives them Then it validates before cache mutation or subscriber notification', async () => {
+test('Given a validated typed settings callback When ConfigBridge receives it Then it updates cache and subscribers', async () => {
   const notifications = new Set();
   const client = {
     async read() {
@@ -727,26 +755,20 @@ test('Given malformed CONFIG_CHANGED messages When ConfigBridge receives them Th
       return () => notifications.delete(callback);
     }
   }, () => client);
-  const bridge = new ConfigBridge({ createSettingsSnapshotClient: () => client });
+  const bridge = new ConfigBridge({
+    createPageSettings: () => ({ change: async () => ({ ok: true, value: {} }) }),
+    createSettingsSnapshotClient: () => client,
+    subscribeSettingsChanges(callback) {
+      notifications.add(callback);
+      return () => notifications.delete(callback);
+    }
+  });
   await bridge.initialize();
   const values = [];
   bridge.subscribe('subtitle.primaryLanguage', (value) => values.push(value));
 
-  const accessor = { type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', oldValue: 'zh-Hant' };
-  Object.defineProperty(accessor, 'newValue', { enumerable: true, get() { throw new Error('must not read'); } });
-  for (const message of [
-    { type: 'CONFIG_CHANGED', key: 'unknown', newValue: true, oldValue: false },
-    { type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'not-a-language', oldValue: 'zh-Hant' },
-    { type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant', extra: true },
-    accessor
-  ]) {
-    for (const notify of notifications) notify(message);
-  }
-
-  assert.equal(bridge.get('subtitle.primaryLanguage'), 'zh-Hant');
-  assert.deepEqual(values, []);
   for (const notify of notifications) {
-    notify({ type: 'CONFIG_CHANGED', key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant' });
+    notify({ key: 'subtitle.primaryLanguage', newValue: 'ja', oldValue: 'zh-Hant' });
   }
   assert.equal(bridge.get('subtitle.primaryLanguage'), 'ja');
   assert.deepEqual(values, ['ja']);

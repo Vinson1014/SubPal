@@ -7,6 +7,8 @@ const INVALID_TREE = Symbol('invalid-settings-snapshot');
 const OBJECT_SOURCE = Function.prototype.toString.call(Object);
 const REQUEST = Object.freeze({ category: 'settings-read', variant: 'snapshot', payload: Object.freeze({}) });
 const RESPONSE_KEYS = new Set(['messageId', 'response']);
+const NOTIFICATION_KEYS = new Set(['type', 'key', 'newValue', 'oldValue']);
+const NOTIFICATION_DETAIL_KEYS = new Set(['message']);
 const RESULT_KINDS = new Set(['cancelled', 'disconnected', 'domain-rejected', 'forbidden', 'invalid', 'stale-context', 'timeout']);
 
 function malformed() {
@@ -130,6 +132,58 @@ export function validateSettingsSnapshotResult(result) {
   const copy = materializeOwnData(result);
   if (copy === INVALID_TREE || !isCloneable(result)) return malformed();
   return normalizeResponse(copy);
+}
+
+function parseNotificationChange(value) {
+  const copy = materializeOwnData(value);
+  if (!copy || copy === INVALID_TREE || Array.isArray(copy) || !isCloneable(value) ||
+    (Object.getPrototypeOf(copy) !== null && !isOrdinaryObjectPrototype(Object.getPrototypeOf(copy)))) {
+    return null;
+  }
+  const keys = Object.getOwnPropertyNames(copy);
+  if (keys.length !== NOTIFICATION_KEYS.size || keys.some((key) => !NOTIFICATION_KEYS.has(key))) return null;
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(copy, key);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return null;
+  }
+  if (copy.type !== 'CONFIG_CHANGED' || typeof copy.key !== 'string') return null;
+  const next = validateSettingsSnapshotResult({ ok: true, value: { [copy.key]: copy.newValue } });
+  const previous = copy.oldValue === undefined
+    ? undefined
+    : validateSettingsSnapshotResult({ ok: true, value: { [copy.key]: copy.oldValue } });
+  return next.ok && (!previous || previous.ok)
+    ? { key: copy.key, newValue: next.value[copy.key], oldValue: previous?.value[copy.key] }
+    : null;
+}
+
+function parseNotificationEvent(event) {
+  try {
+    const detail = materializeOwnData(event?.detail);
+    if (!detail || detail === INVALID_TREE || Array.isArray(detail) || !isCloneable(event?.detail) ||
+      (Object.getPrototypeOf(detail) !== null && !isOrdinaryObjectPrototype(Object.getPrototypeOf(detail)))) {
+      return null;
+    }
+    const keys = Object.getOwnPropertyNames(detail);
+    if (keys.length !== NOTIFICATION_DETAIL_KEYS.size || keys[0] !== 'message') return null;
+    const descriptor = Object.getOwnPropertyDescriptor(detail, 'message');
+    return descriptor && Object.hasOwn(descriptor, 'value') && descriptor.enumerable ? parseNotificationChange(descriptor.value) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function subscribeSettingsChanges(callback, { window = globalThis.window } = {}) {
+  const listener = (event) => {
+    const change = parseNotificationEvent(event);
+    if (change) callback(change);
+  };
+  window.addEventListener('messageFromContentScript', listener);
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    window.removeEventListener('messageFromContentScript', listener);
+  };
 }
 
 function createRequestId() {

@@ -13,36 +13,8 @@
  * @module config-bridge
  */
 
-import { sendMessage, onMessage } from '../messaging.js';
-import { createSettingsSnapshotClient, validateSettingsSnapshotResult } from '../capabilities/settings-snapshot.js';
-
-const CONFIG_CHANGED_KEYS = new Set(['type', 'key', 'newValue', 'oldValue']);
-
-function parseConfigChange(message) {
-  try {
-    if (!message || typeof message !== 'object' || Array.isArray(message)) return null;
-    const keys = Object.getOwnPropertyNames(message);
-    if (Object.getOwnPropertySymbols(message).length !== 0 || keys.length !== CONFIG_CHANGED_KEYS.size ||
-        keys.some((key) => !CONFIG_CHANGED_KEYS.has(key))) return null;
-    const values = {};
-    for (const key of keys) {
-      const descriptor = Object.getOwnPropertyDescriptor(message, key);
-      if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return null;
-      values[key] = descriptor.value;
-    }
-    if (values.type !== 'CONFIG_CHANGED' || typeof values.key !== 'string') return null;
-    const next = validateSettingsSnapshotResult({ ok: true, value: { [values.key]: values.newValue } });
-    if (!next.ok) return null;
-    const previous = values.oldValue === undefined
-      ? undefined
-      : validateSettingsSnapshotResult({ ok: true, value: { [values.key]: values.oldValue } });
-    if (previous && !previous.ok) return null;
-    if (typeof structuredClone === 'function') structuredClone(message);
-    return { key: values.key, newValue: next.value[values.key], oldValue: previous?.value[values.key] };
-  } catch {
-    return null;
-  }
-}
+import { createPageSettings } from '../capabilities/settings.js';
+import { createSettingsSnapshotClient, subscribeSettingsChanges, validateSettingsSnapshotResult } from '../capabilities/settings-snapshot.js';
 
 /**
  * ConfigBridge 類
@@ -62,10 +34,12 @@ export class ConfigBridge {
     // 調試模式
     this.debug = options.debug || false;
 
-    // 消息監聽取消函數
-    this.unsubscribeMessage = null;
+    this.unsubscribeSettingsChanges = null;
 
+    this.createPageSettings = options.createPageSettings || createPageSettings;
     this.createSettingsSnapshotClient = options.createSettingsSnapshotClient || createSettingsSnapshotClient;
+    this.subscribeSettingsChanges = options.subscribeSettingsChanges || subscribeSettingsChanges;
+    this.pageSettings = null;
     this.settingsSnapshotClient = null;
     this.initializationPromise = null;
     this.lifecycleGeneration = 0;
@@ -95,9 +69,9 @@ export class ConfigBridge {
         if (lifecycle !== this.lifecycleGeneration || !result.ok) throw new Error('settings snapshot unavailable');
         for (const [key, value] of Object.entries(result.value)) this.cache.set(key, value);
         if (lifecycle !== this.lifecycleGeneration) throw new Error('settings snapshot unavailable');
-        this.unsubscribeMessage = onMessage((message) => {
-          const change = parseConfigChange(message);
-          if (change) this.handleConfigChange(change.key, change.newValue, change.oldValue);
+        this.pageSettings = this.createPageSettings();
+        this.unsubscribeSettingsChanges = this.subscribeSettingsChanges((change) => {
+          this.handleConfigChange(change.key, change.newValue, change.oldValue);
         });
         if (lifecycle !== this.lifecycleGeneration) throw new Error('settings snapshot unavailable');
         this.isInitialized = true;
@@ -106,8 +80,9 @@ export class ConfigBridge {
       } catch {
         if (lifecycle === this.lifecycleGeneration) {
           this.cache.clear();
-          this.unsubscribeMessage?.();
-          this.unsubscribeMessage = null;
+          this.unsubscribeSettingsChanges?.();
+          this.unsubscribeSettingsChanges = null;
+          this.pageSettings = null;
         }
         this.error('ConfigBridge 初始化失敗');
         throw new Error('settings snapshot unavailable');
@@ -187,13 +162,14 @@ export class ConfigBridge {
     this.ensureInitialized();
 
     try {
-      const result = await sendMessage({
+      const result = await this.pageSettings.change({
         category: 'settings-change',
         variant: 'subtitle-languages',
         payload: { primaryLanguage, secondaryLanguage }
       });
+      if (!result.ok) throw Object.assign(new Error(result.error.code), result.error);
       this.log(`字幕語言已更新: 主要=${primaryLanguage}, 次要=${secondaryLanguage}`);
-      return result;
+      return result.value;
     } catch (error) {
       this.error('設置字幕語言失敗:', error);
       throw error;
@@ -204,13 +180,14 @@ export class ConfigBridge {
     this.ensureInitialized();
 
     try {
-      const result = await sendMessage({
+      const result = await this.pageSettings.change({
         category: 'settings-change',
         variant: 'dual-subtitles',
         payload: { enabled }
       });
+      if (!result.ok) throw Object.assign(new Error(result.error.code), result.error);
       this.log(`雙語字幕已更新: ${enabled}`);
-      return result;
+      return result.value;
     } catch (error) {
       this.error('設置雙語字幕失敗:', error);
       throw error;
@@ -355,11 +332,11 @@ export class ConfigBridge {
     this.settingsSnapshotClient?.dispose();
     this.settingsSnapshotClient = null;
 
-    // 取消消息監聽
-    if (this.unsubscribeMessage) {
-      this.unsubscribeMessage();
-      this.unsubscribeMessage = null;
+    if (this.unsubscribeSettingsChanges) {
+      this.unsubscribeSettingsChanges();
+      this.unsubscribeSettingsChanges = null;
     }
+    this.pageSettings = null;
 
     // 清除訂閱者
     this.subscribers.clear();
