@@ -232,7 +232,7 @@ function isTrustedContributionPort(port) {
       sender?.id === chrome.runtime.id &&
       Number.isInteger(tab?.id) && tab.id >= 0 &&
       isHttpsNetflixUrl(sender.url) && isHttpsNetflixUrl(tab.url) &&
-      sender.url === tab.url && sender.origin === senderUrl.origin && senderUrl.origin === tabUrl.origin;
+      sender.origin === senderUrl.origin && senderUrl.origin === tabUrl.origin;
   } catch {
     return false;
   }

@@ -11,11 +11,12 @@ function intent() {
   };
 }
 
-async function send(background, request, sender = netflixSender(), name = 'subtitle-assistant-channel') {
+async function send(background, request, sender = netflixSender(), name = 'subtitle-assistant-channel', beforeSend = () => {}) {
   const { port, send, sentMessages } = createPort();
   port.name = name;
   port.sender = sender;
   background.connect(port);
+  beforeSend(port);
   send({ messageId: 'contribution-1', message: request });
   return await waitForResponse(sentMessages, 'contribution-1');
 }
@@ -39,7 +40,7 @@ test('Given an authorized Netflix content Port When it submits the exact private
   assert.deepEqual(calls, [intent()]);
 });
 
-test('Given malformed or authority-bearing requests and untrusted Ports When contribution commands arrive Then they have zero queue side effects', async () => {
+test('Given malformed SPA-drift requests or hostile Ports When contribution commands arrive Then they reject without queue or migration effects', async () => {
   let calls = 0;
   const background = await loadBackgroundWithApi({}, {
     contributionQueue: {
@@ -47,16 +48,29 @@ test('Given malformed or authority-bearing requests and untrusted Ports When con
       async enqueueContribution() { calls += 1; return { status: 'queued-locally', operationId: 'unexpected' }; }
     }
   });
+  const baseline = background.storageCalls.length;
+  const invalid = { ok: false, error: { kind: 'invalid', code: 'contribution-input', retryable: false } };
 
-  assert.deepEqual(JSON.parse(JSON.stringify(await send(background, { type: 'CONTRIBUTION_ENQUEUE', intent: { ...intent(), backendProfileId: 'forged' } }))), {
-    ok: false,
-    error: { kind: 'invalid', code: 'contribution-input', retryable: false }
-  });
-  assert.deepEqual(JSON.parse(JSON.stringify(await send(background, { type: 'CONTRIBUTION_ENQUEUE', intent: intent() }, netflixSender({ id: 'other-extension' })))), {
-    ok: false,
-    error: { kind: 'forbidden', code: 'contribution-port-access', retryable: false }
-  });
+  assert.deepEqual(JSON.parse(JSON.stringify(await send(background, { type: 'CONTRIBUTION_ENQUEUE', intent: { ...intent(), backendProfileId: 'forged' } }))), invalid);
+  for (const sender of [
+    netflixSender({
+      tab: { id: 7, url: 'https://www.netflix.com/watch/82147770' },
+      url: 'https://www.netflix.com/watch/81664909',
+      origin: 'https://www.netflix.com'
+    }),
+    netflixSender({
+      tab: { id: 7, url: 'https://www.netflix.com/watch/82147770?current=1' },
+      url: 'https://www.netflix.com/watch/82147770?stale=1',
+      origin: 'https://www.netflix.com'
+    })
+  ]) {
+    assert.deepEqual(JSON.parse(JSON.stringify(await send(background, {
+      type: 'CONTRIBUTION_ENQUEUE', intent: { ...intent(), backendProfileId: 'forged' }
+    }, sender))), invalid);
+  }
   assert.equal(calls, 0);
+  assert.equal(background.storageCalls.length, baseline);
+  assert.equal(background.profileMigrationCalls, 0);
 });
 
 test('Given a retired generic contribution command When it reaches the background Port Then it remains unhandled without owner, storage, or migration effects', async () => {
@@ -139,15 +153,19 @@ test('Given hostile contribution envelopes or non-canonical Ports When closed re
   }
 
   const forbidden = { ok: false, error: { kind: 'forbidden', code: 'contribution-port-access', retryable: false } };
-  for (const [sender, name] of [
+  for (const [sender, name, beforeSend] of [
     [netflixSender({ id: 'other-extension' }), 'subtitle-assistant-channel'],
-    [netflixSender({ tab: { id: 7, url: 'https://www.netflix.com/watch/other' } }), 'subtitle-assistant-channel'],
+    [netflixSender(), 'subtitle-assistant-channel', (port) => { port.sender = netflixSender({ tab: { url: 'https://www.netflix.com/watch/82147770' } }); }],
+    [netflixSender({ tab: { id: -1, url: 'https://www.netflix.com/watch/82147770' } }), 'subtitle-assistant-channel'],
+    [netflixSender({ tab: { id: 7, url: 'http://www.netflix.com/watch/82147770' }, url: 'http://www.netflix.com/watch/82147770', origin: 'http://www.netflix.com' }), 'subtitle-assistant-channel'],
+    [netflixSender({ tab: { id: 7, url: 'https://example.com/watch/82147770' }, url: 'https://example.com/watch/82147770', origin: 'https://example.com' }), 'subtitle-assistant-channel'],
     [netflixSender({ origin: 'https://evil.example.test' }), 'subtitle-assistant-channel'],
+    [netflixSender({ tab: { id: 7, url: 'https://help.netflix.com/watch/82147770' } }), 'subtitle-assistant-channel'],
     [netflixSender(), 'options-page-channel']
   ]) {
     assert.deepEqual(JSON.parse(JSON.stringify(await send(background, {
       type: 'CONTRIBUTION_RETRY', operationId: 'operation-a'
-    }, sender, name))), forbidden);
+    }, sender, name, beforeSend))), forbidden);
   }
   assert.deepEqual(calls, []);
   assert.equal(background.storageCalls.length, baseline);
