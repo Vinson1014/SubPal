@@ -3,11 +3,11 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 
-async function loadTranslationBridge(sendMessage) {
+async function loadTranslationBridge(request) {
   const source = await readFile(new URL('../content/core/translation-bridge.js', import.meta.url), 'utf8');
-  const context = vm.createContext({ console, __sendMessage: sendMessage });
-  const messagingModule = new vm.SourceTextModule(
-    'export const sendMessage = globalThis.__sendMessage;',
+  const context = vm.createContext({ console, window: {}, __request: request });
+  const contributionsModule = new vm.SourceTextModule(
+    'export const createPageContributions = () => Object.freeze({ enqueue: input => globalThis.__request("enqueue", input), retry: operationId => globalThis.__request("retry", operationId) });',
     { context }
   );
   const module = new vm.SourceTextModule(source, {
@@ -16,7 +16,7 @@ async function loadTranslationBridge(sendMessage) {
   });
 
   await module.link((specifier) => {
-    if (specifier === '../system/messaging.js') return messagingModule;
+    if (specifier === '../system/capabilities/contributions.js') return contributionsModule;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await module.evaluate();
@@ -46,17 +46,16 @@ function resolutionContext(overrides = {}) {
   };
 }
 
-test('Given a normal subtitle hover submission When translationBridge enqueues it Then it uses a typed contribution intent with the existing payload', async () => {
+test('Given a normal subtitle hover submission When translationBridge enqueues it Then it uses the narrow contribution interface with the existing payload', async () => {
   const messages = [];
-  const translationBridge = await loadTranslationBridge(async (message) => {
+  const translationBridge = await loadTranslationBridge(async (_operation, message) => {
     messages.push(message);
-    return { itemId: 'hover-translation-1' };
+    return { ok: true, value: { status: 'queued-locally', operationId: 'hover-translation-1' } };
   });
 
   await translationBridge.enqueue(legacyTranslation({ slotKey: 'slot-000124' }));
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
-    category: 'contribution-intent',
     variant: 'enqueue-translation',
     payload: {
       videoId: 'netflix-81234567',
@@ -70,39 +69,35 @@ test('Given a normal subtitle hover submission When translationBridge enqueues i
   }]);
 });
 
-test('Given sendMessage returns an error When translationBridge enqueues Then the response error is wrapped', async () => {
-  const translationBridge = await loadTranslationBridge(async () => ({ error: 'queue rejected translation' }));
+test('Given the page contribution client returns a failure When translationBridge enqueues Then the normalized error is wrapped', async () => {
+  const translationBridge = await loadTranslationBridge(async () => ({ ok: false, error: { kind: 'domain-rejected', code: 'queue-rejected-translation', retryable: false } }));
 
   await assert.rejects(
     translationBridge.enqueue(legacyTranslation()),
-    /翻譯提交加入隊列失敗: queue rejected translation/
+    /翻譯提交加入隊列失敗: queue-rejected-translation/
   );
 });
 
 test('Given a translation operation When translationBridge retries it Then it sends the typed retry intent, returns retryScheduled, and exposes no history or status reads', async () => {
   const messages = [];
-  const translationBridge = await loadTranslationBridge(async (message) => {
-    messages.push(message);
-    return { retryScheduled: true, operationId: 'translation-operation-1' };
+  const translationBridge = await loadTranslationBridge(async (operation, input) => {
+    messages.push({ operation, input });
+    return { ok: true, value: { retryScheduled: true, operationId: 'translation-operation-1' } };
   });
 
   const retried = await translationBridge.retry('translation-operation-1');
 
   assert.equal(retried, true);
-  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
-    category: 'contribution-intent',
-    variant: 'retry-operation',
-    payload: { operationId: 'translation-operation-1' }
-  }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ operation: 'retry', input: 'translation-operation-1' }]);
   assert.equal(typeof translationBridge.getHistory, 'undefined');
   assert.equal(typeof translationBridge.getStatus, 'undefined');
 });
 
 test('Given an official subtitle task When its improvement is submitted Then translationID is not required and exact resolutionContext is preserved', async () => {
   const messages = [];
-  const translationBridge = await loadTranslationBridge(async (message) => {
+  const translationBridge = await loadTranslationBridge(async (_operation, message) => {
     messages.push(message);
-    return { itemId: 'official-submit-1' };
+    return { ok: true, value: { status: 'queued-locally', operationId: 'official-submit-1' } };
   });
   const context = resolutionContext();
 
@@ -122,9 +117,9 @@ test('Given an official subtitle task When its improvement is submitted Then tra
 
 test('Given a candidate task When a better translation is submitted Then sourceTranslationID and exact resolutionContext are preserved', async () => {
   const messages = [];
-  const translationBridge = await loadTranslationBridge(async (message) => {
+  const translationBridge = await loadTranslationBridge(async (_operation, message) => {
     messages.push(message);
-    return { itemId: 'candidate-submit-1' };
+    return { ok: true, value: { status: 'queued-locally', operationId: 'candidate-submit-1' } };
   });
   const context = resolutionContext({ action: 'submit-better-candidate' });
 

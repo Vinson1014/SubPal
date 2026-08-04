@@ -4,11 +4,11 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 import { enqueueContribution } from '../background/contribution-queue.js';
 
-async function loadVoteBridge(sendMessage) {
+async function loadVoteBridge(request) {
   const source = await readFile(new URL('../content/core/vote-bridge.js', import.meta.url), 'utf8');
-  const context = vm.createContext({ console, __sendMessage: sendMessage });
-  const messagingModule = new vm.SourceTextModule(
-    'export const sendMessage = globalThis.__sendMessage;',
+  const context = vm.createContext({ console, window: {}, __request: request });
+  const contributionsModule = new vm.SourceTextModule(
+    'export const createPageContributions = () => Object.freeze({ enqueue: input => globalThis.__request("enqueue", input), retry: operationId => globalThis.__request("retry", operationId) });',
     { context }
   );
   const module = new vm.SourceTextModule(source, {
@@ -17,7 +17,7 @@ async function loadVoteBridge(sendMessage) {
   });
 
   await module.link((specifier) => {
-    if (specifier === '../system/messaging.js') return messagingModule;
+    if (specifier === '../system/capabilities/contributions.js') return contributionsModule;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await module.evaluate();
@@ -63,11 +63,11 @@ function resolutionContext(overrides = {}) {
   };
 }
 
-test('Given legacy upvote and downvote calls When voteBridge serializes them Then each uses a typed contribution intent and voteState is omitted', async () => {
+test('Given legacy upvote and downvote calls When voteBridge serializes them Then each uses the narrow contribution enqueue interface and voteState is omitted', async () => {
   const messages = [];
-  const voteBridge = await loadVoteBridge(async (message) => {
+  const voteBridge = await loadVoteBridge(async (_operation, message) => {
     messages.push(message);
-    return { itemId: `item-${messages.length}` };
+    return { ok: true, value: { status: 'queued-locally', operationId: `item-${messages.length}` } };
   });
 
   await voteBridge.enqueue(legacyVote('upvote'));
@@ -75,7 +75,6 @@ test('Given legacy upvote and downvote calls When voteBridge serializes them The
 
   assert.equal(messages.length, 2);
   for (const message of messages) {
-    assert.equal(message.category, 'contribution-intent');
     assert.equal(message.variant, 'enqueue-vote');
     assert.equal(Object.hasOwn(message.payload, 'voteState'), false);
   }
@@ -83,9 +82,9 @@ test('Given legacy upvote and downvote calls When voteBridge serializes them The
 
 test('Given explicit translation vote states When voteBridge serializes them Then like dislike and none are preserved', async () => {
   const messages = [];
-  const voteBridge = await loadVoteBridge(async (message) => {
+  const voteBridge = await loadVoteBridge(async (_operation, message) => {
     messages.push(message);
-    return { itemId: `item-${messages.length}` };
+    return { ok: true, value: { status: 'queued-locally', operationId: `item-${messages.length}` } };
   });
 
   for (const voteState of ['like', 'dislike', 'none']) {
@@ -142,39 +141,35 @@ test('Given a pending translation vote When a later vote is merged by the backgr
   assert.deepEqual(storage.values.voteQueue[0].previousCounts, { like: 4, dislike: 2 });
 });
 
-test('Given sendMessage returns an error When voteBridge enqueues Then the response error is wrapped', async () => {
-  const voteBridge = await loadVoteBridge(async () => ({ error: 'queue rejected vote' }));
+test('Given the page contribution client returns a failure When voteBridge enqueues Then the normalized error is wrapped', async () => {
+  const voteBridge = await loadVoteBridge(async () => ({ ok: false, error: { kind: 'domain-rejected', code: 'queue-rejected-vote', retryable: false } }));
 
   await assert.rejects(
     voteBridge.enqueue(legacyVote('upvote')),
-    /投票加入隊列失敗: queue rejected vote/
+    /投票加入隊列失敗: queue-rejected-vote/
   );
 });
 
 test('Given a vote operation When voteBridge retries it Then it sends the typed retry intent, returns retryScheduled, and exposes no history or status reads', async () => {
   const messages = [];
-  const voteBridge = await loadVoteBridge(async (message) => {
-    messages.push(message);
-    return { retryScheduled: true, operationId: 'vote-operation-1' };
+  const voteBridge = await loadVoteBridge(async (operation, input) => {
+    messages.push({ operation, input });
+    return { ok: true, value: { retryScheduled: true, operationId: 'vote-operation-1' } };
   });
 
   const retried = await voteBridge.retry('vote-operation-1');
 
   assert.equal(retried, true);
-  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
-    category: 'contribution-intent',
-    variant: 'retry-operation',
-    payload: { operationId: 'vote-operation-1' }
-  }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ operation: 'retry', input: 'vote-operation-1' }]);
   assert.equal(typeof voteBridge.getHistory, 'undefined');
   assert.equal(typeof voteBridge.getStatus, 'undefined');
 });
 
 test('Given a normal subtitle hover vote When voteBridge enqueues it Then the legacy payload shape remains unchanged', async () => {
   const messages = [];
-  const voteBridge = await loadVoteBridge(async (message) => {
+  const voteBridge = await loadVoteBridge(async (_operation, message) => {
     messages.push(message);
-    return { itemId: 'hover-vote-1' };
+    return { ok: true, value: { status: 'queued-locally', operationId: 'hover-vote-1' } };
   });
 
   await voteBridge.enqueue({
@@ -184,7 +179,6 @@ test('Given a normal subtitle hover vote When voteBridge enqueues it Then the le
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
-    category: 'contribution-intent',
     variant: 'enqueue-vote',
     payload: {
       videoId: 'netflix-81234567',
@@ -201,9 +195,9 @@ test('Given a normal subtitle hover vote When voteBridge enqueues it Then the le
 
 test('Given a candidate review vote When voteBridge enqueues it Then translationID and exactly five resolutionContext keys reach the queue', async () => {
   const messages = [];
-  const voteBridge = await loadVoteBridge(async (message) => {
+  const voteBridge = await loadVoteBridge(async (_operation, message) => {
     messages.push(message);
-    return { itemId: 'candidate-vote-1' };
+    return { ok: true, value: { status: 'queued-locally', operationId: 'candidate-vote-1' } };
   });
   const context = resolutionContext();
 

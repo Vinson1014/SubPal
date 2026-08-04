@@ -3,12 +3,19 @@
  *
  * 設計理念：
  * 1. 提供簡潔的投票 API 給 page context 使用
- * 2. 透過 sendMessage 發送 typed contribution intent
+ * 2. 透過 Contributions capability 發送 typed contribution intent
  * 3. 所有數據持久化由 background owner 處理
  * 4. 專注於消息傳遞和參數驗證
  */
 
-import { sendMessage } from '../system/messaging.js';
+import { createPageContributions } from '../system/capabilities/contributions.js';
+
+let contributions;
+
+function getContributions() {
+  contributions ??= createPageContributions({ window });
+  return contributions;
+}
 
 /**
  * 投票 Bridge 對象
@@ -147,16 +154,15 @@ export const voteBridge = {
         payload.resolutionContext = normalizeResolutionContext(resolutionContext);
       }
 
-      const response = await sendMessage({
-        category: 'contribution-intent',
+      const response = await getContributions().enqueue({
         variant: 'enqueue-vote',
         payload
       });
 
       this.log('vote contribution intent 響應:', response);
 
-      if (response.error) {
-        throw new Error(response.error);
+      if (!response.ok) {
+        throw new Error(response.error.code);
       }
 
       return response;
@@ -183,19 +189,15 @@ export const voteBridge = {
 
     try {
       this.log('發送 typed vote retry intent 到 content script');
-      const response = await sendMessage({
-        category: 'contribution-intent',
-        variant: 'retry-operation',
-        payload: { operationId }
-      });
+      const response = await getContributions().retry(operationId);
 
       this.log('vote retry intent 響應:', response);
 
-      if (response.error) {
-        throw new Error(response.error);
+      if (!response.ok) {
+        throw new Error(response.error.code);
       }
 
-      return response.retryScheduled === true;
+      return response.value.retryScheduled === true;
 
     } catch (error) {
       this.log('retry 失敗:', error.message);

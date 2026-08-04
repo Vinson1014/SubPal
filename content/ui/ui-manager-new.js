@@ -15,10 +15,17 @@ import { FullscreenHandler } from './fullscreen-handler.js';
 import { UIAvoidanceHandler } from './ui-avoidance-handler.js';
 import { ToastManager } from './toast-manager.js';
 import { getPlayerAdapter } from './netflix-player-adapter.js';
-import { sendMessage, registerInternalEventHandler, dispatchInternalEvent } from '../system/messaging.js';
+import { registerInternalEventHandler, dispatchInternalEvent } from '../system/messaging.js';
+import { createPageContributions } from '../system/capabilities/contributions.js';
 import { SubtitleReplacer } from '../core/subtitle-replacer.js';
 
 const MS_PER_SECOND = 1000;
+let contributions;
+
+function getContributions() {
+  contributions ??= createPageContributions({ window });
+  return contributions;
+}
 
 class UIManager {
   constructor() {
@@ -243,11 +250,12 @@ class UIManager {
       if (processedSubtitle.translationID) {
         const authorityRenderGeneration = this._renderGeneration;
         try {
-          const { authority, hasPendingVote } = await sendMessage({
-            category: 'contribution-read',
+          const projection = await getContributions().getProjection({
             variant: 'vote-authority',
             payload: { translationID: processedSubtitle.translationID }
           });
+          if (!projection.ok) throw new Error(projection.error.code);
+          const { authority, hasPendingVote } = projection.value;
           if (componentGeneration !== this._componentGeneration ||
               authorityRenderGeneration !== this._renderGeneration ||
               renderGeneration !== this._renderGeneration ||
@@ -958,11 +966,12 @@ class UIManager {
     if (!this.currentSubtitle || !this.currentSubtitle.translationID) return;
 
     try {
-      const { permanentFailure: failedItem } = await sendMessage({
-        category: 'contribution-read',
+      const projection = await getContributions().getProjection({
         variant: 'vote-authority',
         payload: { translationID: this.currentSubtitle.translationID }
       });
+      if (!projection.ok) throw new Error(projection.error.code);
+      const { permanentFailure: failedItem } = projection.value;
 
       if (failedItem) {
         this.log('檢測到永久同步失敗，還原樂觀 UI:', failedItem);
@@ -975,11 +984,12 @@ class UIManager {
   }
 
   async readTranslationSyncSnapshot(operationIds) {
-    const records = await sendMessage({
-      category: 'contribution-read',
+    const projection = await getContributions().getProjection({
       variant: 'translation-reconciliation',
       payload: { operationIds }
     });
+    if (!projection.ok) throw new Error(projection.error.code);
+    const records = projection.value;
 
     return new Map(records.map(({ operationId, status, syncedAt, terminal }) => [
       operationId,

@@ -31,6 +31,7 @@ async function loadManager() {
     console,
     Date,
     document: { getElementById: () => null },
+    window: {},
     setInterval: () => 1,
     clearInterval,
     clearTimeout,
@@ -58,6 +59,7 @@ async function loadManager() {
   context.lifecycle = lifecycle;
   context.blockNextInitialization = false;
   context.sendMessage = async () => ({});
+  context.contributionProjection = async () => ({ ok: true, value: {} });
   const dependencies = new Map([
     ['./subtitle-display.js', componentModule('SubtitleDisplay', 'show(value) { globalThis.lifecycle.renders.push(value); }')],
     ['./interaction-panel.js', componentModule('InteractionPanel', 'onSubmitClick() {} onLikeClick() {} onDislikeClick() {} updateVoteDisplay() {} updatePosition(value) { globalThis.lifecycle.avoidanceUpdates.push({ panel: this, value }); }')],
@@ -76,6 +78,11 @@ async function loadManager() {
       export const dispatchInternalEvent = event => {
         globalThis.events.push({ ...event, initialized: globalThis.manager.isInitialized });
       };
+    `, { context })],
+    ['../system/capabilities/contributions.js', new vm.SourceTextModule(`
+      export const createPageContributions = () => Object.freeze({
+        getProjection: input => globalThis.contributionProjection(input)
+      });
     `, { context })]
   ]);
   context.handlers = handlers;
@@ -102,7 +109,7 @@ async function loadManager() {
     lifecycle,
     blockInitialization() { context.blockNextInitialization = true; },
     releaseInitialization() { context.releaseInitialization(); },
-    setSendMessage(handler) { context.sendMessage = handler; },
+    setContributionProjection(handler) { context.contributionProjection = handler; },
     runTimers() {
       const callbacks = lifecycle.timeouts.splice(0);
       callbacks.forEach(callback => callback());
@@ -243,13 +250,13 @@ test('Given replacement rejects after a video switch When the subtitle resumes T
 test('Given typed vote authority resolves after a video switch When the subtitle resumes Then stale authority data cannot update the new generation', async () => {
   const fixture = await loadManager();
   const storage = deferred();
-  fixture.setSendMessage(() => storage.promise);
+  fixture.setContributionProjection(() => storage.promise);
   const showPromise = fixture.manager.showSubtitle({ text: 'old video', timestamp: 1, mode: 'dom', translationID: 'translation-1' });
   await flush();
 
   fixture.handlers.get('VIDEO_ID_CHANGED')({ oldVideoId: '1', newVideoId: '2' });
   await fixture.manager._componentReinitializationPromise;
-  storage.resolve({ authority: { myVote: 'like', upvotes: 3, downvotes: 1 }, hasPendingVote: false, permanentFailure: null });
+  storage.resolve({ ok: true, value: { authority: { myVote: 'like', upvotes: 3, downvotes: 1 }, hasPendingVote: false, permanentFailure: null } });
   await showPromise;
 
   assert.equal(fixture.manager.currentSubtitle, null);
@@ -259,7 +266,7 @@ test('Given typed vote authority resolves after a video switch When the subtitle
 test('Given typed vote authority rejects after a video switch When the subtitle resumes Then stale error recovery cannot update the new generation', async () => {
   const fixture = await loadManager();
   const storage = deferred();
-  fixture.setSendMessage(() => storage.promise);
+  fixture.setContributionProjection(() => storage.promise);
   const showPromise = fixture.manager.showSubtitle({ text: 'old video', timestamp: 1, mode: 'dom', translationID: 'translation-1' });
   await flush();
 
@@ -289,20 +296,19 @@ test('Given avoidance is delayed When the manager tears down Then the old callba
   assert.doesNotThrow(() => fixture.runTimers());
 });
 
-test('Given local translation operations When UIManager reads reconciliation Then it sends operation IDs and maps minimized records by operation ID', async () => {
+test('Given local translation operations When UIManager reads reconciliation Then it uses the contribution projection interface and maps minimized records by operation ID', async () => {
   const fixture = await loadManager();
   const pendingItem = { operationId: 'pending-operation', status: 'syncing', syncedAt: null, terminal: false };
   const completedItem = { operationId: 'completed-operation', status: 'completed', syncedAt: 123, terminal: true };
   const messages = [];
-  fixture.setSendMessage(async (message) => {
+  fixture.setContributionProjection(async (message) => {
     messages.push(message);
-    return [pendingItem, completedItem];
+    return { ok: true, value: [pendingItem, completedItem] };
   });
 
   const snapshot = await fixture.manager.readTranslationSyncSnapshot([pendingItem.operationId, completedItem.operationId]);
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
-    category: 'contribution-read',
     variant: 'translation-reconciliation',
     payload: { operationIds: [pendingItem.operationId, completedItem.operationId] }
   }]);
@@ -315,21 +321,21 @@ test('Given typed vote authority and a permanent failure When UIManager reads bo
   const messages = [];
   let rollback;
   fixture.manager.revertOptimisticVote = (state, counts) => { rollback = { state, counts }; };
-  fixture.setSendMessage(async (message) => {
+  fixture.setContributionProjection(async (message) => {
     messages.push(message);
-    return {
+    return { ok: true, value: {
       authority: { myVote: 'like', upvotes: 3, downvotes: 1 },
       hasPendingVote: false,
       permanentFailure: messages.length === 2 ? { previousVoteState: 'none', previousCounts: { like: 1, dislike: 2 } } : null
-    };
+    } };
   });
 
   await fixture.manager.showSubtitle({ text: 'vote', timestamp: 1, mode: 'dom', translationID: 'translation-1' });
   await fixture.manager.checkAndRevertPermanentFailures();
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
-    { category: 'contribution-read', variant: 'vote-authority', payload: { translationID: 'translation-1' } },
-    { category: 'contribution-read', variant: 'vote-authority', payload: { translationID: 'translation-1' } }
+    { variant: 'vote-authority', payload: { translationID: 'translation-1' } },
+    { variant: 'vote-authority', payload: { translationID: 'translation-1' } }
   ]);
   assert.deepEqual(rollback, { state: 'none', counts: { like: 1, dislike: 2 } });
 });
@@ -350,15 +356,14 @@ test('Given a minimized reconciliation record When UIManager reconciles local re
       return false;
     }
   };
-  fixture.setSendMessage(async (message) => {
+  fixture.setContributionProjection(async (message) => {
     messages.push(message);
-    return [{ operationId: 'operation-1', status: 'syncing', syncedAt: null, terminal: false }];
+    return { ok: true, value: [{ operationId: 'operation-1', status: 'syncing', syncedAt: null, terminal: false }] };
   });
 
   await fixture.manager.checkAndReconcileTranslationSubmissions();
 
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
-    category: 'contribution-read',
     variant: 'translation-reconciliation',
     payload: { operationIds: ['operation-1'] }
   }]);

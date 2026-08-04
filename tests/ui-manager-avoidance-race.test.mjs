@@ -14,7 +14,8 @@ test('Given a pending avoidance update When current subtitle clears before timeo
     ['./submission-dialog.js', emptyClass('SubmissionDialog')], ['./fullscreen-handler.js', emptyClass('FullscreenHandler')],
     ['./ui-avoidance-handler.js', emptyClass('UIAvoidanceHandler')], ['./toast-manager.js', emptyClass('ToastManager')],
     ['./netflix-player-adapter.js', new vm.SourceTextModule('export const getPlayerAdapter = () => ({});', { context })],
-    ['../system/messaging.js', new vm.SourceTextModule('export const sendMessage = async () => ({}); export const registerInternalEventHandler = () => () => {}; export const dispatchInternalEvent = () => {};', { context })],
+    ['../system/messaging.js', new vm.SourceTextModule('export const registerInternalEventHandler = () => () => {}; export const dispatchInternalEvent = () => {};', { context })],
+    ['../system/capabilities/contributions.js', new vm.SourceTextModule('export const createPageContributions = () => ({});', { context })],
     ['../core/subtitle-replacer.js', emptyClass('SubtitleReplacer')]
   ]);
   await module.link((specifier) => dependencies.get(specifier));
