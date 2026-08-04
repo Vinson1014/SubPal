@@ -116,14 +116,22 @@ function createRequestTransport({ responseEvent, listen, remove, send, receive, 
   };
 }
 
-export function createDomTransport({ window, makeEvent, requestEvent = 'messageToContentScript', responseEvent = 'responseFromContentScript', setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout }) {
+export function createDomTransport({ window, makeEvent, requestEvent = 'messageToContentScript', responseEvent = 'responseFromContentScript', strictResult = false, setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout }) {
   return createRequestTransport({
     responseEvent, listen: window.addEventListener.bind(window), remove: window.removeEventListener.bind(window),
     send: (detail) => window.dispatchEvent(makeEvent(requestEvent, detail)),
     receive: (event) => {
       const requestId = event?.detail?.messageId;
       const response = event?.detail?.response;
-      return typeof requestId === 'string' ? { requestId, result: isResult(response) ? response : ok(response) } : null;
+      if (typeof requestId !== 'string') return null;
+      return {
+        requestId,
+        result: isResult(response)
+          ? response
+          : strictResult
+            ? fail('domain-rejected', 'dom-response-result-required', false)
+            : ok(response)
+      };
     },
     makeWire: (envelope, wire) => wire ?? { envelope },
     timeoutCode: 'dom-response-timeout', stopCode: 'dom-transport-stopped', setTimeout, clearTimeout
