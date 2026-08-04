@@ -124,7 +124,11 @@ async function loadContentContributionHarness({ connect } = {}) {
   await result.link(() => { throw new Error('result.js has no dependencies'); });
   await diagnostics.link(() => { throw new Error('diagnostics.js has no dependencies'); });
   await adapters.link((specifier) => specifier === './result.js' ? result : diagnostics);
-  await contributions.link((specifier) => specifier === './result.js' ? result : Promise.reject(new Error(`Unexpected Contributions dependency: ${specifier}`)));
+  await contributions.link((specifier) => {
+    if (specifier === './result.js') return result;
+    if (specifier === './private-transports.js') return adapters;
+    throw new Error(`Unexpected Contributions dependency: ${specifier}`);
+  });
   await subtitles.link((specifier) => specifier === './result.js' ? result : adapters);
   await ingress.link((specifier) => specifier === './result.js' ? result : subtitles);
   await result.evaluate();

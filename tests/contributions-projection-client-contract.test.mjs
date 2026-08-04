@@ -10,14 +10,21 @@ async function loadContributions() {
   ]);
   const context = vm.createContext({ structuredClone });
   const result = new vm.SourceTextModule(resultSource, { context, identifier: 'content/system/capabilities/result.js' });
+  const privateTransports = new vm.SourceTextModule(
+    'export const createDomTransport = () => { throw new Error("unused"); }; export const createEnvelope = () => { throw new Error("unused"); };',
+    { context, identifier: 'content/system/capabilities/private-transports.js' }
+  );
   const contributions = new vm.SourceTextModule(contributionsSource, { context, identifier: 'content/system/capabilities/contributions.js' });
 
   await result.link(() => { throw new Error('result.js has no dependencies'); });
+  await privateTransports.link(() => { throw new Error('private transports has no dependencies'); });
   await contributions.link((specifier) => {
     if (specifier === './result.js') return result;
+    if (specifier === './private-transports.js') return privateTransports;
     throw new Error(`Unexpected contribution dependency: ${specifier}`);
   });
   await result.evaluate();
+  await privateTransports.evaluate();
   await contributions.evaluate();
   return contributions.namespace.createContributions;
 }

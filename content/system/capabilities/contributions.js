@@ -1,6 +1,9 @@
 import { fail, ok } from './result.js';
+import { createDomTransport, createEnvelope } from './private-transports.js';
 
 const CONTRIBUTION_CATEGORY = 'contribution-intent';
+const CONTRIBUTION_READ_CATEGORY = 'contribution-read';
+const PAGE_CAPABILITY_DEADLINE_MS = 10_000;
 const ENVELOPE_KEYS = new Set(['category', 'variant', 'payload']);
 const PROJECTION_ENVELOPE_KEYS = new Set(['variant', 'payload']);
 const VOTE_AUTHORITY_PROJECTION_KEYS = new Set(['translationID']);
@@ -255,6 +258,13 @@ function callerSignal(cancellation) {
   return cancellation?.signal ?? cancellation;
 }
 
+function pageEnqueueInput(input) {
+  const envelope = strictOwnRecord(input, PROJECTION_ENVELOPE_KEYS, PROJECTION_ENVELOPE_KEYS);
+  return envelope
+    ? { category: CONTRIBUTION_CATEGORY, variant: envelope.variant, payload: envelope.payload }
+    : null;
+}
+
 export function createContributions({ persist, readProjection, retryOperation, persistenceDeadlineMs = 10000 }) {
   return Object.freeze({
     async enqueue(input, cancellation) {
@@ -296,6 +306,59 @@ export function createContributions({ persist, readProjection, retryOperation, p
           'caller-cancelled-before-retry', 'contribution-retry-failed', 'contribution-retry-response',
           (value) => parseRetryResponse(value, operationId))
         : fail('invalid', 'contribution-retry', false);
+    }
+  });
+}
+
+export function createPageContributions({ window, createRequestId = () => crypto.randomUUID(), setTimeout, clearTimeout }) {
+  const transport = createDomTransport({
+    window,
+    makeEvent: (type, detail) => new CustomEvent(type, { detail }),
+    strictResult: true,
+    setTimeout,
+    clearTimeout
+  });
+  const contributions = createContributions({
+    persist(intent, { deadlineMs }) {
+      const requestId = createRequestId();
+      const message = { category: CONTRIBUTION_CATEGORY, variant: intent.variant, payload: intent.payload };
+      return transport.request(createEnvelope({ requestId, kind: 'contribution-enqueue', payload: message }), {
+        deadlineMs,
+        wire: { messageId: requestId, message }
+      });
+    },
+    readProjection(projection, { deadlineMs, signal }) {
+      const requestId = createRequestId();
+      const message = { category: CONTRIBUTION_READ_CATEGORY, variant: projection.variant, payload: projection.payload };
+      return transport.request(createEnvelope({ requestId, kind: 'contribution-read', payload: message }), {
+        deadlineMs,
+        signal,
+        wire: { messageId: requestId, message }
+      });
+    },
+    retryOperation(operationId, { deadlineMs, signal }) {
+      const requestId = createRequestId();
+      const message = { category: CONTRIBUTION_CATEGORY, variant: 'retry-operation', payload: { operationId } };
+      return transport.request(createEnvelope({ requestId, kind: 'contribution-retry', payload: message }), {
+        deadlineMs,
+        signal,
+        wire: { messageId: requestId, message }
+      });
+    },
+    persistenceDeadlineMs: PAGE_CAPABILITY_DEADLINE_MS
+  });
+  return Object.freeze({
+    enqueue(input, cancellation) {
+      const envelope = pageEnqueueInput(input);
+      return envelope
+        ? contributions.enqueue(envelope, cancellation)
+        : Promise.resolve(fail('invalid', 'contribution-payload', false));
+    },
+    getProjection(input, cancellation) {
+      return contributions.getProjection(input, cancellation);
+    },
+    retry(operationId, cancellation) {
+      return contributions.retry(operationId, cancellation);
     }
   });
 }
