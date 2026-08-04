@@ -298,9 +298,6 @@
           category?.value === 'settings-change' || category?.value === 'settings-read') {
         return { input: message, category: category.value, type: type.value, authorityEscalated };
       }
-      if (type.value === 'SUBTITLE_READY') {
-        return authorityEscalated ? terminalIngressFailure(true) : { internal: message, type: type.value };
-      }
       if (type.value !== 'VIDEO_ID_CHANGED') {
         return type.present ? terminalIngressFailure(true) : terminalIngressFailure(authorityEscalated);
       }
@@ -460,11 +457,6 @@
           error: { kind: 'domain-rejected', code: 'settings-snapshot-failed', retryable: false }
         });
       }
-      return;
-    }
-
-    if (pageIngressMessage.internal) {
-      dispatchInternalMessage(messageId, pageIngressMessage.internal);
       return;
     }
 

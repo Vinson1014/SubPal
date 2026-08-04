@@ -8,7 +8,7 @@ async function loadSubtitleDisplay() {
   const source = await readFile(new URL('../content/ui/subtitle-display.js', import.meta.url), 'utf8');
   const module = new vm.SourceTextModule(source, { context, identifier: 'content/ui/subtitle-display.js' });
   const dependencies = new Map([
-    ['../system/messaging.js', new vm.SourceTextModule('export const sendMessage = async () => ({}); export const registerInternalEventHandler = () => () => {}; export const dispatchInternalEvent = () => {};', { context })],
+    ['../system/messaging.js', new vm.SourceTextModule('export const dispatchInternalEvent = () => {};', { context })],
     ['./netflix-player-adapter.js', new vm.SourceTextModule('export const getPlayerAdapter = () => ({ getCurrentPlayerBounds: () => ({ width: 1920 }) });', { context })]
   ]);
   await module.link((specifier) => dependencies.get(specifier));

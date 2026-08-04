@@ -8,7 +8,6 @@
  * 4. 隊列管理：支援多個消息的排隊顯示
  */
 
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
 
 // Toast 類型定義
 const TOAST_TYPES = {

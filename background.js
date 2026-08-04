@@ -524,11 +524,7 @@ chrome.runtime.onConnect.addListener((port) => {
         void handleContributionRetryPortRequest(messageId, message, port);
         return;
       }
-      if (type === 'CONTENT_SCRIPT_READY') {
-        port.postMessage({ messageId, response: { success: true } });
-      } else {
-        routeMessageToModulePort(messageId, message, port);
-      }
+      routeMessageToModulePort(messageId, message, port);
     });
 
     port.onDisconnect.addListener(() => {

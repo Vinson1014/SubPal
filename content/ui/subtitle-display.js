@@ -8,7 +8,7 @@
  * 4. 智能位置：自動計算和調整字幕位置
  */
 
-import { sendMessage, registerInternalEventHandler, dispatchInternalEvent } from '../system/messaging.js';
+import { dispatchInternalEvent } from '../system/messaging.js';
 import { getPlayerAdapter } from './netflix-player-adapter.js';
 
 const PRIMARY_SUB_FONT_SIZE = 55; // 基本字體大小

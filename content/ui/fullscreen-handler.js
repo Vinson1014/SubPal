@@ -8,7 +8,7 @@
  * 4. 兼容性：支持多種瀏覽器的全螢幕事件
  */
 
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
+import { registerInternalEventHandler } from '../system/messaging.js';
 
 class FullscreenHandler {
   constructor() {

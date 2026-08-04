@@ -111,8 +111,7 @@ async function loadCapabilityModules() {
 async function loadSubtitleReplacer({ queryResult, playbackContext = context() }) {
   const source = await readFile(new URL('../content/core/subtitle-replacer.js', import.meta.url), 'utf8');
   const runtime = vm.createContext({ AbortController, Date, Promise, console: { log() {}, warn() {}, error() {} }, setTimeout, clearTimeout, window: {} });
-  const messagingModule = new vm.SyntheticModule(['sendMessage', 'registerInternalEventHandler'], function initialize() {
-    this.setExport('sendMessage', async () => { throw new Error('legacy messaging must not be used'); });
+  const messagingModule = new vm.SyntheticModule(['registerInternalEventHandler'], function initialize() {
     this.setExport('registerInternalEventHandler', () => () => {});
   }, { context: runtime, identifier: 'content/system/messaging.js' });
   const slotKeyModule = new vm.SyntheticModule(['buildSlotKey'], function initialize() {

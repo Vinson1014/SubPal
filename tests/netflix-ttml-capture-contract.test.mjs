@@ -127,7 +127,11 @@ test('Given raw TTML arrives before owner binding When the page pool is later sc
   const capability = await loadIngress();
   const page = createPageRawHarness();
   let physicalEvents = 0;
+  let legacyReadinessMessages = 0;
   page.window.addEventListener(TTML_ACQUISITION_CAPTURED_EVENT, () => { physicalEvents += 1; });
+  page.window.addEventListener('messageToContentScript', (event) => {
+    if (event.detail?.message?.type === 'SUBTITLE_READY') legacyReadinessMessages += 1;
+  });
 
   await page.capture(0);
   page.advance((31 * 60 * 1000) + 1);
@@ -152,6 +156,7 @@ test('Given raw TTML arrives before owner binding When the page pool is later sc
   }));
 
   assert.equal(physicalEvents, 2);
+  assert.equal(legacyReadinessMessages, 0);
   assert.equal(Object.keys(retainedRaw).length, 2);
   assert.equal(recovered, 1);
   assert.equal(result.ok, true);

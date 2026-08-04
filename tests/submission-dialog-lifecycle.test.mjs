@@ -6,10 +6,6 @@ import vm from 'node:vm';
 async function loadDialog(configBridge) {
   const context = vm.createContext({ console });
   const source = await readFile(new URL('../content/ui/submission-dialog.js', import.meta.url), 'utf8');
-  const messaging = new vm.SyntheticModule(['sendMessage', 'registerInternalEventHandler'], function () {
-    this.setExport('sendMessage', async () => ({}));
-    this.setExport('registerInternalEventHandler', () => () => {});
-  }, { context });
   const language = new vm.SyntheticModule(['toAPILanguageCode'], function () {
     this.setExport('toAPILanguageCode', (value) => value);
   }, { context });
@@ -17,7 +13,6 @@ async function loadDialog(configBridge) {
     this.setExport('configBridge', configBridge);
   }, { context });
   const modules = new Map([
-    ['../system/messaging.js', messaging],
     ['../utils/language-code.js', language],
     ['../system/config/config-bridge.js', config]
   ]);

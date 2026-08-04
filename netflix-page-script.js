@@ -1488,37 +1488,6 @@
     }
 
     /**
-     * 通知content script字幕準備就緒
-     * 使用SubPal消息傳遞系統
-     */
-    notifySubtitleReady(cacheKey, subtitles) {
-      // 使用SubPal的CustomEvent消息傳遞機制
-      const messageId = this.generateMessageId();
-
-      debugLog('發送字幕準備就緒消息:', { messageId, cacheKey, subtitleCount: subtitles.length });
-
-      // 觸發 messageToContentScript 事件，符合 SubPal 架構
-      window.dispatchEvent(new CustomEvent('messageToContentScript', {
-        detail: {
-          messageId: messageId,
-          message: {
-            type: 'SUBTITLE_READY',
-            cacheKey: cacheKey,
-            subtitles: subtitles,
-            source: 'netflix-page-script'
-          }
-        }
-      }));
-    }
-
-    /**
-     * 生成唯一的消息ID
-     */
-    generateMessageId() {
-      return `netflix-page-script-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    }
-
-    /**
      * 獲取攔截到的字幕
      */
     getInterceptedSubtitles(cacheKey) {

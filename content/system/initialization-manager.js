@@ -5,7 +5,7 @@
  * 解決 Page Script 注入、Netflix API 可用性、模式選擇等問題
  */
 
-import { sendMessage, waitForPageScript } from './messaging.js';
+import { waitForPageScript } from './messaging.js';
 import { getVideoId } from '../core/video-info.js';
 import { playbackContextManager as defaultPlaybackContextManager } from '../core/playback-context-manager.js';
 
@@ -532,10 +532,6 @@ class InitializationManager {
       // 設置組件間的事件流
       this.setupEventFlow();
       
-      
-      // 通知初始化完成
-      this.notifyInitializationComplete();
-      
       this.log('系統整合和啟動完成');
       return true;
       
@@ -670,24 +666,6 @@ class InitializationManager {
   handleSubtitleError(error) {
     console.error('字幕處理錯誤:', error);
     // 可以實現錯誤恢復邏輯
-  }
-
-  /**
-   * 通知初始化完成
-   */
-  notifyInitializationComplete() {
-    sendMessage({
-      type: 'CONTENT_SCRIPT_READY',
-      timestamp: Date.now(),
-      features: {
-        subtitleReplacement: true,
-        dualSubtitle: true,
-        vote: true,
-        translation: true
-      }
-    }).catch(error => {
-      console.warn('通知後台初始化完成失敗:', error);
-    });
   }
 
   /**

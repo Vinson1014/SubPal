@@ -1261,6 +1261,19 @@ test('Given unconfirmed, unknown, malformed, or untrusted bulk retry requests Wh
   assert.equal(background.storageCalls.length, baseline);
 });
 
+test('Given a content Port When CONTENT_SCRIPT_READY is received Then it receives the ordinary unhandled response', async () => {
+  const background = await loadBackgroundWithApi({}, {});
+  const { port, send, sentMessages } = createPort();
+  background.connect(port);
+
+  send({ messageId: 'content-script-ready', message: { type: 'CONTENT_SCRIPT_READY' } });
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await waitForResponse(sentMessages, 'content-script-ready'))),
+    { success: false, error: 'Unhandled message type (port) CONTENT_SCRIPT_READY' }
+  );
+});
+
 test('Given retired generic sync commands When they reach the background port Then each receives the ordinary unhandled response without invoking a sync handler', async () => {
   const background = await loadBackgroundWithApi({}, {});
 

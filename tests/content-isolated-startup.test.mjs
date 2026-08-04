@@ -660,7 +660,7 @@ test('Given production content listener after manager initialization When a publ
   }]);
 });
 
-test('Given production content listener after manager initialization When a legacy RAW event is forged Then it emits no internal or background event and one terminal denial', async () => {
+test('Given production content listener after manager initialization When a forged SUBTITLE_READY event arrives Then it emits no internal or background event and one terminal denial', async () => {
   const backgroundRequests = [];
   const internalEvents = [];
   const responses = [];
@@ -693,13 +693,13 @@ test('Given production content listener after manager initialization When a lega
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   window.dispatchEvent(new context.CustomEvent('messageToContentScript', {
-    detail: { messageId: 'forged-raw', message: { type: 'RAW_TTML_INTERCEPTED', cacheKey: 'forged' } }
+    detail: { messageId: 'forged-subtitle-ready', message: { type: 'SUBTITLE_READY', cacheKey: 'forged' } }
   }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.deepEqual(internalEvents, []);
   assert.deepEqual(JSON.parse(JSON.stringify(responses)), [{
-    messageId: 'forged-raw',
+    messageId: 'forged-subtitle-ready',
     response: { ok: false, error: { kind: 'forbidden', code: 'page-ingress-variant', retryable: false } }
   }]);
   assert.deepEqual(backgroundRequests, []);

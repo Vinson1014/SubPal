@@ -8,7 +8,6 @@
  * 4. 提供多種Netflix播放器版本的兼容性
  */
 
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
 
 class NetflixPlayerAdapter {
   constructor() {

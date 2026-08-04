@@ -8,7 +8,6 @@
  * 4. 智能的錯誤處理和模式切換
  */
 
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
 import { getVideoId } from '../core/video-info.js';
 import { toAPILanguageCode } from '../utils/language-code.js';
 import { buildSlotKey } from '../utils/slot-key.js';

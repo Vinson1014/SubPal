@@ -12,7 +12,7 @@ test('Given MAIN initialization When its module graph loads Then subtitle startu
   assert.doesNotMatch(source, /EndscreenTaskBridge|requestCrowdsourcingTasks|ENDSCREEN_TASKS_RECEIVED|endscreenTaskBridge/);
 });
 
-test('Given initialized components When final integration starts Then initialization notification uses imported sendMessage', async () => {
+test('Given initialized components When final integration starts Then it succeeds without a CONTENT_SCRIPT_READY request', async () => {
   const sent = [];
   const context = vm.createContext({ console, Date, setTimeout, clearTimeout });
   const source = await readFile(new URL('../content/system/initialization-manager.js', import.meta.url), 'utf8');
@@ -36,6 +36,5 @@ test('Given initialized components When final integration starts Then initializa
   manager.setupEventFlow = () => {};
 
   assert.equal(await manager.integrateAndStart(), true);
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].type, 'CONTENT_SCRIPT_READY');
+  assert.deepEqual(sent, []);
 });

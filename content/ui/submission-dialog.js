@@ -8,7 +8,6 @@
  * 4. 語言記憶功能
  */
 
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
 import { toAPILanguageCode } from '../utils/language-code.js';
 
 class SubmissionDialog {

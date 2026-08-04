@@ -3,27 +3,6 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 
-async function loadPrivateTransportModule(context) {
-  const paths = [
-    '../content/system/capabilities/result.js',
-    '../content/system/capabilities/private-transport-diagnostics.js',
-    '../content/system/capabilities/private-transports.js'
-  ];
-  const sources = await Promise.all(paths.map((path) => readFile(new URL(path, import.meta.url), 'utf8')));
-  const [result, diagnostics, transports] = sources.map((source, index) => new vm.SourceTextModule(source, {
-    context, identifier: paths[index]
-  }));
-  await result.link(() => { throw new Error('result.js should not import dependencies'); });
-  await diagnostics.link(() => { throw new Error('diagnostics should not import dependencies'); });
-  await transports.link((specifier) => {
-    if (specifier === './result.js') return result;
-    if (specifier === './private-transport-diagnostics.js') return diagnostics;
-    throw new Error(`Unexpected private transport dependency: ${specifier}`);
-  });
-  await result.evaluate(); await diagnostics.evaluate(); await transports.evaluate();
-  return transports;
-}
-
 async function loadMessagingModule() {
   const source = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
   const context = vm.createContext({ console });
@@ -31,11 +10,7 @@ async function loadMessagingModule() {
     context,
     identifier: 'content/system/messaging.js'
   });
-  const transports = await loadPrivateTransportModule(context);
-  await module.link((specifier) => {
-    assert.equal(specifier, './capabilities/private-transports.js');
-    return transports;
-  });
+  await module.link(() => { throw new Error('messaging.js should not import dependencies'); });
   await module.evaluate();
   return module.namespace;
 }
@@ -74,78 +49,20 @@ async function loadMessagingContentBridgeHarness() {
       return configModule;
     }
   });
-  const transports = await loadPrivateTransportModule(context);
-  await module.link((specifier) => {
-    assert.equal(specifier, './capabilities/private-transports.js');
-    return transports;
-  });
+  await module.link(() => { throw new Error('messaging.js should not import static dependencies'); });
   await module.evaluate();
   await module.namespace.initMessaging();
   return { messaging: module.namespace, window, CustomEvent };
 }
 
-async function loadMessagingTimeoutHarness() {
-  const source = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
-  const listeners = new Map();
-  const timers = new Map();
-  let nextTimerId = 0;
-  const window = {
-    addEventListener(type, listener) { (listeners.get(type) ?? listeners.set(type, new Set()).get(type)).add(listener); },
-    removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
-    dispatchEvent(event) { for (const listener of [...(listeners.get(event.type) ?? [])]) listener(event); return true; },
-  };
-  const setTimeout = (callback, delay) => { const id = ++nextTimerId; timers.set(id, { callback, delay }); return id; };
-  const clearTimeout = (id) => timers.delete(id);
-  const context = vm.createContext({ console, window, CustomEvent: class CustomEvent { constructor(type, options = {}) { this.type = type; this.detail = options.detail; } }, setTimeout, clearTimeout });
-  const module = new vm.SourceTextModule(source, { context, identifier: 'content/system/messaging.js' });
-  const transports = await loadPrivateTransportModule(context);
-  await module.link((specifier) => {
-    assert.equal(specifier, './capabilities/private-transports.js');
-    return transports;
-  });
-  await module.evaluate();
-  return {
-    messaging: module.namespace,
-    run(delay) { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.callback(); } }
-  };
+function dispatchContentDetail(window, CustomEvent, detail) {
+  window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+    detail
+  }));
 }
 
-async function loadMessagingRequestCaptureHarness() {
-  const source = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
-  const listeners = new Map();
-  const requests = [];
-  const timers = new Map();
-  let nextTimerId = 0;
-  const window = {
-    addEventListener(type, listener) {
-      if (!listeners.has(type)) listeners.set(type, new Set());
-      listeners.get(type).add(listener);
-    },
-    removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
-    dispatchEvent(event) {
-      if (event.type === 'messageToContentScript') requests.push(event.detail);
-      for (const listener of [...(listeners.get(event.type) ?? [])]) listener(event);
-      return true;
-    }
-  };
-  class CustomEvent {
-    constructor(type, options = {}) { this.type = type; this.detail = options.detail; }
-  }
-  const setTimeout = (callback, delay) => { const id = ++nextTimerId; timers.set(id, { callback, delay }); return id; };
-  const clearTimeout = (id) => timers.delete(id);
-  const context = vm.createContext({ console, window, CustomEvent, setTimeout, clearTimeout });
-  const module = new vm.SourceTextModule(source, { context, identifier: 'content/system/messaging.js' });
-  const transports = await loadPrivateTransportModule(context);
-  await module.link((specifier) => {
-    assert.equal(specifier, './capabilities/private-transports.js');
-    return transports;
-  });
-  await module.evaluate();
-  return {
-    messaging: module.namespace,
-    requests,
-    run(delay) { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.callback(); } }
-  };
+function dispatchContentMessage(window, CustomEvent, message) {
+  dispatchContentDetail(window, CustomEvent, { message });
 }
 
 test('Given an internal event handler When it is registered Then a disposer is returned and removes only that handler', async () => {
@@ -153,42 +70,62 @@ test('Given an internal event handler When it is registered Then a disposer is r
   const events = [];
   const firstHandler = (message) => events.push(`first:${message.type}`);
   const secondHandler = (message) => events.push(`second:${message.type}`);
+  const eventType = 'INTERNAL_TEST_EVENT';
 
-  const firstDisposer = messaging.registerInternalEventHandler('SUBTITLE_READY', firstHandler);
-  const secondDisposer = messaging.registerInternalEventHandler('SUBTITLE_READY', secondHandler);
+  const firstDisposer = messaging.registerInternalEventHandler(eventType, firstHandler);
+  const secondDisposer = messaging.registerInternalEventHandler(eventType, secondHandler);
 
   assert.equal(typeof firstDisposer, 'function');
   assert.equal(typeof secondDisposer, 'function');
 
-  messaging.dispatchInternalEvent({ type: 'SUBTITLE_READY' });
+  messaging.dispatchInternalEvent({ type: eventType });
   firstDisposer();
   firstDisposer();
-  messaging.dispatchInternalEvent({ type: 'SUBTITLE_READY' });
+  messaging.dispatchInternalEvent({ type: eventType });
 
   assert.deepEqual(events, [
-    'first:SUBTITLE_READY',
-    'second:SUBTITLE_READY',
-    'second:SUBTITLE_READY'
+    'first:INTERNAL_TEST_EVENT',
+    'second:INTERNAL_TEST_EVENT',
+    'second:INTERNAL_TEST_EVENT'
   ]);
 });
 
-test('Given a caller that ignores the disposer When it registers and dispatches an allowed internal event Then existing behavior remains unchanged', async () => {
+test('Given a caller that ignores the disposer When it registers and dispatches a generic internal event Then existing behavior remains unchanged', async () => {
   const messaging = await loadMessagingModule();
   const events = [];
+  const eventType = 'INTERNAL_TEST_EVENT';
 
-  messaging.registerInternalEventHandler('SUBTITLE_READY', (message) => {
+  messaging.registerInternalEventHandler(eventType, (message) => {
     events.push(message.type);
   });
 
-  messaging.dispatchInternalEvent({ type: 'SUBTITLE_READY' });
+  messaging.dispatchInternalEvent({ type: eventType });
 
-  assert.deepEqual(events, ['SUBTITLE_READY']);
+  assert.deepEqual(events, [eventType]);
 });
 
-test('Given an initialized messaging module When its public interface is loaded Then generic page commands are absent', async () => {
+test('Given an initialized messaging module When its public interface is loaded Then only approved internal and readiness APIs remain', async () => {
   const messaging = await loadMessagingModule();
 
-  assert.equal(Object.hasOwn(messaging, 'sendMessageToPageScript'), false);
+  for (const name of [
+    'initMessaging',
+    'registerInternalEventHandler',
+    'dispatchInternalEvent',
+    'isPageScriptAvailable',
+    'waitForPageScript'
+  ]) {
+    assert.equal(typeof messaging[name], 'function', `${name} must remain exported`);
+  }
+
+  for (const name of [
+    'sendMessage',
+    'onMessage',
+    'registerMessageHandler',
+    'registerAutoForwardingToInternalEvent',
+    'sendMessageToPageScript'
+  ]) {
+    assert.equal(Object.hasOwn(messaging, name), false, `${name} must not be exported`);
+  }
 });
 
 test('Given a VIDEO_ID_CHANGED internal handler When its disposer repeats Then it remains removed', async () => {
@@ -204,17 +141,111 @@ test('Given a VIDEO_ID_CHANGED internal handler When its disposer repeats Then i
   assert.deepEqual(events, [{ type: 'VIDEO_ID_CHANGED', oldVideoId: '81234567', newVideoId: '87654321' }]);
 });
 
-test('Given content forwards VIDEO_ID_CHANGED When messaging receives the existing bridge event Then the internal handler receives it', async () => {
+test('Given hostile reverse-DOM bridge wrappers When messaging receives them Then no getter runs and no internal event dispatches', async () => {
   const { messaging, window, CustomEvent } = await loadMessagingContentBridgeHarness();
   const events = [];
+  let getterReads = 0;
   messaging.registerInternalEventHandler('VIDEO_ID_CHANGED', (message) => events.push(message));
-  const message = { type: 'VIDEO_ID_CHANGED', oldVideoId: '81234567', newVideoId: '87654321' };
 
-  window.dispatchEvent(new CustomEvent('messageFromContentScript', {
-    detail: { messageId: 'route-change-1', message }
-  }));
+  const message = { type: 'VIDEO_ID_CHANGED', newVideoId: '81234567' };
+  const accessor = {};
+  Object.defineProperty(accessor, 'message', { enumerable: true, get() { getterReads += 1; return message; } });
+  const nonEnumerable = {};
+  Object.defineProperty(nonEnumerable, 'message', { enumerable: false, value: message });
+  const inherited = Object.create({ message });
+  const custom = Object.create({});
+  custom.message = message;
+  const spoofedPrototype = Object.create(null);
+  spoofedPrototype.constructor = Object;
+  const spoofed = Object.create(spoofedPrototype);
+  spoofed.message = message;
+  const symbolBearing = { message, [Symbol('authority')]: 'forged' };
+  const throwingProxy = new Proxy({}, { getOwnPropertyDescriptor() { throw new Error('detail trap must not escape'); } });
+  const { proxy: revokedProxy, revoke } = Proxy.revocable({ message }, {});
+  revoke();
 
-  assert.deepEqual(events, [message]);
+  for (const detail of [
+    accessor,
+    nonEnumerable,
+    inherited,
+    custom,
+    spoofed,
+    symbolBearing,
+    { message, destination: 'background' },
+    { message, jwt: 'forged' },
+    { message, profileId: 'profile-1' },
+    throwingProxy,
+    revokedProxy
+  ]) {
+    assert.doesNotThrow(() => dispatchContentDetail(window, CustomEvent, detail));
+  }
+
+  assert.deepEqual(events, []);
+  assert.equal(getterReads, 0);
+});
+
+test('Given a reverse-DOM VIDEO_ID_CHANGED with authority or structural violations When messaging receives it Then it does not dispatch or execute getters', async () => {
+  const { messaging, window, CustomEvent } = await loadMessagingContentBridgeHarness();
+  const events = [];
+  let getterReads = 0;
+  messaging.registerInternalEventHandler('VIDEO_ID_CHANGED', (message) => events.push(message));
+
+  const accessor = { type: 'VIDEO_ID_CHANGED', newVideoId: '81234567' };
+  Object.defineProperty(accessor, 'jwt', { enumerable: true, get() { getterReads += 1; return 'secret'; } });
+  const proxy = new Proxy({ type: 'VIDEO_ID_CHANGED', newVideoId: '81234567' }, {
+    get() { getterReads += 1; throw new Error('proxy getter must not run'); },
+    getOwnPropertyDescriptor() { throw new Error('proxy descriptor must not run'); }
+  });
+  const inherited = Object.create({ type: 'VIDEO_ID_CHANGED' });
+  inherited.newVideoId = '81234567';
+  const symbolBearing = { type: 'VIDEO_ID_CHANGED', newVideoId: '81234567', [Symbol('authority')]: 'forged' };
+
+  for (const message of [
+    { type: 'VIDEO_ID_CHANGED', newVideoId: '81234567', destination: 'background' },
+    { type: 'VIDEO_ID_CHANGED', newVideoId: '81234567', command: 'DELETE' },
+    { type: 'VIDEO_ID_CHANGED', newVideoId: '81234567', storageKey: 'jwt' },
+    { type: 'VIDEO_ID_CHANGED', newVideoId: '81234567', jwt: 'forged' },
+    { type: 'VIDEO_ID_CHANGED', newVideoId: '81234567', profileId: 'profile-1' },
+    { type: 'VIDEO_ID_CHANGED', newVideoId: '81234567', sync: true },
+    { type: 'VIDEO_ID_CHANGED', newVideoId: '81234567', lifecycle: 'startup' },
+    { type: 'VIDEO_ID_CHANGED', newVideoId: true },
+    { type: 'VIDEO_ID_CHANGED', newVideoId: {} },
+    { type: 'VIDEO_ID_CHANGED', videoId: Number.NaN },
+    accessor,
+    proxy,
+    inherited,
+    symbolBearing
+  ]) {
+    assert.doesNotThrow(() => dispatchContentMessage(window, CustomEvent, message));
+  }
+
+  assert.deepEqual(events, []);
+  assert.equal(getterReads, 0);
+});
+
+test('Given content forwards an exact VIDEO_ID_CHANGED wrapper When messaging receives it Then it preserves permitted ID values without semantic range decisions and fans out once', async () => {
+  const { messaging, window, CustomEvent } = await loadMessagingContentBridgeHarness();
+  const events = [];
+  messaging.registerInternalEventHandler('VIDEO_ID_CHANGED', (message) => events.push({ handler: 'first', message }));
+  messaging.registerInternalEventHandler('VIDEO_ID_CHANGED', (message) => events.push({ handler: 'second', message }));
+  const firstMessage = { type: 'VIDEO_ID_CHANGED', oldVideoId: 81234567, newVideoId: '87654321', videoId: null };
+  const secondMessage = { type: 'VIDEO_ID_CHANGED', oldVideoId: null, newVideoId: -99, videoId: '' };
+  const nullPrototypeDetail = Object.create(null);
+  nullPrototypeDetail.message = secondMessage;
+
+  dispatchContentDetail(window, CustomEvent, { messageId: 'route-change-1', message: firstMessage });
+  dispatchContentDetail(window, CustomEvent, nullPrototypeDetail);
+
+  const expectedFirst = { type: 'VIDEO_ID_CHANGED', oldVideoId: '81234567', newVideoId: '87654321', videoId: null };
+  const expectedSecond = { type: 'VIDEO_ID_CHANGED', oldVideoId: null, newVideoId: '-99', videoId: '' };
+  assert.deepEqual(JSON.parse(JSON.stringify(events)), [
+    { handler: 'first', message: expectedFirst },
+    { handler: 'second', message: expectedFirst },
+    { handler: 'first', message: expectedSecond },
+    { handler: 'second', message: expectedSecond }
+  ]);
+  assert.notStrictEqual(events[0].message, firstMessage);
+  assert.notStrictEqual(events[2].message, secondMessage);
 });
 
 test('Given initialized messaging receives a forged legacy RAW message When bridge auto-routing runs Then it does not dispatch internally while direct dispatch remains generic', async () => {
@@ -230,30 +261,4 @@ test('Given initialized messaging receives a forged legacy RAW message When brid
 
   messaging.dispatchInternalEvent(raw);
   assert.deepEqual(events, [raw]);
-});
-
-test('Given a legacy DOM caller When its private transport terminates Then it rejects a safe Error', async () => {
-  const dom = await loadMessagingTimeoutHarness();
-  const domPending = dom.messaging.sendMessage({ type: 'PING' });
-  dom.run(10000);
-  await assert.rejects(domPending, (error) => error?.kind === 'timeout' && error.code === 'dom-response-timeout' && error.retryable === true && error.message === 'dom-response-timeout');
-});
-
-test('Given current messaging and no DOM response When important messages are sent Then each send dispatches once and times out without replay', async () => {
-  const { messaging, requests, run } = await loadMessagingRequestCaptureHarness();
-
-  const first = messaging.sendMessage({ type: 'SUBMIT_TRANSLATION', text: 'first' });
-  const second = messaging.sendMessage({ type: 'PROCESS_VOTE', text: 'second' });
-
-  assert.equal(requests.length, 2);
-  assert.notEqual(requests[0].messageId, requests[1].messageId);
-  assert.equal(requests[0].message.type, 'SUBMIT_TRANSLATION');
-  assert.equal(requests[1].message.type, 'PROCESS_VOTE');
-
-  run(20000);
-  run(15000);
-
-  await assert.rejects(first, (error) => error?.kind === 'timeout' && error.code === 'dom-response-timeout' && error.retryable === true && error.message === 'dom-response-timeout');
-  await assert.rejects(second, (error) => error?.kind === 'timeout' && error.code === 'dom-response-timeout' && error.retryable === true && error.message === 'dom-response-timeout');
-  assert.equal(requests.length, 2);
 });

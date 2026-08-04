@@ -8,7 +8,6 @@
  * 4. 事件解耦：通過回調函數與外部業務邏輯解耦
  */
 
-import { sendMessage, registerInternalEventHandler } from '../system/messaging.js';
 
 class InteractionPanel {
   constructor() {

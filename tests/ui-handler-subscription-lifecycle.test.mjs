@@ -133,16 +133,7 @@ async function loadHandler(file, exportName) {
   });
   await config.evaluate();
 
-  const module = new vm.SourceTextModule(source, {
-    context,
-    identifier: `content/ui/${file}`,
-    importModuleDynamically: async (specifier) => {
-      assert.equal(specifier, '../system/config/config-bridge.js');
-      return config;
-    }
-  });
   const messaging = new vm.SourceTextModule(`
-    export const sendMessage = async () => ({});
     export const registerInternalEventHandler = (type, handler) => {
       let handlers = globalThis.subscriptions.get(type);
       if (!handlers) {
@@ -161,9 +152,17 @@ async function loadHandler(file, exportName) {
     };
   `, { context });
 
+  const module = new vm.SourceTextModule(source, {
+    context,
+    identifier: `content/ui/${file}`,
+    importModuleDynamically: async (specifier) => {
+      assert.equal(specifier, '../system/config/config-bridge.js');
+      return config;
+    }
+  });
   await module.link((specifier) => {
-    assert.equal(specifier, '../system/messaging.js');
-    return messaging;
+    if (specifier === '../system/messaging.js') return messaging;
+    throw new Error(`Unexpected static import: ${specifier}`);
   });
   await module.evaluate();
 

@@ -525,13 +525,6 @@ export async function loadRealContentTransport(background, sender = netflixSende
       throw new Error(`Unexpected content import: ${specifier}`);
     }
   }).runInContext(context);
-  const messagingSource = await readFile(new URL('../content/system/messaging.js', import.meta.url), 'utf8');
-  const messagingModule = new vm.SourceTextModule(messagingSource, { context, identifier: 'content/system/messaging.js' });
-  await messagingModule.link((specifier) => {
-    assert.equal(specifier, './capabilities/private-transports.js');
-    return transportsModule;
-  });
-  await messagingModule.evaluate();
   const controllerSource = await readFile(new URL('../content/core/endscreen-task-controller.js', import.meta.url), 'utf8');
   const controllerModule = new vm.SourceTextModule(controllerSource, { context, identifier: 'content/core/endscreen-task-controller.js' });
   await controllerModule.link(() => { throw new Error('endscreen-task-controller.js should not import dependencies'); });
@@ -549,7 +542,6 @@ export async function loadRealContentTransport(background, sender = netflixSende
   return {
     EndscreenTaskController: controllerModule.namespace.EndscreenTaskController,
     sendMessage: taskClientModule.namespace.requestCrowdsourcingTasks,
-    sendLegacyMessage: messagingModule.namespace.sendMessage,
     requestPrivateSubtitle(query) {
       const transport = transportsModule.namespace.createPortTransport({ connect: () => port });
       transport.start();
