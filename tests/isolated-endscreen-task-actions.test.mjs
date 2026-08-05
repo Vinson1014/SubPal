@@ -96,7 +96,7 @@ function createOwner({ translationResult = { ok: true, value: { status: 'queued-
 
     async submit(data) {
       const result = await this.submitCallback(data);
-      if (result?.status === 'success') this.isOpen = false;
+      if (result?.status === 'queued-locally') this.isOpen = false;
       return result;
     }
 
@@ -244,6 +244,7 @@ test('Given an isolated submit action When the dialog opens Then completion wait
 
   await completion;
   assert.deepEqual(await action, { status: 'queued-locally', operationId: 'translation-1' });
+  assert.equal(owner.submissionDialog.isOpen, false);
   assert.equal(calls.translations.length, 1);
   assert.deepEqual(calls.translations[0].resolutionContext, resolutionContext);
   assert.equal(calls.translations[0].translationID, null);
@@ -827,7 +828,7 @@ test('Given a watch-A submission is pending When internal VIDEO_ID_CHANGED repor
 
 test('Given a real dialog submit callback When it returns the queue promise Then the promise and task metadata are preserved', async () => {
   const dialog = Object.create(SubmissionDialog.prototype);
-  const queueResult = Promise.resolve({ status: 'success' });
+  const queueResult = Promise.resolve({ status: 'queued-locally', operationId: 'translation-1' });
   let received = null;
   dialog.inputs = {
     languageDisplay: { getAttribute: () => 'zh-Hant' },
@@ -851,7 +852,7 @@ test('Given a real dialog submit callback When it returns the queue promise Then
 
   const result = await dialog.handleSubmit();
 
-  assert.deepEqual(result, { status: 'success' });
+  assert.deepEqual(result, { status: 'queued-locally', operationId: 'translation-1' });
   assert.deepEqual(received.resolutionContext, resolutionContext);
   assert.equal(received.translationID, null);
 });

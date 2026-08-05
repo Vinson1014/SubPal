@@ -246,7 +246,7 @@ test('Given a pending task action When next-task resets the task-local state The
   assert.equal(document.getElementById('subpal-endscreen-panel')
     .querySelector('.subpal-endscreen-timecode').textContent, `跳至 ${secondTask.timecode}`);
 
-  resolveAction({ status: 'success' });
+  resolveAction({ status: 'queued-locally', operationId: 'operation-late-completion-1' });
   await Promise.resolve();
   await Promise.resolve();
 
@@ -322,13 +322,13 @@ test('Given an action request When the same action is clicked repeatedly Then on
 
   assert.equal(calls, 1);
   assert.equal(panel.getStatus().actionState, 'loading');
-  resolveAction({ status: 'success' });
+  resolveAction({ status: 'queued-locally', operationId: 'operation-duplicate-1' });
 });
 
 test('Given an action promise that resolves successfully When it settles Then success is observable without a misleading immediate success', async () => {
   const Panel = await loadActionPanel();
   const { panel, document } = await createHarness(Panel);
-  panel.onAction(() => Promise.resolve({ status: 'success' }));
+  panel.onAction(() => Promise.resolve({ status: 'queued-locally', operationId: 'operation-settled-1' }));
 
   panel.show([createOfficialTask()], createContext());
   clickButton(document.getElementById('subpal-endscreen-panel'), '.subpal-endscreen-cta-btn');
