@@ -223,7 +223,7 @@ test('Given a pending queue callback When the dialog submit settles Then it stay
         translation: document.querySelector('#translation-input').value,
         reason: document.querySelector('#reason-input').value
       };
-      resolveQueue({ status: 'success' });
+      resolveQueue({ status: 'queued-locally', operationId: 'operation-viewport-1' });
       await submit;
       return { pending, closedAfterSuccess: !dialog.isOpen };
     });
