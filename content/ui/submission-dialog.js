@@ -498,7 +498,7 @@ class SubmissionDialog {
     this.setSubmitting(true);
     try {
       const submitResult = await Promise.resolve(this.triggerCallback('onSubmit', submissionData));
-      if (submitResult?.status !== 'success') {
+      if (submitResult?.status !== 'queued-locally') {
         throw new Error(submitResult?.error || '翻譯提交失敗，請再試一次。');
       }
       this.close();

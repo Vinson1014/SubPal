@@ -57,6 +57,41 @@ function createTrackedConfigBridge() {
   };
 }
 
+function createSubmissionHarness(SubmissionDialog, submitResult) {
+  const dialog = new SubmissionDialog();
+  const submissionStates = [];
+  let closeCalls = 0;
+  let callbackCalls = 0;
+
+  dialog.currentSubtitleData = {
+    videoId: 'video-1',
+    timestamp: 42,
+    original: 'Original subtitle'
+  };
+  dialog.inputs = {
+    languageDisplay: { getAttribute: () => 'en' },
+    translationInput: { value: 'Corrected subtitle' },
+    reasonInput: { value: 'More natural wording' }
+  };
+  dialog.setSubmitting = (...args) => {
+    submissionStates.push(args);
+  };
+  dialog.close = () => {
+    closeCalls += 1;
+  };
+  dialog.onSubmit(() => {
+    callbackCalls += 1;
+    return submitResult;
+  });
+
+  return {
+    dialog,
+    get callbackCalls() { return callbackCalls; },
+    get closeCalls() { return closeCalls; },
+    submissionStates
+  };
+}
+
 test('Given an initialized dialog When per-open resources close and the dialog is reused Then its config subscription remains active until final cleanup', async () => {
   const config = createTrackedConfigBridge();
   const SubmissionDialog = await loadDialog(config.bridge);
@@ -97,4 +132,46 @@ test('Given owner-capturing callbacks and current payload When final cleanup rep
   assert.equal(dialog.eventCallbacks.onCancel, null);
   assert.equal(dialog.eventCallbacks.onClose, null);
   assert.equal(dialog.configBridge, null);
+});
+
+test('Given a locally queued translation When submission completes Then the dialog closes without a failure state', async () => {
+  const SubmissionDialog = await loadDialog(createTrackedConfigBridge().bridge);
+  const queuedResult = { status: 'queued-locally', operationId: 'operation-1' };
+  const harness = createSubmissionHarness(SubmissionDialog, queuedResult);
+
+  const result = await harness.dialog.handleSubmit();
+
+  assert.equal(result, queuedResult);
+  assert.equal(harness.callbackCalls, 1);
+  assert.equal(harness.closeCalls, 1);
+  assert.deepEqual(harness.submissionStates, [[true]]);
+});
+
+test('Given an explicit submission error When submission completes Then the dialog stays open and displays the error', async () => {
+  const SubmissionDialog = await loadDialog(createTrackedConfigBridge().bridge);
+  const errorResult = { status: 'error', error: 'queue unavailable' };
+  const harness = createSubmissionHarness(SubmissionDialog, errorResult);
+
+  const result = await harness.dialog.handleSubmit();
+
+  assert.equal(result.status, errorResult.status);
+  assert.equal(result.error, errorResult.error);
+  assert.equal(harness.callbackCalls, 1);
+  assert.equal(harness.closeCalls, 0);
+  assert.deepEqual(harness.submissionStates, [[true], [false, 'queue unavailable']]);
+});
+
+test('Given a legacy success acknowledgement When submission completes Then the dialog stays open with a retryable error', async () => {
+  const SubmissionDialog = await loadDialog(createTrackedConfigBridge().bridge);
+  const harness = createSubmissionHarness(SubmissionDialog, { status: 'success' });
+  harness.dialog.isOpen = true;
+
+  const result = await harness.dialog.handleSubmit();
+
+  assert.equal(result.status, 'error');
+  assert.equal(result.error, '翻譯提交失敗，請再試一次。');
+  assert.equal(harness.callbackCalls, 1);
+  assert.equal(harness.closeCalls, 0);
+  assert.equal(harness.dialog.isOpen, true);
+  assert.deepEqual(harness.submissionStates, [[true], [false, '翻譯提交失敗，請再試一次。']]);
 });
