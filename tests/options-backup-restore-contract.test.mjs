@@ -46,7 +46,7 @@ function canonicalConfig(schema, overrides = {}) {
 
 function canonicalEnvelope(schema, overrides = {}) {
   return {
-    version: '3.0',
+    version: '4.0',
     backupDate: '2026-08-03T12:00:00.000Z',
     config: canonicalConfig(schema, overrides)
   };
@@ -237,7 +237,7 @@ test('Given storage containing identity, profile, queue, credential, endpoint, a
   assert.deepEqual(harness.storageCalls.gets, [BACKUP_ROOTS]);
   assert.equal(harness.downloads.length, 1);
   const exported = JSON.parse(await harness.downloads[0].blob.text());
-  assert.equal(exported.version, '3.0');
+  assert.equal(exported.version, '4.0');
   assert.match(exported.backupDate, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   assert.deepEqual(exported.config, expectedConfig);
   assert.deepEqual(Object.keys(exported.config).sort(), [...BACKUP_ROOTS].sort());
@@ -247,7 +247,7 @@ test('Given storage containing identity, profile, queue, credential, endpoint, a
   }
 });
 
-test('Given a complete canonical v3 backup When Options restores it Then it performs one atomic four-root write and leaves protected storage untouched', async () => {
+test('Given a complete canonical v4 backup When Options restores it Then it performs one atomic four-root write and leaves protected storage untouched', async () => {
   const harness = await loadOptionsBackupHarness();
   const envelope = canonicalEnvelope(harness.schema, {
     debugMode: true,
@@ -263,6 +263,33 @@ test('Given a complete canonical v3 backup When Options restores it Then it perf
   assert.deepEqual(harness.storageCalls.sets[0], envelope.config);
   assert.deepEqual(Object.fromEntries(PROTECTED_KEYS.map((key) => [key, harness.storage[key]])), protectedBefore);
   assert.deepEqual(harness.alerts, ['資料已成功恢復']);
+});
+
+test('Given a 0.4.1 v3 backup When Options restores it Then only validated editable settings are imported and legacy authority roots are ignored', async () => {
+  const harness = await loadOptionsBackupHarness();
+  const protectedBefore = Object.fromEntries(PROTECTED_KEYS.map((key) => [key, clone(harness.storage[key])]));
+  const legacyBackup = {
+    version: '3.0',
+    backupDate: '2026-07-23T12:00:00.000Z',
+    config: {
+      debugMode: true,
+      subtitle: { primaryLanguage: 'en' },
+      api: { baseUrl: 'https://legacy-secret.example.test' },
+      user: { userId: 'legacy-user-secret' },
+      video: { currentVideoId: 'legacy-video-secret' }
+    }
+  };
+
+  await harness.restore(JSON.stringify(legacyBackup));
+
+  assert.equal(harness.storageCalls.sets.length, 1);
+  assert.deepEqual(harness.storageCalls.sets[0], canonicalConfig(harness.schema, {
+    debugMode: true,
+    'subtitle.primaryLanguage': 'en'
+  }));
+  assert.deepEqual(Object.fromEntries(PROTECTED_KEYS.map((key) => [key, harness.storage[key]])), protectedBefore);
+  assert.equal(harness.alerts[0].includes('後端端點、使用者資料與影片狀態未匯入'), true);
+  assert.equal(JSON.stringify(harness.storageCalls.sets[0]).includes('legacy-secret'), false);
 });
 
 test('Given a canonical backup mixed with forbidden roots or nested fields When Options restores it Then it never writes protected storage', async () => {

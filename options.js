@@ -1288,20 +1288,43 @@ function buildCanonicalConfig(flatValues) {
 async function parseCanonicalBackup(backupData) {
   const backupSchema = await getBackupConfigSchema();
   const rootKeys = backupSchema.getBackupConfigKeys();
-  if (!hasExactKeys(backupData, ['version', 'backupDate', 'config']) || backupData.version !== '3.0' || !isCanonicalBackupDate(backupData.backupDate)) {
+  if (!hasExactKeys(backupData, ['version', 'backupDate', 'config']) || !isCanonicalBackupDate(backupData.backupDate)) {
     return null;
   }
-  if (!hasExactKeys(backupData.config, rootKeys)) return null;
-
-  const flatConfig = flattenBackupConfig(backupData.config);
   const expectedKeys = getBackupFlatKeys(rootKeys);
-  if (!flatConfig || !hasExactKeySet(flatConfig, expectedKeys)) return null;
+  let flatConfig;
+  let legacy = false;
+
+  if (backupData.version === '4.0') {
+    if (!hasExactKeys(backupData.config, rootKeys)) return null;
+    flatConfig = flattenBackupConfig(backupData.config);
+    if (!flatConfig || !hasExactKeySet(flatConfig, expectedKeys)) return null;
+  } else if (backupData.version === '3.0') {
+    if (!isOrdinaryObject(backupData.config)) return null;
+    const legacyRoots = new Set([...rootKeys, 'api', 'user', 'video']);
+    if (Object.keys(backupData.config).some((key) => !legacyRoots.has(key))) return null;
+    const editableConfig = Object.fromEntries(
+      rootKeys.filter((key) => Object.hasOwn(backupData.config, key)).map((key) => [key, backupData.config[key]])
+    );
+    const suppliedValues = flattenBackupConfig(editableConfig);
+    if (!suppliedValues || Object.keys(suppliedValues).some((key) => !expectedKeys.includes(key))) return null;
+    flatConfig = Object.fromEntries(expectedKeys.map((key) => [
+      key,
+      Object.hasOwn(suppliedValues, key) ? suppliedValues[key] : DEFAULT_CONFIG[key]
+    ]));
+    legacy = true;
+  } else {
+    return null;
+  }
 
   for (const key of expectedKeys) {
     if (!backupSchema.validateConfigValue(key, flatConfig[key]).valid) return null;
   }
 
-  return buildCanonicalConfig(Object.fromEntries(expectedKeys.map((key) => [key, flatConfig[key]])));
+  return {
+    config: buildCanonicalConfig(Object.fromEntries(expectedKeys.map((key) => [key, flatConfig[key]]))),
+    legacy
+  };
 }
 
 async function createCanonicalBackupConfig(storageConfig) {
@@ -1329,7 +1352,7 @@ async function backupData() {
     const result = await chrome.storage.local.get(rootKeys);
 
     const backupData = {
-      version: '3.0',
+      version: '4.0',
       backupDate: new Date().toISOString(),
       config: await createCanonicalBackupConfig(result)
     };
@@ -1359,14 +1382,16 @@ function restoreData(file) {
   reader.onload = async (event) => {
     try {
       const backupData = JSON.parse(event.target.result);
-      const config = await parseCanonicalBackup(backupData);
-      if (!config) {
+      const parsed = await parseCanonicalBackup(backupData);
+      if (!parsed) {
         alert('備份檔案格式無效');
         return;
       }
 
-      await chrome.storage.local.set(config);
-      alert('資料已成功恢復');
+      await chrome.storage.local.set(parsed.config);
+      alert(parsed.legacy
+        ? '設定已成功恢復。為保護身分與待同步資料，舊備份中的後端端點、使用者資料與影片狀態未匯入。'
+        : '資料已成功恢復');
       await restoreOptionsUI();
     } catch {
       alert('備份檔案格式無效');
