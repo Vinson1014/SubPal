@@ -6,7 +6,9 @@ const COMMANDS = Object.freeze({
   activate: 'BACKEND_PROFILES_ACTIVATE',
   delete: 'BACKEND_PROFILES_DELETE',
   exportQueue: 'BACKEND_PROFILES_EXPORT_QUEUE',
-  retryFailed: 'BACKEND_PROFILES_RETRY_FAILED'
+  retryFailed: 'BACKEND_PROFILES_RETRY_FAILED',
+  migrationStatus: 'STORAGE_MIGRATION_STATUS',
+  resolveMigrationEndpoint: 'STORAGE_MIGRATION_RESOLVE_ENDPOINT'
 });
 
 function invalidProfileInput() {
@@ -93,6 +95,15 @@ export function createBackendProfiles({ request, createRequestId = () => crypto.
       const parsed = parseRetryOptions(options);
       return isNonEmptyString(profileId) && parsed
         ? execute({ type: COMMANDS.retryFailed, profileId, confirmInactiveProfile: parsed.confirmInactiveProfile })
+        : Promise.resolve(invalidProfileInput());
+    },
+    migrationStatus() {
+      return execute({ type: COMMANDS.migrationStatus });
+    },
+    resolveMigrationEndpoint(input) {
+      const parsed = parseCreateInput(input);
+      return parsed
+        ? execute({ type: COMMANDS.resolveMigrationEndpoint, endpoint: parsed.endpoint })
         : Promise.resolve(invalidProfileInput());
     }
   });

@@ -13,7 +13,7 @@
 
 import * as syncModule from './sync.js';
 import { resolveBackendProfile } from './backend-profiles.js';
-import { ensureStorageMigrationsComplete } from './storage-migrations.js';
+import { reconcileStorageMigrations } from './storage-migrations.js';
 
 // ==================== 配置常數 ====================
 
@@ -79,7 +79,7 @@ function debouncedTriggerSync(triggerFn, timerType) {
  */
 async function triggerVoteSync() {
   try {
-    await ensureStorageMigrationsComplete();
+    await reconcileStorageMigrations();
     const activeProfile = await resolveBackendProfile();
     const { voteQueue = [] } = await chrome.storage.local.get('voteQueue');
     const pendingItems = voteQueue.filter(item => item.status === 'pending' && item.backendProfileId === activeProfile.id);
@@ -103,7 +103,7 @@ async function triggerVoteSync() {
  */
 async function triggerTranslationSync() {
   try {
-    await ensureStorageMigrationsComplete();
+    await reconcileStorageMigrations();
     const activeProfile = await resolveBackendProfile();
     const { translationQueue = [] } = await chrome.storage.local.get('translationQueue');
     const pendingItems = translationQueue.filter(item => item.status === 'pending' && item.backendProfileId === activeProfile.id);
@@ -127,7 +127,7 @@ async function triggerTranslationSync() {
  */
 async function triggerReplacementEventSync() {
   try {
-    await ensureStorageMigrationsComplete();
+    await reconcileStorageMigrations();
     const activeProfile = await resolveBackendProfile();
     const { replacementEventQueue = [] } = await chrome.storage.local.get('replacementEventQueue');
     const pendingItems = replacementEventQueue.filter(item => item.status === 'pending' && item.backendProfileId === activeProfile.id);

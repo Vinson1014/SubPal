@@ -848,6 +848,7 @@ let backendProfiles = null;
 let backendProfileSnapshots = [];
 let selectedBackendProfileId = null;
 let backendProfileBusy = false;
+let storageMigrationNeedsAttention = false;
 
 async function getBackendProfiles() {
   if (backendProfiles) return backendProfiles;
@@ -904,6 +905,34 @@ function setBackendProfileError(message = '') {
   errorElement.hidden = !message;
 }
 
+function setStorageMigrationError(message = '') {
+  const errorElement = document.getElementById('storageMigrationError');
+  if (!errorElement) return;
+  errorElement.textContent = message;
+  errorElement.hidden = !message;
+}
+
+function renderStorageMigrationRecovery() {
+  const recovery = document.getElementById('storageMigrationRecovery');
+  const resolveButton = document.getElementById('resolveStorageMigrationButton');
+  const endpointInput = document.getElementById('storageMigrationEndpoint');
+  if (recovery) recovery.hidden = !storageMigrationNeedsAttention;
+  if (resolveButton) resolveButton.disabled = backendProfileBusy || !storageMigrationNeedsAttention;
+  if (endpointInput) endpointInput.disabled = backendProfileBusy || !storageMigrationNeedsAttention;
+}
+
+async function refreshStorageMigrationStatus() {
+  try {
+    const result = await (await getBackendProfiles()).migrationStatus();
+    storageMigrationNeedsAttention = result?.ok && result.value?.status === 'needs-attention' &&
+      result.value?.reason === 'unsupported-legacy-endpoint';
+  } catch {
+    storageMigrationNeedsAttention = false;
+  }
+  renderStorageMigrationRecovery();
+  return storageMigrationNeedsAttention;
+}
+
 function renderBackendProfiles() {
   const select = document.getElementById('backendProfileSelect');
   const status = document.getElementById('backendProfileStatus');
@@ -949,24 +978,38 @@ function renderBackendProfiles() {
   if (activateButton) activateButton.disabled = backendProfileBusy || !selectedProfile || selectedProfile.isActive;
   if (exportButton) exportButton.disabled = backendProfileBusy || !selectedProfile?.isActive;
   if (deleteButton) deleteButton.disabled = backendProfileBusy || !selectedProfile;
-  if (createButton) createButton.disabled = backendProfileBusy;
+  if (createButton) createButton.disabled = backendProfileBusy || storageMigrationNeedsAttention;
+  renderStorageMigrationRecovery();
 }
 
 async function refreshBackendProfiles() {
+  if (await refreshStorageMigrationStatus()) {
+    backendProfileSnapshots = [];
+    selectedBackendProfileId = null;
+    setBackendProfileError('請先確認安全的後端端點，完成既有資料升級。');
+    renderBackendProfiles();
+    return false;
+  }
   let result;
   try {
     result = await (await getBackendProfiles()).list();
   } catch {
+    await refreshStorageMigrationStatus();
     backendProfileSnapshots = [];
     selectedBackendProfileId = null;
-    setBackendProfileError('無法載入後端設定檔。請稍後再試。');
+    setBackendProfileError(storageMigrationNeedsAttention
+      ? '請先確認安全的後端端點，完成既有資料升級。'
+      : '無法載入後端設定檔。請稍後再試。');
     renderBackendProfiles();
     return false;
   }
   if (!result?.ok || !Array.isArray(result.value)) {
+    await refreshStorageMigrationStatus();
     backendProfileSnapshots = [];
     selectedBackendProfileId = null;
-    setBackendProfileError('無法載入後端設定檔。請稍後再試。');
+    setBackendProfileError(storageMigrationNeedsAttention
+      ? '請先確認安全的後端端點，完成既有資料升級。'
+      : '無法載入後端設定檔。請稍後再試。');
     renderBackendProfiles();
     return false;
   }
@@ -996,6 +1039,29 @@ function setupBackendProfileControls() {
   const activateButton = document.getElementById('activateBackendProfileButton');
   const exportButton = document.getElementById('exportBackendProfileButton');
   const deleteButton = document.getElementById('deleteBackendProfileButton');
+  const migrationEndpointInput = document.getElementById('storageMigrationEndpoint');
+  const resolveMigrationButton = document.getElementById('resolveStorageMigrationButton');
+
+  resolveMigrationButton?.addEventListener('click', () => runBackendProfileOperation(async () => {
+    const endpoint = migrationEndpointInput?.value.trim() || '';
+    if (!endpoint) {
+      setStorageMigrationError('請輸入符合安全規則的 HTTPS 或 localhost 端點。');
+      return;
+    }
+    if (!confirm('確認後，既有身分與待同步資料會繼續使用這個端點。確定要完成升級嗎？')) return;
+    const result = await (await getBackendProfiles()).resolveMigrationEndpoint({ endpoint });
+    if (!result?.ok) {
+      setStorageMigrationError(result?.error?.code === 'unsafe-endpoint'
+        ? '端點不符合安全規則，請使用 HTTPS 或 localhost。'
+        : '無法完成資料升級，既有資料仍已保留。請稍後再試。');
+      return;
+    }
+    storageMigrationNeedsAttention = false;
+    if (migrationEndpointInput) migrationEndpointInput.value = '';
+    setStorageMigrationError();
+    setBackendProfileError();
+    await refreshBackendProfiles();
+  }));
 
   select?.addEventListener('change', async () => {
     selectedBackendProfileId = select.value;

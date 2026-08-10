@@ -220,7 +220,7 @@ test('Given endpoint input When normalized Then only safe HTTPS or loopback HTTP
 
 test('Given legacy credentials and contribution records When migrated Then default ownership and operation IDs are repaired atomically', async () => {
   const storage = createStorage({
-    api: { baseUrl: 'https://user:secret@invalid.example.test' },
+    api: { baseUrl: DEFAULT_BACKEND_ENDPOINT },
     user: { userId: 'legacy-user-1234' },
     jwt: 'legacy-jwt',
     voteQueue: [
@@ -271,7 +271,7 @@ test('Given legacy credentials and contribution records When migrated Then defau
     id: 'vote-bound',
     status: 'failed',
     backendProfileId: 'unknown-profile',
-    operationId: ''
+    operationId: 'vote-bound'
   });
   assert.deepEqual(migrated.replacementEventHistory[0], {
     id: 'event-history',
@@ -668,7 +668,10 @@ test('Given a 401 followed by profile activation When the request refreshes and 
   ]);
   assert.equal(storage.backendProfiles.byId.default.jwt, 'default-refreshed-jwt');
   assert.equal(storage.backendProfiles.byId.target.jwt, 'target-jwt');
-  assert.deepEqual(storageCalls.filter((call) => call.operation === 'set').map((call) => call.keys), [['backendProfiles']]);
+  assert.deepEqual(storageCalls.filter((call) => call.operation === 'set').map((call) => call.keys), [
+    ['storageSchemaVersion', 'storageMigrationState'],
+    ['backendProfiles']
+  ]);
 });
 
 test('Given concurrent 401s for one profile When refresh starts Then only one registration is sent and both retries use its JWT', async () => {
@@ -775,7 +778,7 @@ test('Given a cold direct API operation and legacy userID When migrations are he
 
   assert.deepEqual(await operation, { success: true });
   assert.equal(storage.backendProfiles.byId.default.userId, 'legacy-direct-user');
-  assert.equal(Object.hasOwn(storage, 'userID'), false);
+  assert.equal(storage.userID, 'legacy-direct-user', 'legacy identity is retained for one rollback-compatible release');
 });
 
 test('Given a rejected cold-start migration When a direct API operation starts Then it fails before fetch', async () => {

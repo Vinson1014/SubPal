@@ -960,6 +960,25 @@ input[type="color"]::-webkit-color-swatch {
   gap: var(--spacing-md);
 }
 
+.storage-migration-recovery {
+  margin-bottom: var(--spacing-lg);
+  padding: var(--spacing-lg);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+}
+
+.storage-migration-recovery h3,
+.storage-migration-recovery p {
+  margin-bottom: var(--spacing-sm);
+}
+
+.storage-migration-recovery > label {
+  display: block;
+  margin-bottom: var(--spacing-sm);
+  color: var(--color-text-secondary);
+}
+
 .backend-profile-controls select,
 .backend-profile-create-row input {
   width: 100%;

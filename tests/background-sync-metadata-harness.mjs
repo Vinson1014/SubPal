@@ -227,8 +227,8 @@ export async function loadSyncListener(state, options = {}) {
       return JSON.parse(JSON.stringify(state.backendProfiles?.byId?.[id] ?? { id }));
     });
   }, { context, identifier: 'background/backend-profiles.js' });
-  const storageMigrationsModule = new vm.SyntheticModule(['ensureStorageMigrationsComplete'], function initializeStorageMigrations() {
-    this.setExport('ensureStorageMigrationsComplete', async () => {
+  const storageMigrationsModule = new vm.SyntheticModule(['reconcileStorageMigrations'], function initializeStorageMigrations() {
+    this.setExport('reconcileStorageMigrations', async () => {
       storageMigrationCalls += 1;
       await migration;
     });

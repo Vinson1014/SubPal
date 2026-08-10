@@ -854,6 +854,33 @@ test('Given a trusted Options profile request When the ordered migration barrier
   assert.equal(calls, 0);
 });
 
+test('Given trusted and untrusted migration recovery requests When routed Then only trusted Options can inspect or resolve migration state', async () => {
+  const background = await loadBackgroundWithApi({});
+
+  assert.deepEqual(await sendProfilePortMessage(background, 'migration-status', {
+    type: 'STORAGE_MIGRATION_STATUS'
+  }), {
+    ok: true,
+    value: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 }
+  });
+  assert.deepEqual(await sendProfilePortMessage(background, 'migration-resolve', {
+    type: 'STORAGE_MIGRATION_RESOLVE_ENDPOINT', endpoint: 'https://safe.example.test'
+  }), {
+    ok: true,
+    value: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 }
+  });
+  assert.deepEqual(await sendProfilePortMessage(
+    background,
+    'migration-untrusted',
+    { type: 'STORAGE_MIGRATION_STATUS' },
+    { id: 'subpal-extension-id', tab: { id: 7, url: 'https://www.netflix.com/watch/1' }, url: 'https://www.netflix.com/watch/1' },
+    'subtitle-assistant-channel'
+  ), {
+    ok: false,
+    error: { kind: 'forbidden', code: 'page-profile-change', retryable: false }
+  });
+});
+
 test('Given a malformed trusted profile request When it reaches the closed Port route Then it returns profile-input before profile storage or operations', async () => {
   const calls = [];
   const background = await loadBackgroundWithApi({}, {

@@ -26,7 +26,11 @@ import {
   resolveBackendProfile,
   setBackendProfileCredentials
 } from './background/backend-profiles.js';
-import { ensureStorageMigrationsComplete } from './background/storage-migrations.js';
+import {
+  ensureStorageMigrationsComplete,
+  getStorageMigrationStatus,
+  resolveStorageMigrationEndpoint
+} from './background/storage-migrations.js';
 import {
   enqueueContribution,
   getContributionProjection,
@@ -135,7 +139,9 @@ const BACKEND_PROFILE_COMMANDS = new Set([
   'BACKEND_PROFILES_ACTIVATE',
   'BACKEND_PROFILES_DELETE',
   'BACKEND_PROFILES_EXPORT_QUEUE',
-  'BACKEND_PROFILES_RETRY_FAILED'
+  'BACKEND_PROFILES_RETRY_FAILED',
+  'STORAGE_MIGRATION_STATUS',
+  'STORAGE_MIGRATION_RESOLVE_ENDPOINT'
 ]);
 const CONTRIBUTION_ENQUEUE_COMMAND = 'CONTRIBUTION_ENQUEUE';
 const CONTRIBUTION_READ_COMMAND = 'CONTRIBUTION_READ';
@@ -368,6 +374,14 @@ async function handleContributionRetryPortRequest(messageId, request, port) {
 
 function parseBackendProfileRequest(request) {
   try {
+    const migrationStatusRequest = strictOwnDataRecord(request, ['type']);
+    if (migrationStatusRequest?.type === 'STORAGE_MIGRATION_STATUS') return migrationStatusRequest;
+    const migrationResolveRequest = strictOwnDataRecord(request, ['type', 'endpoint']);
+    if (migrationResolveRequest?.type === 'STORAGE_MIGRATION_RESOLVE_ENDPOINT') {
+      return typeof migrationResolveRequest.endpoint === 'string' && migrationResolveRequest.endpoint.length > 0
+        ? migrationResolveRequest
+        : null;
+    }
     const retryRequest = strictOwnDataRecord(request, ['type', 'profileId', 'confirmInactiveProfile']);
     if (retryRequest?.type === 'BACKEND_PROFILES_RETRY_FAILED') {
       return typeof retryRequest.profileId === 'string' && retryRequest.profileId.length > 0 &&
@@ -460,6 +474,25 @@ async function handleBackendProfilePortRequest(messageId, request, port) {
   const parsed = parseBackendProfileRequest(request);
   if (!parsed) {
     port.postMessage({ messageId, response: profileFailure('invalid', 'profile-input') });
+    return;
+  }
+  if (parsed.type === 'STORAGE_MIGRATION_STATUS') {
+    try {
+      const value = await getStorageMigrationStatus(chrome.storage.local);
+      port.postMessage({ messageId, response: { ok: true, value } });
+    } catch {
+      port.postMessage({ messageId, response: profileFailure('domain-rejected', 'profile-migration-status-failed') });
+    }
+    return;
+  }
+  if (parsed.type === 'STORAGE_MIGRATION_RESOLVE_ENDPOINT') {
+    try {
+      const value = await resolveStorageMigrationEndpoint(chrome.storage.local, parsed.endpoint);
+      port.postMessage({ messageId, response: { ok: true, value } });
+    } catch (error) {
+      const code = error?.message === 'Invalid backend endpoint' ? 'unsafe-endpoint' : 'profile-migration-failed';
+      port.postMessage({ messageId, response: profileFailure('domain-rejected', code) });
+    }
     return;
   }
   try {

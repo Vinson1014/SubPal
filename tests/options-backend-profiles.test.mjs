@@ -46,7 +46,9 @@ test('Given Options profile operations When the client invokes each one Then it 
     { ok: true, value: { id: 'created', isActive: true } },
     { ok: true, value: true },
     { ok: true, value: { profile: { id: 'created' }, queues: {} } },
-    { ok: true, value: { vote: 1, translation: 0, replacementEvent: 2 } }
+    { ok: true, value: { vote: 1, translation: 0, replacementEvent: 2 } },
+    { ok: true, value: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 } },
+    { ok: true, value: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 } }
   ];
   let nextRequestId = 0;
   const profiles = loaded.createBackendProfiles({
@@ -63,7 +65,9 @@ test('Given Options profile operations When the client invokes each one Then it 
     profiles.activate('created'),
     profiles.deleteProfile('created'),
     profiles.exportQueue('created'),
-    profiles.retryFailed('created', { confirmInactiveProfile: true })
+    profiles.retryFailed('created', { confirmInactiveProfile: true }),
+    profiles.migrationStatus(),
+    profiles.resolveMigrationEndpoint({ endpoint: 'https://recovered.example.test' })
   ]);
 
   assert.deepEqual(plain(results), [
@@ -72,7 +76,9 @@ test('Given Options profile operations When the client invokes each one Then it 
     { ok: true, value: { id: 'created', isActive: true } },
     { ok: true, value: true },
     { ok: true, value: { profile: { id: 'created' }, queues: {} } },
-    { ok: true, value: { vote: 1, translation: 0, replacementEvent: 2 } }
+    { ok: true, value: { vote: 1, translation: 0, replacementEvent: 2 } },
+    { ok: true, value: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 } },
+    { ok: true, value: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 } }
   ]);
   assert.deepEqual(plain(requests), [
     { requestId: 'profile-request-1', message: { type: 'BACKEND_PROFILES_LIST' } },
@@ -80,7 +86,9 @@ test('Given Options profile operations When the client invokes each one Then it 
     { requestId: 'profile-request-3', message: { type: 'BACKEND_PROFILES_ACTIVATE', profileId: 'created' } },
     { requestId: 'profile-request-4', message: { type: 'BACKEND_PROFILES_DELETE', profileId: 'created', discard: false } },
     { requestId: 'profile-request-5', message: { type: 'BACKEND_PROFILES_EXPORT_QUEUE', profileId: 'created' } },
-    { requestId: 'profile-request-6', message: { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'created', confirmInactiveProfile: true } }
+    { requestId: 'profile-request-6', message: { type: 'BACKEND_PROFILES_RETRY_FAILED', profileId: 'created', confirmInactiveProfile: true } },
+    { requestId: 'profile-request-7', message: { type: 'STORAGE_MIGRATION_STATUS' } },
+    { requestId: 'profile-request-8', message: { type: 'STORAGE_MIGRATION_RESOLVE_ENDPOINT', endpoint: 'https://recovered.example.test' } }
   ]);
 });
 
@@ -107,7 +115,9 @@ test('Given invalid profile input or a hostile caller object When the client is 
     profiles.exportQueue(''),
     profiles.retryFailed('', { confirmInactiveProfile: false }),
     profiles.retryFailed('created', { confirmInactiveProfile: 'yes' }),
-    profiles.retryFailed('created', new Proxy({}, { ownKeys() { throw new Error('options proxy'); } }))
+    profiles.retryFailed('created', new Proxy({}, { ownKeys() { throw new Error('options proxy'); } })),
+    profiles.resolveMigrationEndpoint({}),
+    profiles.resolveMigrationEndpoint(throwingEndpoint)
   ]);
 
   for (const result of results) {
@@ -263,11 +273,12 @@ function createScheduler() {
   };
 }
 
-async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles, listResult, exportResult, retryResult } = {}) {
+async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles, listResult, exportResult, retryResult, migrationStatusResult } = {}) {
   const elements = Object.fromEntries([
     'backendProfileSelect', 'backendProfileEndpoint', 'createBackendProfileButton',
     'activateBackendProfileButton', 'exportBackendProfileButton', 'deleteBackendProfileButton',
     'backendProfileStatus', 'backendProfileIdentity', 'backendProfileQueueCounts', 'backendProfileError',
+    'storageMigrationRecovery', 'storageMigrationEndpoint', 'resolveStorageMigrationButton', 'storageMigrationError',
     'retryAllSyncButton', 'voteQueueCount', 'translationQueueCount', 'replacementEventsQueueCount',
     'clearVoteQueueButton', 'clearTranslationQueueButton', 'clearReplacementEventsQueueButton',
     'debugModeCheckbox', 'endscreenTasksEnabledCheckbox'
@@ -276,6 +287,7 @@ async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles,
   const calls = [];
   const alerts = [];
   let blockDelete = false;
+  let migrationStatus = migrationStatusResult || { ok: true, value: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 } };
   let factoryArguments;
   const scheduler = createScheduler();
   const ports = [];
@@ -307,6 +319,14 @@ async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles,
     async retryFailed(id, { confirmInactiveProfile }) {
       calls.push(['retry', id, confirmInactiveProfile]);
       return retryResult || { ok: true, value: { vote: 0, translation: 0, replacementEvent: 0 } };
+    },
+    async migrationStatus() {
+      return migrationStatus;
+    },
+    async resolveMigrationEndpoint({ endpoint }) {
+      calls.push(['resolve-migration', endpoint]);
+      migrationStatus = { ok: true, value: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 } };
+      return migrationStatus;
     }
   };
   const domListeners = new Map();
@@ -515,6 +535,27 @@ test('Given selected safe profile snapshots When Options renders pending queue c
   assert.equal(options.elements.voteQueueCount.textContent, '11');
   assert.equal(options.elements.translationQueueCount.textContent, '12');
   assert.equal(options.elements.replacementEventsQueueCount.textContent, '13');
+});
+
+test('Given an unsafe legacy endpoint blocks migration When Options loads Then it exposes only the explicit safe-endpoint recovery flow', async () => {
+  const options = await loadOptionsProfilesHarness({
+    confirmations: [true],
+    migrationStatusResult: {
+      ok: true,
+      value: { status: 'needs-attention', targetVersion: 1, reason: 'unsupported-legacy-endpoint' }
+    }
+  });
+
+  assert.equal(options.elements.storageMigrationRecovery.hidden, false);
+  assert.equal(options.elements.createBackendProfileButton.disabled, true);
+  assert.equal(options.elements.backendProfileError.textContent.includes('完成既有資料升級'), true);
+  options.elements.storageMigrationEndpoint.value = 'https://recovered.example.test/api';
+  await options.elements.resolveStorageMigrationButton.dispatch('click');
+
+  assert.deepEqual(options.calls.at(-1), ['resolve-migration', 'https://recovered.example.test/api']);
+  assert.equal(options.elements.storageMigrationRecovery.hidden, true);
+  assert.equal(options.elements.storageMigrationEndpoint.value, '');
+  assert.equal(JSON.stringify(options.elements).includes('legacy-jwt'), false);
 });
 
 test('Given malformed nested queue counts When Options receives profile snapshots Then each invalid count is rendered as zero without exposing unsafe data', async () => {

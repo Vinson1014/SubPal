@@ -61,9 +61,14 @@ async function loadBackendProfilesModule(context) {
 
 async function loadStorageMigrationsModule(context, backendProfilesModule) {
   const source = await readFile(new URL('../background/storage-migrations.js', import.meta.url), 'utf8');
+  const coordinator = new vm.SourceTextModule(
+    await readFile(new URL('../background/storage-mutation-coordinator.js', import.meta.url), 'utf8'),
+    { context, identifier: 'background/storage-mutation-coordinator.js' }
+  );
   const module = new vm.SourceTextModule(source, { context, identifier: 'background/storage-migrations.js' });
   await module.link((specifier) => {
     if (specifier === './backend-profiles.js') return backendProfilesModule;
+    if (specifier === './storage-mutation-coordinator.js') return coordinator;
     throw new Error(`Unexpected background/storage-migrations.js import: ${specifier}`);
   });
   return module;
@@ -153,6 +158,11 @@ async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
       })();
     }
     await storageMigrationReadiness;
+  };
+  const getStorageMigrationStatus = async () => ({ status: 'ready', targetVersion: 1, malformedRecordCount: 0 });
+  const resolveStorageMigrationEndpoint = async (_local, endpoint) => {
+    if (typeof endpoint !== 'string' || !endpoint) throw new Error('Invalid backend endpoint');
+    return { status: 'ready', targetVersion: 1, malformedRecordCount: 0 };
   };
   const resolveBackendProfile = async (_local, profileId) => {
     await ensureBackendProfilesMigrated();
@@ -263,8 +273,14 @@ async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
     this.setExport('deleteBackendProfile', deleteBackendProfile);
     this.setExport('exportBackendProfileQueue', exportBackendProfileQueue);
   }, { context, identifier: 'background/backend-profiles.js' });
-  const storageMigrationsModule = new vm.SyntheticModule(['ensureStorageMigrationsComplete'], function init() {
+  const storageMigrationsModule = new vm.SyntheticModule([
+    'ensureStorageMigrationsComplete',
+    'getStorageMigrationStatus',
+    'resolveStorageMigrationEndpoint'
+  ], function init() {
     this.setExport('ensureStorageMigrationsComplete', ensureStorageMigrationsComplete);
+    this.setExport('getStorageMigrationStatus', getStorageMigrationStatus);
+    this.setExport('resolveStorageMigrationEndpoint', resolveStorageMigrationEndpoint);
   }, { context, identifier: 'background/storage-migrations.js' });
   const source = await readFile(new URL('../background.js', import.meta.url), 'utf8');
   const module = new vm.SourceTextModule(source, { context, identifier: 'background.js' });

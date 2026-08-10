@@ -19,7 +19,9 @@ const CONTRIBUTION_KEYS = [
   ...Object.values(QUEUE_KEYS),
   ...Object.values(HISTORY_KEYS)
 ];
-const STORAGE_KEYS = [PROFILE_STORE_KEY, 'api', 'user', 'jwt', ...CONTRIBUTION_KEYS, 'voteStateByTranslation'];
+export const BACKEND_PROFILE_MIGRATION_KEYS = [
+  PROFILE_STORE_KEY, 'api', 'user', 'userID', 'jwt', ...CONTRIBUTION_KEYS, 'voteStateByTranslation'
+];
 const EXPORT_RECORD_FIELDS = [
   'id', 'operationId', 'backendProfileId', 'status', 'videoId', 'timestamp',
   'createdAt', 'updatedAt', 'syncedAt', 'attempts', 'retryCount', 'lastAttemptAt',
@@ -82,26 +84,35 @@ function normalizeProfile(id, value) {
   return { id, endpoint, userId: value.userId, jwt: normalizeJwt(value.jwt) };
 }
 
-function legacyDefaultProfile(rawStore, legacy) {
+function legacyDefaultProfile(rawStore, legacy, endpointOverride) {
   const storedDefault = isRecord(rawStore.byId?.[DEFAULT_BACKEND_PROFILE_ID])
     ? rawStore.byId[DEFAULT_BACKEND_PROFILE_ID]
     : {};
   const endpoint = normalizeBackendEndpoint(storedDefault.endpoint)
-    || normalizeBackendEndpoint(legacy.api?.baseUrl)
-    || DEFAULT_BACKEND_ENDPOINT;
+    || normalizeBackendEndpoint(endpointOverride)
+    || normalizeBackendEndpoint(legacy.api?.baseUrl);
+  const hasLegacyEndpoint = isNonEmptyString(legacy.api?.baseUrl);
+  if (!endpoint && hasLegacyEndpoint) {
+    const error = new Error('Unsupported legacy backend endpoint');
+    error.code = 'unsupported-legacy-endpoint';
+    throw error;
+  }
   const userId = isNonEmptyString(storedDefault.userId)
     ? storedDefault.userId
     : isNonEmptyString(legacy.user?.userId)
       ? legacy.user.userId
-      : createUuid();
+      : isNonEmptyString(legacy.userID)
+        ? legacy.userID
+        : createUuid();
   const jwt = Object.hasOwn(storedDefault, 'jwt')
     ? normalizeJwt(storedDefault.jwt)
     : normalizeJwt(legacy.jwt);
-  return { id: DEFAULT_BACKEND_PROFILE_ID, endpoint, userId, jwt };
+  return { id: DEFAULT_BACKEND_PROFILE_ID, endpoint: endpoint || DEFAULT_BACKEND_ENDPOINT, userId, jwt };
 }
 
-function buildProfileStore(data) {
-  const rawStore = isRecord(data[PROFILE_STORE_KEY]) ? data[PROFILE_STORE_KEY] : {};
+function buildProfileStore(data, endpointOverride) {
+  const hasRawStore = isRecord(data[PROFILE_STORE_KEY]);
+  const rawStore = hasRawStore ? data[PROFILE_STORE_KEY] : {};
   const rawProfiles = isRecord(rawStore.byId) ? rawStore.byId : {};
   const isCurrentSchema = rawStore.schemaVersion === BACKEND_PROFILE_SCHEMA_VERSION;
   const byId = {};
@@ -112,8 +123,11 @@ function buildProfileStore(data) {
     if (normalized) byId[id] = normalized;
   }
 
-  if (!isCurrentSchema && !byId[DEFAULT_BACKEND_PROFILE_ID]) {
-    byId[DEFAULT_BACKEND_PROFILE_ID] = legacyDefaultProfile(rawStore, data);
+  const hasCorruptedCurrentDefault = isCurrentSchema &&
+    Object.hasOwn(rawProfiles, DEFAULT_BACKEND_PROFILE_ID) &&
+    !byId[DEFAULT_BACKEND_PROFILE_ID];
+  if (!hasRawStore || !isCurrentSchema || hasCorruptedCurrentDefault) {
+    byId[DEFAULT_BACKEND_PROFILE_ID] = legacyDefaultProfile(rawStore, data, endpointOverride);
   }
 
   const activeProfileId = isNonEmptyString(rawStore.activeProfileId) && byId[rawStore.activeProfileId]
@@ -130,29 +144,33 @@ function buildProfileStore(data) {
 }
 
 function migrateContributionRecord(record) {
-  if (!isRecord(record)) return { record, changed: false };
+  if (!isRecord(record)) return { record, changed: false, malformed: true };
+  if (!isNonEmptyString(record.id)) return { record, changed: false, malformed: true };
   let nextRecord = record;
   let changed = false;
   if (missingProfileBinding(record.backendProfileId)) {
     nextRecord = { ...nextRecord, backendProfileId: DEFAULT_BACKEND_PROFILE_ID };
     changed = true;
   }
-  if (!Object.hasOwn(record, 'operationId')) {
+  if (!isNonEmptyString(record.operationId) && isNonEmptyString(record.id)) {
     nextRecord = { ...nextRecord, operationId: record.id };
     changed = true;
   }
-  return { record: nextRecord, changed };
+  return { record: nextRecord, changed, malformed: false };
 }
 
 function migrateContributionArray(value) {
-  if (!Array.isArray(value)) return { value, changed: false };
+  if (value === undefined) return { value, changed: false, malformedCount: 0 };
+  if (!Array.isArray(value)) return { value, changed: false, malformedCount: 1 };
   let changed = false;
+  let malformedCount = 0;
   const nextValue = value.map((record) => {
     const migrated = migrateContributionRecord(record);
     changed ||= migrated.changed;
+    if (migrated.malformed) malformedCount += 1;
     return migrated.record;
   });
-  return { value: nextValue, changed };
+  return { value: nextValue, changed, malformedCount };
 }
 
 function migrateVoteState(value) {
@@ -170,20 +188,27 @@ function migrateVoteState(value) {
   return { value: nextValue, changed };
 }
 
-async function migrate(storage) {
-  const data = await storage.get(STORAGE_KEYS);
-  const { store, changed: profileChanged } = buildProfileStore(data);
+export function buildBackendProfileMigration(data, { endpointOverride } = {}) {
+  const { store, changed: profileChanged } = buildProfileStore(data, endpointOverride);
   const updates = {};
+  let malformedRecordCount = 0;
   if (profileChanged) updates[PROFILE_STORE_KEY] = store;
 
   for (const key of CONTRIBUTION_KEYS) {
     const migrated = migrateContributionArray(data[key]);
     if (migrated.changed) updates[key] = migrated.value;
+    malformedRecordCount += migrated.malformedCount;
   }
 
   const migratedVoteState = migrateVoteState(data.voteStateByTranslation);
   if (migratedVoteState.changed) updates.voteStateByTranslation = migratedVoteState.value;
 
+  return { updates, store, malformedRecordCount };
+}
+
+async function migrate(storage) {
+  const data = await storage.get(BACKEND_PROFILE_MIGRATION_KEYS);
+  const { updates } = buildBackendProfileMigration(data);
   if (Object.keys(updates).length > 0) await storage.set(updates);
 }
 

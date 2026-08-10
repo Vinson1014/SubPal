@@ -435,6 +435,16 @@
           </div>
 
           <div class="card-body">
+            <div id="storageMigrationRecovery" class="storage-migration-recovery" role="status" hidden>
+              <h3>需要確認後端端點才能完成升級</h3>
+              <p>舊版自訂端點不符合目前的安全規則。修復前不會註冊、同步或傳送任何待處理資料。</p>
+              <label for="storageMigrationEndpoint">安全的後端端點</label>
+              <div class="backend-profile-create-row">
+                <input type="url" id="storageMigrationEndpoint" placeholder="https://example.com" inputmode="url">
+                <button type="button" id="resolveStorageMigrationButton" class="btn btn-primary">確認並完成升級</button>
+              </div>
+              <p id="storageMigrationError" class="backend-profile-error" role="alert" hidden></p>
+            </div>
             <div class="backend-profile-controls">
               <div class="input-setting">
                 <label for="backendProfileSelect">設定檔清單</label>
