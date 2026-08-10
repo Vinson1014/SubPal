@@ -447,7 +447,6 @@ async function startIsolatedEndscreenTasks(configManager, contextManager = playb
     clock: Date.now,
     sendMessage: requestCrowdsourcingTasks,
     playbackContextManager: contextManager,
-    ownsPlaybackContextManager: true
   });
   await system.start();
   return system;

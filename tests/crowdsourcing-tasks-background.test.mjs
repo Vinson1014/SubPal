@@ -25,6 +25,7 @@ test('Given a private subtitle query When it is sent over the content Port Then 
     }
   });
   const { port, sentMessages, send } = createPort();
+  port.sender = netflixSender();
   background.connect(port);
   send({
     messageId: 'baseline-1',

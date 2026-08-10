@@ -36,12 +36,24 @@ import {
 } from './background/contribution-queue.js';
 
 let lifecycleInitialization;
+let activeProfileReadiness;
+
+function ensureActiveProfileReady() {
+  if (!activeProfileReadiness) {
+    activeProfileReadiness = (async () => {
+      await ensureStorageMigrationsComplete();
+      await ensureUserRegisteredAndJwtPresent();
+    })().finally(() => {
+      activeProfileReadiness = null;
+    });
+  }
+  return activeProfileReadiness;
+}
 
 function initializeLifecycle() {
   if (!lifecycleInitialization) {
     lifecycleInitialization = (async () => {
-      await ensureStorageMigrationsComplete();
-      await ensureUserRegisteredAndJwtPresent();
+      await ensureActiveProfileReady();
       await syncModule.initializeSync();
     })().finally(() => {
       lifecycleInitialization = null;
@@ -222,7 +234,7 @@ function isHttpsNetflixUrl(value) {
   }
 }
 
-function isTrustedContributionPort(port) {
+function isTrustedNetflixContentPort(port) {
   try {
     const sender = port?.sender;
     const tab = sender?.tab;
@@ -260,7 +272,7 @@ function parseContributionRequest(request) {
 }
 
 async function handleContributionPortRequest(messageId, request, port) {
-  if (!isTrustedContributionPort(port)) {
+  if (!isTrustedNetflixContentPort(port)) {
     port.postMessage({ messageId, response: contributionFailure('forbidden', 'contribution-port-access') });
     return;
   }
@@ -309,7 +321,7 @@ function parseContributionRetryRequest(request) {
 }
 
 async function handleContributionReadPortRequest(messageId, request, port) {
-  if (!isTrustedContributionPort(port)) {
+  if (!isTrustedNetflixContentPort(port)) {
     port.postMessage({ messageId, response: contributionFailure('forbidden', 'contribution-port-access') });
     return;
   }
@@ -329,7 +341,7 @@ async function handleContributionReadPortRequest(messageId, request, port) {
 }
 
 async function handleContributionRetryPortRequest(messageId, request, port) {
-  if (!isTrustedContributionPort(port)) {
+  if (!isTrustedNetflixContentPort(port)) {
     port.postMessage({ messageId, response: contributionFailure('forbidden', 'contribution-port-access') });
     return;
   }
@@ -735,34 +747,64 @@ async function handlePopupActiveProfileStats(sendResponse) {
 }
 
 
+function parseSubtitlePortRequest(request) {
+  const envelope = strictOwnDataRecord(request, ['type', 'query']);
+  if (!envelope || envelope.type !== 'SUBTITLE_QUERY') return null;
+  const query = strictOwnDataRecord(envelope.query, ['videoId', 'timestamp', 'duration', 'context']);
+  if (!query) return null;
+  const context = strictOwnDataRecord(query.context, ['videoId', 'sessionId', 'epoch']);
+  if (!context) return null;
+  if (typeof query.videoId !== 'string' || !query.videoId ||
+      !Number.isFinite(query.timestamp) || query.timestamp < 0 ||
+      query.duration !== 180 || context.videoId !== query.videoId ||
+      typeof context.sessionId !== 'string' || !context.sessionId.startsWith('watch-') ||
+      !Number.isInteger(context.epoch) || context.epoch < 0) {
+    return null;
+  }
+  return { query: { videoId: query.videoId, timestamp: query.timestamp, duration: query.duration, context } };
+}
+
 /**
  * 處理私有字幕查詢
  * @param {Object} request - 私有 Port 請求對象
+ * @param {chrome.runtime.Port} port - 可信 Netflix content port
  * @param {Function} portSendResponse - 回應函數
  */
-async function handleSubtitleQuery(request, portSendResponse) {
-  const { videoId, timestamp, duration } = request.query || {};
-
-  if (!videoId || typeof timestamp !== 'number' || duration !== 180) {
-    console.error('[Background] SUBTITLE_QUERY error: invalid subtitle query');
+async function handleSubtitleQuery(request, port, portSendResponse) {
+  if (!isTrustedNetflixContentPort(port)) {
+    portSendResponse({ ok: false, error: { kind: 'forbidden', code: 'subtitle-port-access', retryable: false } });
+    return;
+  }
+  const parsed = parseSubtitlePortRequest(request);
+  if (!parsed) {
     portSendResponse({ ok: false, error: { kind: 'invalid', code: 'subtitle-query', retryable: false } });
     return;
   }
+  const { videoId, timestamp, duration } = parsed.query;
 
-  console.log('[Background] Fetching subtitles for:', videoId, timestamp);
+  console.log('[Background] Subtitle query started:', { videoId, timestamp, duration });
 
   try {
+    // 冷啟動時 subtitle Port 可能早於 onStartup lifecycle；先共享 profile readiness，
+    // 避免第一筆 query 因尚未取得 active profile JWT 而被永久抑制。
+    await ensureActiveProfileReady();
     const subtitles = await apiModule.fetchSubtitles({
-      videoId: videoId,
+      videoId,
       startTime: timestamp,
       duration
     });
-
-    console.log(`[Background] Successfully fetched ${subtitles.length} subtitles`);
+    console.log('[Background] Subtitle query completed:', { videoId, timestamp, duration, count: subtitles.length });
     portSendResponse({ ok: true, value: { subtitles } });
   } catch (error) {
-    console.error('[Background] Error fetching subtitles:', error);
-    portSendResponse({ ok: false, error: { kind: 'domain-rejected', code: 'subtitle-fetch-failed', retryable: false } });
+    const status = Number.isInteger(error?.status) ? error.status : null;
+    const retryable = status === null || status === 429 || status >= 500;
+    const code = status === 429
+      ? 'subtitle-fetch-rate-limited'
+      : status !== null && status >= 500
+        ? 'subtitle-fetch-server-error'
+        : 'subtitle-fetch-failed';
+    console.error('[Background] Subtitle query failed:', { videoId, timestamp, duration, status, code });
+    portSendResponse({ ok: false, error: { kind: 'domain-rejected', code, retryable } });
   }
 }
 
@@ -831,7 +873,7 @@ function handleRuntimeCrowdsourcingTasks(request, sender, sendResponse) {
 
 function routeMessageToModulePort(messageId, request, port) {
   if (request.type === 'SUBTITLE_QUERY') {
-    void handleSubtitleQuery(request, (response) => {
+    void handleSubtitleQuery(request, port, (response) => {
       port.postMessage({ messageId, response });
     });
     return;

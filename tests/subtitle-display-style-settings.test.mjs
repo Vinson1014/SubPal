@@ -109,3 +109,24 @@ test('Given intercept subtitle data with dual mode disabled When shown Then prim
   assert.equal(display.element.style.letterSpacing, '1.5px');
   assert.equal(display.element.style.textShadow, '-3px 0 0 #112233');
 });
+
+test('Given a fetched replacement contains HTML When rendered Then it remains literal pre-wrapped text', async () => {
+  const SubtitleDisplay = await loadSubtitleDisplay();
+  const display = new SubtitleDisplay();
+  let innerHtmlWrites = 0;
+  display.element = {
+    style: {},
+    textContent: '',
+    set innerHTML(_value) { innerHtmlWrites += 1; }
+  };
+
+  display.updateSubtitleContent({
+    text: '<img src=x onerror=alert(1)>\nReplacement',
+    htmlContent: '<b>must-not-render</b>',
+    isReplaced: true
+  });
+
+  assert.equal(display.element.textContent, '<img src=x onerror=alert(1)>\nReplacement');
+  assert.equal(display.element.style.whiteSpace, 'pre-wrap');
+  assert.equal(innerHtmlWrites, 0);
+});

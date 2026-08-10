@@ -373,7 +373,7 @@ test('Given disabled endscreen tasks When the real isolated startup path runs Th
   assert.equal(h.cleanupCalls, 0);
 });
 
-test('Given an enabled real isolated startup When panel opt-out succeeds Then its owned PlaybackContextManager is cleaned exactly once', async (t) => {
+test('Given an enabled real isolated startup When panel opt-out succeeds Then the shared PlaybackContextManager remains untouched', async (t) => {
   installIsolatedRuntime(t);
   const h = createWrapperLifecycleHarness();
   const system = await startIsolatedEndscreenTasks(h.configManager, h.contextManager);
@@ -384,11 +384,11 @@ test('Given an enabled real isolated startup When panel opt-out succeeds Then it
   system.cleanup();
   system.dispose();
 
-  assert.equal(h.initializeCalls, 1);
-  assert.equal(h.cleanupCalls, 1);
+  assert.equal(h.initializeCalls, 0);
+  assert.equal(h.cleanupCalls, 0);
 });
 
-test('Given an enabled real isolated startup When dispose and cleanup repeat Then its owned PlaybackContextManager is cleaned exactly once', async (t) => {
+test('Given an enabled real isolated startup When dispose and cleanup repeat Then the shared PlaybackContextManager remains untouched', async (t) => {
   installIsolatedRuntime(t);
   const h = createWrapperLifecycleHarness();
   const system = await startIsolatedEndscreenTasks(h.configManager, h.contextManager);
@@ -397,34 +397,29 @@ test('Given an enabled real isolated startup When dispose and cleanup repeat The
   system.dispose();
   system.cleanup();
 
-  assert.equal(h.initializeCalls, 1);
-  assert.equal(h.cleanupCalls, 1);
+  assert.equal(h.initializeCalls, 0);
+  assert.equal(h.cleanupCalls, 0);
 });
 
-test('Given the real isolated startup partially initializes its manager When initialization fails Then owned manager resources are cleaned once', async (t) => {
+test('Given a shared manager whose initialize would fail When real isolated startup runs Then the borrower never calls its lifecycle methods', async (t) => {
   installIsolatedRuntime(t);
   const h = createWrapperLifecycleHarness({ initializeError: new Error('snapshot unavailable') });
+  const system = await startIsolatedEndscreenTasks(h.configManager, h.contextManager);
+  system.dispose();
 
-  await assert.rejects(
-    startIsolatedEndscreenTasks(h.configManager, h.contextManager),
-    /snapshot unavailable/
-  );
-
-  assert.equal(h.initializeCalls, 1);
-  assert.equal(h.cleanupCalls, 1);
+  assert.equal(h.initializeCalls, 0);
+  assert.equal(h.cleanupCalls, 0);
 });
 
-test('Given the real isolated startup owns an initialized manager When panel initialization fails Then manager resources are cleaned once', async (t) => {
+test('Given the real isolated borrower is cleaned When its optional work ends Then manager context remains queryable', async (t) => {
   installIsolatedRuntime(t);
-  const h = createWrapperLifecycleHarness({ panelInitializeError: new Error('panel unavailable') });
+  const h = createWrapperLifecycleHarness();
+  const system = await startIsolatedEndscreenTasks(h.configManager, h.contextManager);
+  system.cleanup();
 
-  await assert.rejects(
-    startIsolatedEndscreenTasks(h.configManager, h.contextManager),
-    /panel unavailable/
-  );
-
-  assert.equal(h.initializeCalls, 1);
-  assert.equal(h.cleanupCalls, 1);
+  assert.equal(h.contextManager.getCurrentContext().videoId, '82147770');
+  assert.equal(h.initializeCalls, 0);
+  assert.equal(h.cleanupCalls, 0);
 });
 
 test('Given an initialized ConfigManager When the isolated owner creates panels Then each panel receives it as configSource and debug subscriptions stay singular across restarts', async () => {

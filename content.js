@@ -24,11 +24,15 @@
   let pageScriptReadinessPromise = null;
   let pageContextStartAttempted = false;
   let isolatedEndscreenStartPromise = null;
+  let isolatedPlaybackContextManagerPromise = null;
+  let isolatedPlaybackContextInitializationPromise = null;
+  let isolatedPlaybackContextReady = false;
   let pageIngressPromise = null;
   let contributionsCapabilityPromise = null;
   let subtitleQueryCapabilityPromise = null;
   let settingsCapabilityPromise = null;
   let publicConfigKeys = new Set();
+  let subtitleSourceGeneration = 0;
 
   const PAGE_SCRIPT_READY_EVENT = 'subpal-page-script-ready';
   const PAGE_SCRIPT_READY_REQUEST_EVENT = 'subpal-request-page-script-ready';
@@ -44,6 +48,34 @@
     deadline: 'data-subpal-page-script-deadline',
     retryNotBefore: 'data-subpal-page-script-retry-not-before'
   };
+
+  function getActiveSubtitleSourceKey(store) {
+    if (!store || typeof store !== 'object' || Array.isArray(store)) return null;
+    const activeProfileId = typeof store.activeProfileId === 'string' ? store.activeProfileId : null;
+    const profile = activeProfileId && store.byId && typeof store.byId === 'object'
+      ? store.byId[activeProfileId]
+      : null;
+    const endpoint = typeof profile?.endpoint === 'string' ? profile.endpoint : null;
+    return activeProfileId && endpoint ? `${activeProfileId}\u0000${endpoint}` : null;
+  }
+
+  function handleSubtitleSourceStorageChange(changes, areaName) {
+    if (areaName !== 'local' || !changes?.backendProfiles) return;
+    const change = changes.backendProfiles;
+    if (getActiveSubtitleSourceKey(change.oldValue) === getActiveSubtitleSourceKey(change.newValue)) return;
+
+    subtitleSourceGeneration += 1;
+    window.dispatchEvent(new CustomEvent('messageFromContentScript', {
+      detail: {
+        message: {
+          type: 'SUBTITLE_SOURCE_CHANGED',
+          generation: subtitleSourceGeneration
+        }
+      }
+    }));
+  }
+
+  chrome.storage?.onChanged?.addListener(handleSubtitleSourceStorageChange);
 
   // 初始化 ConfigManager
   async function initializeConfigManager() {
@@ -113,11 +145,35 @@
     injectPageContextScript();
   }
 
+  function getIsolatedPlaybackContextManager() {
+    if (!isolatedPlaybackContextManagerPromise) {
+      isolatedPlaybackContextManagerPromise = import(chrome.runtime.getURL('content/core/playback-context-manager.js'))
+        .then(({ playbackContextManager }) => playbackContextManager);
+    }
+    return isolatedPlaybackContextManagerPromise;
+  }
+
+  async function ensureIsolatedPlaybackContextManager() {
+    const playbackContextManager = await getIsolatedPlaybackContextManager();
+    if (isolatedPlaybackContextReady) return playbackContextManager;
+    if (!isolatedPlaybackContextInitializationPromise) {
+      isolatedPlaybackContextInitializationPromise = Promise.resolve(playbackContextManager.initialize())
+        .then(() => {
+          isolatedPlaybackContextReady = true;
+          return playbackContextManager;
+        })
+        .finally(() => {
+          isolatedPlaybackContextInitializationPromise = null;
+        });
+    }
+    return isolatedPlaybackContextInitializationPromise;
+  }
+
   async function initializeIsolatedEndscreenTasks() {
     const { initMessaging } = await import(chrome.runtime.getURL('content/system/messaging.js'));
     await initMessaging();
     const { startIsolatedEndscreenTasks } = await import(chrome.runtime.getURL('content/system/isolated-endscreen-tasks.js'));
-    const { playbackContextManager } = await import(chrome.runtime.getURL('content/core/playback-context-manager.js'));
+    const playbackContextManager = await ensureIsolatedPlaybackContextManager();
     await startIsolatedEndscreenTasks(configManager, playbackContextManager);
   }
 
@@ -384,8 +440,8 @@
       subtitleQueryCapabilityPromise = Promise.all([
         getBackgroundPortTransport(),
         import(chrome.runtime.getURL('content/system/capabilities/subtitles.js')),
-        import(chrome.runtime.getURL('content/core/playback-context-manager.js'))
-      ]).then(([{ createEnvelope, transport }, { createSubtitles }, { playbackContextManager }]) => createSubtitles({
+        getIsolatedPlaybackContextManager()
+      ]).then(([{ createEnvelope, transport }, { createSubtitles }, playbackContextManager]) => createSubtitles({
         getCurrentContext: () => playbackContextManager.getCurrentContext(),
         request({ requestId, query, signal }) {
           return transport.request(createEnvelope({
@@ -404,7 +460,10 @@
       const options = {
         authorityEscalated: observation.authorityEscalated,
         dispatch: (message) => dispatchInternalMessage(messageId, message),
-        query: (subtitleQuery) => getSubtitleQueryCapability().then((subtitles) => subtitles.query(subtitleQuery))
+        query: async (subtitleQuery) => {
+          await ensureIsolatedPlaybackContextManager();
+          return (await getSubtitleQueryCapability()).query(subtitleQuery);
+        }
       };
       if (observation.category === 'contribution-intent' || observation.category === 'contribution-read') {
         options.contributions = await getContributionsCapability();

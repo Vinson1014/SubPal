@@ -4,6 +4,7 @@
 const internalEventHandlers = new Map();
 const CONTENT_SCRIPT_BRIDGE_KEYS = new Set(['message', 'messageId']);
 const VIDEO_ID_CHANGED_KEYS = new Set(['type', 'oldVideoId', 'newVideoId', 'videoId']);
+const SUBTITLE_SOURCE_CHANGED_KEYS = new Set(['type', 'generation']);
 const VIDEO_ID_FIELDS = ['oldVideoId', 'newVideoId', 'videoId'];
 const OBJECT_CONSTRUCTOR_SOURCE = Function.prototype.toString.call(Object);
 const OBJECT_PROTOTYPE_KEYS = Object.getOwnPropertyNames(Object.prototype).sort();
@@ -73,6 +74,29 @@ function parseVideoIdChangedMessage(message) {
   }
 }
 
+function parseSubtitleSourceChangedMessage(message) {
+  try {
+    if (!message || typeof message !== 'object' || Array.isArray(message) || !hasPlainObjectPrototype(message)) {
+      return null;
+    }
+    if (Object.getOwnPropertySymbols(message).length !== 0) return null;
+
+    const keys = Object.getOwnPropertyNames(message);
+    if (keys.length !== 2 || keys.some((key) => !SUBTITLE_SOURCE_CHANGED_KEYS.has(key))) return null;
+    const type = Object.getOwnPropertyDescriptor(message, 'type');
+    const generation = Object.getOwnPropertyDescriptor(message, 'generation');
+    if (!type || !generation || !Object.hasOwn(type, 'value') || !Object.hasOwn(generation, 'value') ||
+        type.enumerable !== true || generation.enumerable !== true ||
+        type.value !== 'SUBTITLE_SOURCE_CHANGED' ||
+        !Number.isInteger(generation.value) || generation.value < 0) {
+      return null;
+    }
+    return { type: 'SUBTITLE_SOURCE_CHANGED', generation: generation.value };
+  } catch {
+    return null;
+  }
+}
+
 function parseContentScriptBridgeMessage(event) {
   try {
     const detail = event.detail;
@@ -89,7 +113,8 @@ function parseContentScriptBridgeMessage(event) {
       descriptors[key] = descriptor.value;
     }
     if (Object.hasOwn(descriptors, 'messageId') && typeof descriptors.messageId !== 'string') return null;
-    return parseVideoIdChangedMessage(descriptors.message);
+    return parseVideoIdChangedMessage(descriptors.message) ||
+      parseSubtitleSourceChangedMessage(descriptors.message);
   } catch {
     return null;
   }

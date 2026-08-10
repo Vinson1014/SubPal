@@ -388,8 +388,11 @@ class SubtitleDisplay {
       }
     }
     
-    // 處理 HTML 內容（保留原有邏輯）
-    if (subtitleData.htmlContent) {
+    // 後端替換字幕永遠只視為純文字；原生 Netflix HTML 僅保留既有顯示路徑。
+    if (subtitleData.isReplaced) {
+      this.element.textContent = displayText;
+      this.element.style.whiteSpace = 'pre-wrap';
+    } else if (subtitleData.htmlContent) {
       const tempDiv = document.createElement('div');
       tempDiv.innerHTML = subtitleData.htmlContent;
       

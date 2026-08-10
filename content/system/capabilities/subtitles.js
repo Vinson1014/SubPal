@@ -16,6 +16,19 @@ function sameContext(left, right) {
     left.epoch === right.epoch;
 }
 
+function getAuthoritativeContext(value, videoId) {
+  if (!isRecord(value) || value.state !== 'ready' || value.videoId !== videoId ||
+    typeof value.sessionId !== 'string' || !value.sessionId.startsWith('watch-') ||
+    !Number.isInteger(value.epoch) || value.epoch < 0) {
+    return null;
+  }
+  return {
+    videoId: value.videoId,
+    sessionId: value.sessionId,
+    epoch: value.epoch
+  };
+}
+
 function normalizeResponse(response) {
   if (!isResult(response)) return fail('domain-rejected', 'subtitle-fetch-failed', false);
   if (response.ok) {
@@ -32,32 +45,36 @@ function normalizeResponse(response) {
       return fail('cancelled', 'subtitle-query-cancelled', false);
     case 'stale-context':
       return fail('stale-context', 'subtitle-query-stale-context', false);
+    case 'domain-rejected': {
+      const code = ['subtitle-fetch-rate-limited', 'subtitle-fetch-server-error'].includes(response.error.code)
+        ? response.error.code
+        : 'subtitle-fetch-failed';
+      return fail('domain-rejected', code, response.error.retryable === true);
+    }
     default:
       return fail('domain-rejected', 'subtitle-fetch-failed', false);
   }
 }
 
 export function parseSubtitleQuery(input) {
-  if (!isRecord(input) || Object.keys(input).length !== 4 ||
+  if (!isRecord(input) || Object.keys(input).length !== 3 ||
     typeof input.videoId !== 'string' || !input.videoId ||
-    !Number.isFinite(input.timestamp) || input.timestamp < 0 || input.duration !== 180 || !isRecord(input.context) ||
-    Object.keys(input.context).length !== 3 || input.context.videoId !== input.videoId ||
-    typeof input.context.sessionId !== 'string' || !input.context.sessionId ||
-    !Number.isInteger(input.context.epoch) || input.context.epoch < 0) {
+    !Number.isFinite(input.timestamp) || input.timestamp < 0 || input.duration !== 180) {
     return fail('invalid', 'subtitle-query', false);
   }
   return ok(input);
 }
 
-export function createSubtitles({ getCurrentContext, request, createRequestId = () => crypto.randomUUID(), setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout }) {
+function createQueryCapability({ getCurrentContext, request, bindAuthoritativeContext, createRequestId = () => crypto.randomUUID(), setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout }) {
   return Object.freeze({
     query(input, cancellation) {
       const parsed = parseSubtitleQuery(input);
       if (!parsed.ok) return Promise.resolve(parsed);
-      const snapshot = getCurrentContext();
-      if (!sameContext(parsed.value.context, snapshot)) {
+      const snapshot = getAuthoritativeContext(getCurrentContext(), parsed.value.videoId);
+      if (!snapshot) {
         return Promise.resolve(fail('stale-context', 'subtitle-query-stale-context', false));
       }
+      const requestQuery = bindAuthoritativeContext ? { ...parsed.value, context: snapshot } : parsed.value;
       const callerSignal = cancellation?.signal ?? cancellation;
       return new Promise((resolve) => {
         const controller = new AbortController();
@@ -90,7 +107,7 @@ export function createSubtitles({ getCurrentContext, request, createRequestId = 
         try {
           requestResult = request({
             requestId: createRequestId(),
-            query: parsed.value,
+            query: requestQuery,
             deadlineMs: CAPABILITY_DEADLINE_MS,
             signal: controller.signal
           });
@@ -100,7 +117,8 @@ export function createSubtitles({ getCurrentContext, request, createRequestId = 
           return;
         }
         Promise.resolve(requestResult).then((response) => {
-          if (!sameContext(snapshot, getCurrentContext())) {
+          const current = getAuthoritativeContext(getCurrentContext(), parsed.value.videoId);
+          if (!sameContext(snapshot, current)) {
             settle(fail('stale-context', 'subtitle-query-stale-context', false));
             return;
           }
@@ -111,6 +129,10 @@ export function createSubtitles({ getCurrentContext, request, createRequestId = 
   });
 }
 
+export function createSubtitles(options) {
+  return createQueryCapability({ ...options, bindAuthoritativeContext: true });
+}
+
 export function createPageSubtitles({ window, getCurrentContext, createRequestId, setTimeout, clearTimeout }) {
   const transport = createDomTransport({
     window,
@@ -118,11 +140,12 @@ export function createPageSubtitles({ window, getCurrentContext, createRequestId
     setTimeout,
     clearTimeout
   });
-  return createSubtitles({
+  return createQueryCapability({
     getCurrentContext,
     createRequestId,
     setTimeout,
     clearTimeout,
+    bindAuthoritativeContext: false,
     request({ requestId, query, deadlineMs, signal }) {
       const payload = {
         category: SUBTITLE_QUERY_CATEGORY,

@@ -6,7 +6,10 @@ import vm from 'node:vm';
 import { loadSync } from './background-sync-metadata-harness.mjs';
 
 async function loadSubtitleReplacer(enqueue) {
-  const source = await readFile(new URL('../content/core/subtitle-replacer.js', import.meta.url), 'utf8');
+  const [source, coordinatorSource] = await Promise.all([
+    readFile(new URL('../content/core/subtitle-replacer.js', import.meta.url), 'utf8'),
+    readFile(new URL('../content/core/subtitle-fetch-coordinator.js', import.meta.url), 'utf8')
+  ]);
   const context = vm.createContext({
     AbortController,
     Date,
@@ -14,6 +17,8 @@ async function loadSubtitleReplacer(enqueue) {
     console: { log() {}, warn() {}, error() {} },
     setTimeout,
     clearTimeout,
+    setInterval,
+    clearInterval,
     window: {}
   });
   const messaging = new vm.SyntheticModule(['registerInternalEventHandler'], function initialize() {
@@ -31,6 +36,10 @@ async function loadSubtitleReplacer(enqueue) {
   const bridge = new vm.SyntheticModule(['replacementEventBridge'], function initialize() {
     this.setExport('replacementEventBridge', { isInitialized: true, enqueue });
   }, { context, identifier: 'content/core/replacement-event-bridge.js' });
+  const coordinator = new vm.SourceTextModule(coordinatorSource, {
+    context,
+    identifier: 'content/core/subtitle-fetch-coordinator.js'
+  });
   for (const dependency of [messaging, subtitles, slotKey, playback, bridge]) {
     await dependency.link(() => { throw new Error('test dependency has no imports'); });
     await dependency.evaluate();
@@ -48,6 +57,7 @@ async function loadSubtitleReplacer(enqueue) {
     if (specifier === '../system/capabilities/subtitles.js') return subtitles;
     if (specifier === '../utils/slot-key.js') return slotKey;
     if (specifier === './playback-context-manager.js') return playback;
+    if (specifier === './subtitle-fetch-coordinator.js') return coordinator;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await module.evaluate();

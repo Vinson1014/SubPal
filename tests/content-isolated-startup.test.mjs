@@ -268,13 +268,18 @@ function createContentStartupHarness({ pageMode = 'loaded-unready' } = {}) {
       this.setExport('initMessaging', async () => {});
     }, { context, identifier: `${owner}/messaging.js` });
     const isolatedModule = new vm.SyntheticModule(['startIsolatedEndscreenTasks'], function initializeIsolatedModule() {
-      this.setExport('startIsolatedEndscreenTasks', async (manager) => {
+      this.setExport('startIsolatedEndscreenTasks', async (_config, manager) => {
         state.isolatedAttempts += 1;
         if (manager?.initialized) state.isolatedInitialized += 1;
       });
     }, { context, identifier: `${owner}/isolated-endscreen-tasks.js` });
     const playbackModule = new vm.SyntheticModule(['playbackContextManager'], function initializePlaybackModule() {
-      this.setExport('playbackContextManager', {});
+      this.setExport('playbackContextManager', {
+        initialized: false,
+        async initialize() {
+          this.initialized = true;
+        }
+      });
     }, { context, identifier: `${owner}/playback-context-manager.js` });
     for (const module of [configModule, schemaModule, messagingModule, isolatedModule, playbackModule]) {
       await module.link(() => { throw new Error('Unexpected static import'); });
@@ -740,7 +745,7 @@ test('Given cold page-script injection When isolated PlaybackContext starts Then
   await messagingModule.link(() => { throw new Error('Unexpected messaging module import'); });
   await messagingModule.evaluate();
   const isolatedModule = new vm.SourceTextModule(
-    'export const startIsolatedEndscreenTasks = async (_config, manager) => manager.initialize()',
+    'export const startIsolatedEndscreenTasks = async () => {}',
     { context }
   );
   const playbackModule = new vm.SourceTextModule(
@@ -816,7 +821,7 @@ test('Given cold startup with page readiness delayed beyond the legacy timeout W
   await isolatedModule.link(() => { throw new Error('Unexpected isolated module import'); });
   await isolatedModule.evaluate();
   const playbackModule = new vm.SourceTextModule(
-    'export const playbackContextManager = {}',
+    'export const playbackContextManager = { initialize: async () => {} }',
     { context }
   );
   await playbackModule.link(() => { throw new Error('Unexpected playback module import'); });

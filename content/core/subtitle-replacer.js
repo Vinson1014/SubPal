@@ -13,6 +13,11 @@ import { registerInternalEventHandler } from '../system/messaging.js';
 import { createPageSubtitles } from '../system/capabilities/subtitles.js';
 import { buildSlotKey } from '../utils/slot-key.js';
 import { playbackContextManager } from './playback-context-manager.js';
+import {
+  FETCH_DURATION_SECONDS,
+  PREFETCH_THRESHOLD_SECONDS,
+  SubtitleFetchCoordinator
+} from './subtitle-fetch-coordinator.js';
 
 const LOCAL_REPLACEMENT_STATUSES = new Set([
   'pending',
@@ -31,14 +36,11 @@ class SubtitleReplacer {
     this.isInitialized = false;
     this.isEnabled = true;
     this.currentVideoId = null;
-    this.subtitleCache = new Map(); // 權威字幕緩存，以 slotKey 為鍵
     this.localReplacements = new Map(); // 本地樂觀字幕，以 slotKey 為鍵
-    this.requestedIntervals = []; // 已請求的時間區間
     
-    // 配置參數（從舊版移植並優化）
-    this.FETCH_DURATION_SECONDS = 180; // 每次獲取3分鐘字幕
-    this.PREFETCH_THRESHOLD_SECONDS = 60; // 預加載閾值
-    this.MAX_CACHE_SIZE = 500; // 最大緩存條目
+    // 配置參數
+    this.FETCH_DURATION_SECONDS = FETCH_DURATION_SECONDS;
+    this.PREFETCH_THRESHOLD_SECONDS = PREFETCH_THRESHOLD_SECONDS;
     
     // 測試模式狀態
     this.isTestModeEnabled = false;
@@ -56,9 +58,54 @@ class SubtitleReplacer {
       lastActivity: null
     };
 
+    this.subtitleSourceGeneration = 0;
+    this.internalEventDisposers = [];
+    this.fetchCoordinator = new SubtitleFetchCoordinator({
+      query: (query, cancellation) => this.subtitles.query(query, cancellation),
+      getCurrentTime: () => Number(globalThis.document?.querySelector?.('video')?.currentTime),
+      onSnapshot: (subtitles, batchContext) => this.processSubtitleBatch(subtitles, batchContext),
+      onRequest: () => {
+        this.stats.apiRequests += 1;
+      },
+      onLog: (entry) => this.log('fetch coordinator:', entry)
+    });
+
     // 替換事件去重記錄（15分鐘窗口）
     this.recentReplacementEvents = [];
     this.DEDUP_WINDOW_MS = 15 * 60 * 1000; // 15 分鐘
+  }
+
+  get subtitleCache() {
+    return this.fetchCoordinator.cache;
+  }
+
+  get requestedIntervals() {
+    return this.fetchCoordinator.intervals;
+  }
+
+  set requestedIntervals(intervals) {
+    this.fetchCoordinator.intervals = Array.isArray(intervals) ? intervals : [];
+  }
+
+  activateFetchContext(videoId = this.currentVideoId) {
+    const context = playbackContextManager.getCurrentContext();
+    if (context?.state !== 'ready' || context?.videoId !== videoId ||
+        typeof context.sessionId !== 'string' || !context.sessionId.startsWith('watch-') ||
+        !Number.isInteger(context.epoch) || context.epoch < 0) {
+      this.fetchCoordinator.cleanup();
+      this.localReplacements.clear();
+      return false;
+    }
+
+    const previousScopeKey = this.fetchCoordinator.scopeKey;
+    const activated = this.fetchCoordinator.activateContext(
+      context,
+      this.subtitleSourceGeneration
+    );
+    if (activated && previousScopeKey && previousScopeKey !== this.fetchCoordinator.scopeKey) {
+      this.localReplacements.clear();
+    }
+    return activated;
   }
 
   async initialize() {
@@ -131,6 +178,8 @@ class SubtitleReplacer {
       if (videoId !== this.currentVideoId) {
         await this.handleVideoChange(videoId, timestamp);
       }
+      // subtitle render 是 play/seek 事件漏接時的最後一道 coverage demand。
+      this.activateFetchContext(videoId);
       
       // 1. 測試模式檢查（如果啟用）
       if (this.isTestModeEnabled && this.testRules.length > 0) {
@@ -144,12 +193,12 @@ class SubtitleReplacer {
       // 2. 依 exact slot 解析本地樂觀字幕，再查詢權威緩存
       const slotKey = typeof subtitleData.slotKey === 'string' ? subtitleData.slotKey : null;
       const localReplacement = slotKey ? this.localReplacements.get(slotKey) : null;
-      const authoritativeReplacement = slotKey ? this.subtitleCache.get(slotKey) : null;
+      const authoritativeReplacement = this.fetchCoordinator.getReplacement(slotKey);
       const replacement = localReplacement || authoritativeReplacement;
 
       if (replacement) {
         this.stats.cacheHits++;
-        this.log(localReplacement ? '本地字幕命中:' : '權威緩存命中:', replacement.suggestedSubtitle);
+        this.log(localReplacement ? '本地字幕命中' : '權威緩存命中');
         
         // 檢查預加載需求
         this.checkAndTriggerPrefetch(timestamp);
@@ -184,21 +233,20 @@ class SubtitleReplacer {
     // 設置新的視頻 ID
     this.currentVideoId = videoId;
     
-    // 觸發第一批字幕獲取（背景非阻塞，避免阻塞字幕顯示）
-    // 首次顯示將使用原始字幕，API 返回後後續字幕自動替換
-    // 首次載入使用 500ms 短超時，避免長時間阻塞顯示
-    this.fetchSubtitleBatch(videoId, timestamp, { timeout: 500 }).catch(error => {
-      console.error('首次字幕批次獲取失敗:', error);
-    });
+    // ready context 才能啟動；若尚未 ready，後續 play/seek/render demand 會恢復。
+    if (this.activateFetchContext(videoId)) {
+      void this.fetchCoordinator.ensureCoverage(timestamp, { reason: 'initial' }).catch(() => {
+        // 初始查詢不得阻塞字幕顯示。
+      });
+    }
   }
 
   /**
    * 清理視頻相關數據
    */
   clearVideoData() {
-    this.subtitleCache.clear();
+    this.fetchCoordinator.cleanup();
     this.localReplacements.clear();
-    this.requestedIntervals = [];
     this.log('已清理視頻數據');
   }
 
@@ -349,16 +397,7 @@ class SubtitleReplacer {
    * @returns {number} 移除的區間數
    */
   invalidateIntervalAt(timestamp) {
-    const numericTimestamp = Number(timestamp);
-    if (!Number.isFinite(numericTimestamp)) {
-      return 0;
-    }
-
-    const previousCount = this.requestedIntervals.length;
-    this.requestedIntervals = this.requestedIntervals.filter(interval =>
-      numericTimestamp < interval.start || numericTimestamp >= interval.end
-    );
-    return previousCount - this.requestedIntervals.length;
+    return this.fetchCoordinator.invalidateAt(timestamp);
   }
 
   isLocalReplacementReconciliationDue(itemId, now) {
@@ -487,38 +526,10 @@ class SubtitleReplacer {
    * @param {number} currentTimestamp - 當前時間戳
    */
   checkAndTriggerPrefetch(currentTimestamp) {
-    // 如果沒有已請求的區間，立即觸發請求
-    if (this.requestedIntervals.length === 0) {
-      this.log('沒有已請求區間，觸發初始加載');
-      this.fetchSubtitleBatch(this.currentVideoId, currentTimestamp);
-      return;
-    }
-    
-    // 查找當前時間戳所在的區間
-    let needsPrefetch = true;
-    let nearestEndTime = Infinity;
-    
-    for (const interval of this.requestedIntervals) {
-      if (currentTimestamp >= interval.start && currentTimestamp < interval.end) {
-        // 當前時間在這個區間內
-        const timeToEnd = interval.end - currentTimestamp;
-        if (timeToEnd >= this.PREFETCH_THRESHOLD_SECONDS) {
-          needsPrefetch = false; // 時間充足，不需要預加載
-        } else {
-          nearestEndTime = interval.end; // 需要從這個時間點開始預加載
-        }
-        break;
-      }
-    }
-    
-    if (needsPrefetch && nearestEndTime !== Infinity) {
-      this.log(`距離區間結束 ${nearestEndTime - currentTimestamp}s，觸發預加載`);
-      this.fetchSubtitleBatch(this.currentVideoId, nearestEndTime);
-    } else if (needsPrefetch) {
-      // 當前時間不在任何區間內，立即請求
-      this.log('當前時間不在任何已請求區間，觸發請求');
-      this.fetchSubtitleBatch(this.currentVideoId, currentTimestamp);
-    }
+    if (!this.activateFetchContext()) return;
+    void this.fetchCoordinator.ensureCoverage(currentTimestamp, { reason: 'subtitle-render' }).catch(() => {
+      // render path 不等待網路結果。
+    });
   }
 
   /**
@@ -534,61 +545,20 @@ class SubtitleReplacer {
   async fetchSubtitleBatch(videoId, startTimestamp, options = {}) {
     if (!videoId) {
       this.log('無效的視頻 ID，跳過獲取');
-      return;
+      return { ok: false, error: { kind: 'invalid', code: 'subtitle-query', retryable: false } };
     }
-    
-    const start = startTimestamp;
-    const end = start + this.FETCH_DURATION_SECONDS;
-    
-    // 檢查是否已經請求過這個區間
-    const alreadyRequested = this.isIntervalRequested(start, end);
-    if (alreadyRequested && !options.force) {
-      this.log(`區間 ${start}-${end} 已請求過，跳過`);
-      return;
+    if (!this.activateFetchContext(videoId)) {
+      return { ok: false, error: { kind: 'stale-context', code: 'subtitle-query-stale-context', retryable: false } };
     }
-    
-    // 記錄請求區間
-    this.requestedIntervals.push({
-      start: start,
-      end: end,
-      status: 'in-progress',
-      timestamp: Date.now()
-    });
-    
-    this.log(`開始獲取字幕批次: ${start} ~ ${end}`);
-    this.stats.apiRequests++;
-    const requestStartedAt = Number.isFinite(options.requestStartedAt)
-      ? options.requestStartedAt
-      : Date.now();
-    
-    const currentContext = playbackContextManager.getCurrentContext();
-    const controller = Number.isFinite(options.timeout) ? new AbortController() : null;
-    const timeoutId = controller
-      ? setTimeout(() => controller.abort(), Math.max(0, options.timeout))
-      : null;
-    const result = await this.subtitles.query({
-      videoId,
-      timestamp: startTimestamp,
-      duration: this.FETCH_DURATION_SECONDS,
-      context: currentContext ? {
-        videoId: currentContext.videoId,
-        sessionId: currentContext.sessionId,
-        epoch: currentContext.epoch
-      } : null
-    }, controller?.signal);
-    if (timeoutId !== null) clearTimeout(timeoutId);
 
-    if (result.ok) {
-      await this.processSubtitleBatch(result.value.subtitles, {
-        requestStartedAt,
-        reconciliationItemId: options.reconciliationItemId || null
-      });
-      this.markIntervalComplete(start);
-      this.log(`成功處理 ${result.value.subtitles.length} 條字幕`);
-    } else {
-      console.warn('獲取字幕批次失敗，使用原始字幕:', result.error);
-      this.markIntervalFailed(start);
-    }
+    const fetchOptions = {
+      reason: options.reason || (options.force ? 'force-reconciliation' : 'explicit-demand'),
+      requestStartedAt: options.requestStartedAt,
+      reconciliationItemId: options.reconciliationItemId
+    };
+    return options.force
+      ? this.fetchCoordinator.forceRefreshAt(startTimestamp, fetchOptions)
+      : this.fetchCoordinator.requestAt(startTimestamp, fetchOptions);
   }
 
   /**
@@ -599,7 +569,6 @@ class SubtitleReplacer {
    * @param {string|null} batchContext.reconciliationItemId - 本地字幕項目 ID
    */
   async processSubtitleBatch(subtitles, batchContext = {}) {
-    let newCount = 0;
     const requestStartedAt = Number.isFinite(batchContext.requestStartedAt)
       ? batchContext.requestStartedAt
       : null;
@@ -608,31 +577,7 @@ class SubtitleReplacer {
       : null;
     
     for (const subtitle of subtitles) {
-      if (!subtitle.originalSubtitle || !subtitle.suggestedSubtitle) {
-        continue; // 跳過無效數據
-      }
-
-      const suppliedSlotKey = typeof subtitle.slotKey === 'string' ? subtitle.slotKey.trim() : '';
-      const slotKey = suppliedSlotKey || buildSlotKey({
-        videoID: subtitle.videoID,
-        originalSubtitle: subtitle.originalSubtitle,
-        languageCode: subtitle.languageCode,
-        timestamp: subtitle.timestamp
-      });
-
-      if (!slotKey) {
-        continue;
-      }
-
-      if (!this.subtitleCache.has(slotKey)) {
-        newCount++;
-      }
-
-      this.subtitleCache.set(slotKey, {
-        ...subtitle,
-        slotKey,
-        cacheTime: Date.now()
-      });
+      const slotKey = subtitle.slotKey;
 
       const localRecord = this.localReplacements.get(slotKey);
       if (!localRecord) {
@@ -654,57 +599,36 @@ class SubtitleReplacer {
       }
     }
     
-    this.log(`新增 ${newCount} 條字幕到緩存，總數: ${this.subtitleCache.size}`);
+    this.log(`已套用權威字幕快照，批次數: ${subtitles.length}，緩存總數: ${this.subtitleCache.size}`);
     
-    // 限制緩存大小
-    this.limitCacheSize();
   }
 
-  /**
-   * 限制緩存大小
-   */
-  limitCacheSize() {
-    if (this.subtitleCache.size > this.MAX_CACHE_SIZE) {
-      // 移除最舊的條目
-      const entries = Array.from(this.subtitleCache.entries());
-      entries.sort((a, b) => (a[1].cacheTime || 0) - (b[1].cacheTime || 0));
-      
-      const toRemove = entries.length - this.MAX_CACHE_SIZE;
-      for (let i = 0; i < toRemove; i++) {
-        this.subtitleCache.delete(entries[i][0]);
-      }
-      
-      this.log(`清理 ${toRemove} 條舊緩存，當前大小: ${this.subtitleCache.size}`);
-    }
-  }
 
   /**
    * 檢查區間是否已請求
    */
   isIntervalRequested(start, end) {
-    return this.requestedIntervals.some(interval => 
-      interval.start <= start && interval.end >= end
+    return this.requestedIntervals.some((interval) =>
+      this.isIntervalActive(interval) && interval.start <= start && interval.end >= end
     );
+  }
+
+  isIntervalActive(interval) {
+    return interval.status === 'in-progress' || interval.status === 'completed';
   }
 
   /**
    * 標記區間完成
    */
-  markIntervalComplete(start) {
-    const interval = this.requestedIntervals.find(i => i.start === start);
-    if (interval) {
-      interval.status = 'completed';
-    }
+  markIntervalComplete(interval) {
+    interval.status = 'completed';
   }
 
   /**
    * 標記區間失敗
    */
-  markIntervalFailed(start) {
-    const interval = this.requestedIntervals.find(i => i.start === start);
-    if (interval) {
-      interval.status = 'failed';
-    }
+  markIntervalFailed(interval) {
+    interval.status = 'failed';
   }
 
   /**
@@ -724,15 +648,12 @@ class SubtitleReplacer {
       myVote = null
     } = replacementData;
     
-    // 處理換行符號
-    const replacementHtml = suggestedSubtitle.replace(/\n/g, '<br>');
-    
     this.stats.totalReplacements++;
     
     const result = {
       ...originalSubtitle,
       text: suggestedSubtitle,
-      htmlContent: `<span>${replacementHtml}</span>`,
+      htmlContent: null,
       original: originalSubtitle.text,
       isReplaced: true,
       translationID: translationID,
@@ -752,11 +673,7 @@ class SubtitleReplacer {
       };
     }
     
-    this.log('創建替換字幕:', {
-      original: originalSubtitle.text,
-      replacement: suggestedSubtitle,
-      translationID: translationID
-    });
+    this.log('創建替換字幕:', { translationID });
 
     // 記錄 replacement event（異步，不阻塞字幕替換）
     // 忽略測試模式的替換
@@ -834,6 +751,10 @@ class SubtitleReplacer {
    */
   cleanup() {
     this.log('清理字幕替換器資源...');
+
+    for (const dispose of this.internalEventDisposers.splice(0)) {
+      dispose();
+    }
     
     this.clearVideoData();
     this.isInitialized = false;
@@ -847,8 +768,12 @@ class SubtitleReplacer {
    * 設置事件處理器
    */
   setupEventHandlers() {
+    for (const dispose of this.internalEventDisposers.splice(0)) {
+      dispose();
+    }
+
     // 監聽設置變更（保留用於測試模式等非配置管理的功能）
-    registerInternalEventHandler('SETTINGS_CHANGED', (message) => {
+    this.internalEventDisposers.push(registerInternalEventHandler('SETTINGS_CHANGED', (message) => {
       if (message.changes.isTestModeEnabled !== undefined) {
         this.isTestModeEnabled = message.changes.isTestModeEnabled;
         this.log('測試模式設置已更新:', this.isTestModeEnabled);
@@ -858,7 +783,37 @@ class SubtitleReplacer {
         this.testRules = message.changes.testRules || [];
         this.log('測試規則已更新:', this.testRules.length);
       }
-    });
+    }));
+
+    this.internalEventDisposers.push(registerInternalEventHandler('PLAYER_STATE_CHANGED', (message) => {
+      if (!['play', 'pause', 'seeked'].includes(message?.state)) return;
+      if (message.state === 'pause') {
+        this.fetchCoordinator.handlePlayerState('pause', Number(message.timestamp));
+        return;
+      }
+      if (!this.isEnabled) return;
+      const videoId = typeof message.videoId === 'string' ? message.videoId : String(message.videoId || '');
+      const timestamp = Number(message.timestamp);
+      if (!videoId || !Number.isFinite(timestamp) || timestamp < 0) return;
+
+      void (async () => {
+        if (videoId !== this.currentVideoId) {
+          await this.handleVideoChange(videoId, timestamp);
+        } else if (!this.activateFetchContext(videoId)) {
+          return;
+        }
+        this.fetchCoordinator.handlePlayerState(message.state, timestamp);
+      })();
+    }));
+
+    this.internalEventDisposers.push(registerInternalEventHandler('SUBTITLE_SOURCE_CHANGED', (message) => {
+      if (!Number.isInteger(message?.generation) || message.generation < 0 ||
+          message.generation === this.subtitleSourceGeneration) return;
+      this.subtitleSourceGeneration = message.generation;
+      this.fetchCoordinator.cleanup();
+      this.localReplacements.clear();
+      if (this.currentVideoId && this.isEnabled) this.activateFetchContext(this.currentVideoId);
+    }));
   }
 
   /**

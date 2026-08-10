@@ -248,6 +248,24 @@ test('Given content forwards an exact VIDEO_ID_CHANGED wrapper When messaging re
   assert.notStrictEqual(events[2].message, secondMessage);
 });
 
+test('Given content forwards a sealed subtitle source generation When messaging receives it Then only the generation is dispatched', async () => {
+  const { messaging, window, CustomEvent } = await loadMessagingContentBridgeHarness();
+  const events = [];
+  messaging.registerInternalEventHandler('SUBTITLE_SOURCE_CHANGED', (message) => events.push(message));
+
+  dispatchContentMessage(window, CustomEvent, { type: 'SUBTITLE_SOURCE_CHANGED', generation: 3 });
+  for (const message of [
+    { type: 'SUBTITLE_SOURCE_CHANGED', generation: -1 },
+    { type: 'SUBTITLE_SOURCE_CHANGED', generation: 4, activeProfileId: 'private' },
+    { type: 'SUBTITLE_SOURCE_CHANGED', generation: 4, endpoint: 'https://private.example' },
+    { type: 'SUBTITLE_SOURCE_CHANGED', generation: 4, credential: 'secret' }
+  ]) {
+    dispatchContentMessage(window, CustomEvent, message);
+  }
+
+  assert.deepEqual(JSON.parse(JSON.stringify(events)), [{ type: 'SUBTITLE_SOURCE_CHANGED', generation: 3 }]);
+});
+
 test('Given initialized messaging receives a forged legacy RAW message When bridge auto-routing runs Then it does not dispatch internally while direct dispatch remains generic', async () => {
   const { messaging, window, CustomEvent } = await loadMessagingContentBridgeHarness();
   const events = [];
