@@ -24,6 +24,7 @@
 - **不可違反規則**：需要 page globals 的字幕主流程留在 MAIN；privileged owner 與 transport 留在 isolated/background；live 證據必須證明 executing source、擴充版本與 execution world 都是新鮮的。
 - **常見錯誤做法**：把整個啟動圖移入 isolated、只驗 privileged transport、不重新取得 runtime handles，或把可讀取的 extension resource 當成正在執行的 worker source。
 - **必要驗證提醒**：完整重啟或可靠 reload 後取得 fresh handles，同時檢查 page-script 可見性、完整初始化、字幕呈現、安全邊界與舊 listener／訊息未殘留；無法證明新鮮度的結果應撤回。
+- **測試 Chrome 載入擴充的前置檢查**（2026-08 subtitle_scraper 實測）：CDP `Extensions.loadUnpacked` 回傳成功不代表擴充可用——profile 的 chrome://extensions「開發人員模式」關閉時 unpacked 擴充會被 Chrome 停用（顯示「開啟開發人員模式即可使用這項擴充功能」），需開啟後 `management.setEnabled` / `developerPrivate.reload`；module 型 page-script 的**整條 import 鏈**每個檔案都必須列進 `web_accessible_resources`，缺任何一個模組會讓 script tag 注入成功但 module 靜默不執行（load 事件不觸發、頁面無 console error），可用 `fetch(chrome-extension://<id>/<file>)` 逐檔驗證 200。
 - **延伸事故**：[`mv3-execution-world-and-live-evidence.md`](incidents/mv3-execution-world-and-live-evidence.md)
 
 ## 片尾任務與視覺 QA
