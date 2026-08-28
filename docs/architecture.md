@@ -76,13 +76,12 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌──────────────────────┐     ┌──────────────────────┐                     │
-│  │     Popup UI         │     │    Options Page      │                     │
-│  │   (popup.html/js)    │     │   (options.html/js)  │                     │
-│  └──────────┬───────────┘     └──────────┬───────────┘                     │
-│             │                            │                                  │
-│             │  chrome.runtime.sendMessage │                                  │
-│             └─────────────┬──────────────┘                                  │
-│                           ▼                                                 │
+│  │ Popup UI / active-profile stats one-shot sendMessage client │     │ Options Page / BackendProfiles port client │
+│  │   (popup.html/js)                      │     │   (options.html/js)                    │
+│  └──────────┬─────────────────────────────┘     └──────────┬────────────────┘             │
+│             │ chrome.runtime.sendMessage                    │ options-page-channel            │
+│             │                                              │                                 │
+│                           ▼                                 ▼                                 │
 │  ┌──────────────────────────────────────────────────────────────┐          │
 │  │              Service Worker (background.js)                  │          │
 │  │  ┌────────────┐  ┌────────────┐  ┌──────────────────────┐   │          │
@@ -96,10 +95,10 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 │  │                 Content Script (content.js)                  │          │
 │  │  - 消息橋接層                                                 │          │
 │  │  - ConfigManager 初始化                                       │          │
-│  │  - SubmissionQueueManager 初始化                             │          │
+│  │  - private Port / DOM transport 啟動                          │          │
 │  │  - 注入 page context script                                   │          │
 │  └──────────┬───────────────────────────────────────────────────┘          │
-│             │ CustomEvent (messageToContentScript)                         │
+│             │ private DOM request/response (messageToContentScript / responseFromContentScript) │
 │             ▼                                                               │
 │  ┌──────────────────────────────────────────────────────────────┐          │
 │  │                Page Context (content/index.js)               │          │
@@ -159,6 +158,18 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 - **診斷快照**: `getDebugSnapshot()` 回傳完整播放狀態（session、track、currentTime、recent events）
 - **trusted watch session**: 僅 sessionId 以 `watch-` 開頭且 confidence ≥ `medium` 且非 fallback 來源才算 trusted
 
+#### UI 能力路由
+- `Popup` 是封閉的 active-profile stats client，只送出 `chrome.runtime.sendMessage` 的 `POPUP_ACTIVE_PROFILE_STATS` one-shot request，回來的資料會先正規化成 `Result`，只保留 `active-backend-profile-user` scope 的 masked identity 與 totals。
+- `Options` 是 privileged `BackendProfiles` client，透過 `options-page-channel` port 呼叫 `BACKEND_PROFILES_LIST`、`BACKEND_PROFILES_CREATE`、`BACKEND_PROFILES_ACTIVATE`、`BACKEND_PROFILES_DELETE`、`BACKEND_PROFILES_EXPORT_QUEUE`、`BACKEND_PROFILES_RETRY_FAILED`，回傳同樣維持 normalized `Result`。
+- `content.js` 與 `background.js` 共享 `subtitle-assistant-channel` port，private transport source 是 `subpal-content-script`，內容腳本只負責 private DOM request/response 的橋接，不直接碰 Netflix page context 的內部狀態。
+- `MAIN` world 只消費 content-local typed settings snapshot，`Content -> MAIN` 的 one-way projected `CONFIG_CHANGED` notification（`messageFromContentScript`），不直接讀 `chrome.storage.local`。
+- `settings-read/snapshot` 由 `content.js` 直連的 private DOM request/response 處理，不屬於 `PageIngress.accept()` 的 sealed route；`SettingsSnapshot` 只有 `read()` 與 `dispose()`，snapshot 只透過這條私有路徑回來。
+- `Playback` 走 page transport 的 `perform()`，支援 `context-snapshot`、`available-languages`、`current-language`、`switch-language`、`switch-track`、`jump-to-timecode`。
+- `Subtitles` 只暴露 `query()`，把 `replacement-subtitle-query` 綁到目前 playback context。
+- `Contributions` 暴露 `enqueue`、`getProjection` 與 `retry`，背景 owner 保持投票、翻譯與替換事件的持久化。
+- `GET_CROWDSOURCING_TASKS` 是 background 承接的 direct privileged crowdsourcing 例外，僅限 Netflix content script 且通過 sender、watch、videoID、limit、languageCode guard。
+- backend profile 的 `queueCounts` 是 profile-scoped，`exportQueue` 只允許 active profile，`deleteProfile` 預設會拒絕有 pending、syncing、failed 紀錄的 profile，`discard: true` 才會移除那些資料，`retryFailed` 需要 `confirmInactiveProfile` 才能碰 inactive profile。
+
 ---
 
 ## 核心模組
@@ -175,18 +186,18 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 1. connectToBackground()
 2. ensureNetflixPageScriptReady()       // 建立共享 readiness Promise 並由 content.js 負責 physical injection
 3. initializeConfigManager()
-4. initializeQueueManagers()            // 失敗只停用離線隊列，不阻斷後續 runtime
-5. await pageScriptReady
-6. startPageContextOnce()                // 注入 MAIN world content/index.js
-7. startIsolatedEndscreenTasksOnce()     // ConfigManager 可用時啟動 isolated owner
+4. await pageScriptReady                 // 等待 content.js 擁有的 readiness handshake
+5. startPageContextOnce()                // 注入 MAIN world content/index.js
+6. startIsolatedEndscreenTasksOnce()     // ConfigManager 可用時啟動 isolated owner
 ```
 
 啟動失敗矩陣：
 
 - Page Script 進入 `failed-terminal`：MAIN 與 isolated owners 都不啟動，不建立背景重試，保留 Netflix 原生字幕。
-- SubmissionQueueManager 初始化失敗：MAIN 與 isolated owners 仍可啟動。
-- ConfigManager 初始化失敗：Page Script ready 後只啟動 MAIN；沒有可用的 ConfigManager 時不啟動 isolated endscreen owner。
-- 所有啟動入口都以共享 Promise 或 once guard 去重，避免平行建立重複 owner。
+- ConfigManager 初始化失敗：若 Page Script ready，仍啟動 MAIN；沒有可用的 ConfigManager 時不啟動 isolated endscreen owner。
+- isolated endscreen task 初始化失敗：不回滾已啟動的 MAIN，僅記錄該模組失敗。
+- background contribution queue 不在 content.js 初始化；內容端只建立 private transport，持久化 queue 由 background 層的 queue owner 管理。
+- 所有啟動入口都以共享 Promise 或 single-flight guard 去重，避免平行建立重複 owner。
 
 **MAIN world InitializationManager 順序（7 階段並行優化流程）**:
 
@@ -204,9 +215,9 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 ```
 
 **設計要點**:
-- **注入權限集中**: MAIN world 不要求或執行 Page Script 注入；`InitializationManager` 與 `NetflixApiBridge` 只做最多 5 秒的 bounded readiness wait
+- **注入權限集中**: MAIN world 不要求或執行 Page Script 注入；`InitializationManager` 與 playback capability 只做最多 5 秒的 bounded readiness wait
 - **階段 3 並行**: Page Script readiness wait 與 Config 載入同時進行，減少等待時間
-- **攔截器提前啟動**: 階段 5 中 `checkNetflixAPI()` 立即啟動字幕攔截器，確保 Netflix 預設字幕請求在發生的當下即被攔截
+- **攔截器提前啟動**: 階段 5 在 Page Script readiness 後初始化 player helper、字幕攔截器與 PlaybackContextManager，確保 Netflix 預設字幕請求在發生的當下即被攔截
 - **PlaybackContextManager**: 階段 5 中初始化，追蹤播放 session/videoId/track 狀態並作為字幕處理 gate
 - **安全初始化**: SubtitleCoordinator 不依賴語言列表決定生死；Netflix SPA 換片時 player/languages 可能短暫不可讀，由 coordinator 的 soft/hard 分類與背景回升處理
 - **降級模式**: MAIN 元件初始化失敗時可嘗試基本 DOM 監聽；但 Page Script `failed-terminal` 發生在外層閘門，MAIN 不會啟動，因此不建立 DOM fallback
@@ -223,39 +234,28 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 
 **職責**: 抽象化 Page Context 與 Content Script 之間的通信
 
-**API**:
+**實際 exports**:
 ```javascript
-// 發送消息到 Content Script
-messaging.sendToContentScript(type, data)
-
-// 發送消息到 Background（通過 Content Script 轉發）
-messaging.sendToBackground(type, data)
-
-// 註冊消息處理器
-messaging.onMessage(type, handler)
-
-// 一次性監聽
-messaging.once(type, handler)
+initMessaging()
+registerInternalEventHandler(type, handler)
+dispatchInternalEvent(message)
+isPageScriptAvailable()
+waitForPageScript(timeout)
 ```
 
-**消息類型**:
-- `CONFIG_GET`, `CONFIG_SET`, `CONFIG_CHANGED` - 配置操作
-- `QUEUE_*` - 隊列操作（投票、翻譯、事件）
-- `API_*` - API 相關（獲取字幕、提交數據）
+`initMessaging()` 以單一 `messagingInitializationPromise` 合併重複呼叫，確保 ConfigBridge 初始化與 window listener 只建立一次。它只接收 `messageFromContentScript` 的 guarded reverse-DOM event：`parseContentScriptBridgeMessage()` 先驗證 envelope，再由 `parseVideoIdChangedMessage()` 檢查允許欄位與 primitive 值，產生 fresh normalized `VIDEO_ID_CHANGED` 物件後才交給 `dispatchInternalEvent()`。
 
-`initMessaging()` 以單一 `messagingInitializationPromise` 合併重複呼叫，確保 ConfigBridge 初始化與 window listeners 只建立一次。Messaging System 不提供 Page Script injection API；已移除 `requestPageScriptInjection` 與舊的 `subpal-inject-page-script` / `subpal-request-page-script-injection` 事件。
+Messaging System 不提供 Page Script injection API. There is no generic public `sendMessage`/`onMessage`/register handler bus。跨 context 的 request/response 由各 capability 的 private typed envelope 負責；此模組只有內部事件分發與 Page Script readiness surface。
 
-#### 1.3 Netflix API Bridge (`content/system/netflix-api-bridge.js`)
+#### 1.3 Playback Capability (`content/system/capabilities/playback.js`)
 
-**職責**: 封裝 Netflix 內部 API 的調用
+**職責**: 封裝 Page Context 對 Netflix Page Script 的允許播放操作。
 
-**Readiness 邊界**: `NetflixApiBridge` 不負責注入 Page Script。它先等待 `content.js` 完成 readiness handshake，再依序檢查 API availability、初始化 player helper 與 subtitle interceptor。
+**Readiness 邊界**: `createPagePlayback()` 不負責注入 Page Script。它只在 `content.js` 完成 readiness handshake 後，以 private typed envelope 呼叫 Page Script。
 
-**核心功能**:
-- `getCurrentVideoMetadata()` - 獲取當前影片元數據
-- `getSubtitleTracks()` - 獲取可用字幕軌道
-- `switchSubtitleTrack(trackId)` - 切換字幕軌道
-- `getPlayerState()` - 獲取播放器狀態（播放/暫停、時間等）
+**核心 surface**:
+- `Playback.perform({ variant: 'context-snapshot' })` - 取得 strict `Result` 播放診斷快照
+- `available-languages`、`current-language`、`switch-language`、`switch-track`、`jump-to-timecode` - 僅限既有 caller 的 typed variant
 
 #### 1.4 Config System（配置系統）
 
@@ -270,8 +270,8 @@ messaging.once(type, handler)
 - **類型安全**: 自動驗證配置值類型
 - **批量操作**: 減少 Storage 訪問次數
 - **扁平化鍵名**: 使用點記法（如 `subtitle.primaryLanguage`）
-- **唯一權威通知**: changed-value write 只由 isolated `ConfigManager` 的 storage change 發布；content script 再轉送單一 `CONFIG_CHANGED` 給 MAIN `ConfigBridge`
-- **Exactly-once 語義**: same-value write 因 Chrome 不產生 storage change，由 `ConfigManager` 明確通知一次；失敗寫入回滾 cache 且不發布通知
+- **唯一權威通知**: changed-value write 只由 isolated `ConfigManager` 的 storage change 發布；content script 再轉送單一 `CONFIG_CHANGED` projected one-way notification 給 MAIN `ConfigBridge`。首次寫入原本不存在的 leaf 時，notification 的 `oldValue` is `undefined`；這是新值沒有舊 storage value 的正常語義。
+- **本地通知語義**: same-value write 因 Chrome 不產生 storage change，由 `ConfigManager` 明確通知一次；失敗寫入回滾 cache 且不發布通知。這只描述本地通知，不宣稱任何 server effect 的 exactly-once delivery。
 
 ---
 
@@ -279,63 +279,49 @@ messaging.once(type, handler)
 
 #### 2.1 SubtitleReplacer (`content/core/subtitle-replacer.js`)
 
-**職責**: 字幕替換的核心邏輯
+**職責**: 協調字幕替換、本地投稿 reconciliation 與安全渲染資料；網路 coverage/cache/retry 狀態交由其擁有的 `SubtitleFetchCoordinator`。
 
-**緩存策略**:
-```javascript
-// 緩存配置
-const CACHE_LIMIT = 500;           // 最大緩存條目
-const TIMESTAMP_TOLERANCE = 2000;  // 時間戳容差（毫秒）
-const PRELOAD_THRESHOLD = 60000;   // 預加載閾值（毫秒）
+**Fetch 與 cache**:
 
-// 緩存鍵生成
-const cacheKey = `${text}_${Math.floor(timestamp / 2)}`;
-```
+- caller 不需要知道影片總長；每次固定查詢目前需求點往後 180 秒。
+- coordinator 以 interval union 計算 `in-progress`/`completed` coverage；成功空批次是 negative cache，failed 不算 coverage。
+- coverage 剩餘不足 60 秒時從最遠連續 endpoint prefetch。`play` 立即檢查，播放中每 15 秒檢查，`seeked` 250 ms debounce，字幕 render event 是漏接 fallback。
+- session memory cache scope 為 `(videoId, sessionId, localEpoch, subtitleSourceGeneration)`，不持久化；換片、playback identity 或 backend source 改變即清除。
+- 每批 response 是其 range 的權威快照，不使用獨立筆數上限淘汰字幕而保留虛假的 completed coverage。
+- replacement 只以 canonical `slotKey` 精確命中，不使用舊的文字與時間容差組合 cache key。
 
-**匹配邏輯**:
-1. **精確匹配**: 文本 + 時間戳（2 秒容差）
-2. **模糊匹配**: 時間戳範圍內的文本匹配
-3. **預加載**: 提前加載後續 3 分鐘字幕
+**安全與流量限制**:
 
-**批次獲取**:
-- 每次獲取 3 分鐘字幕數據
-- 追蹤已請求時間區間避免重複
-- 當播放接近區間結束時自動觸發預加載
+- 同時最多兩筆 request；滿載時只保留最新 demand，prefetch 不排隊。
+- Retryable failure 使用 2/10/30/60 秒冷卻，下一次 tick/seek/render demand 才能重試；messaging 不 replay。
+- Response 最多 1,000 筆、單一文字最多 10,000 字；wrong-video、out-of-range、非 canonical slot key 或欄位錯誤會整批拒絕且不污染 cache。
+- fetched replacement 在單語與雙語路徑都使用 `textContent` 與 `white-space: pre-wrap`，不把 `suggestedSubtitle` 插入 `innerHTML`。
 
-#### 2.2 SubmissionQueueManager (`content/core/submission-queue-manager.js`)
+#### 2.2 Background Contribution Queues（背景貢獻隊列）
 
-**職責**: 管理離線隊列（投票、翻譯、替換事件）
+**職責**: 背景層管理投票、翻譯與替換事件的持久化佇列
 
 **隊列類型**:
 ```javascript
 {
-  voteQueue: [],           // 投票隊列
-  translationQueue: [],    // 翻譯隊列
-  replacementEventQueue: [] // 替換事件隊列
+  voteQueue: [],
+  translationQueue: [],
+  replacementEventQueue: []
 }
 ```
 
-**隊列項目狀態**:
+**狀態語義**:
 - `pending` - 等待同步
 - `syncing` - 同步中
-- `completed` - 已完成
-- `failed` - 失敗（超過最大重試次數）
+- `completed` - 已完成；同步成功後移入對應 history，不留在 queue
+- `failed` - 失敗；可由背景 retry 路徑重新排回 `pending`，或標記為永久失敗
 
-**API 接口**:
-```javascript
-// 添加各類項目
-enqueueVote(data)
-enqueueTranslation(data)
-enqueueReplacementEvent(data)
+**公開面**:
+- `enqueueVote`、`enqueueTranslation`、`enqueueReplacementEvent` 是內容端的提交動作，不是背景層公開 API。
+- `background/contribution-queue.js` 才是真正的持久化 owner，負責 profile binding、projection 與 retry。
+- `retryContribution()` 與 `retryFailedContributions()` 是背景內部重試輔助，不對 UI 暴露掃描式介面。
 
-// 查詢目前所有 pending 項目
-getAllPending()
-
-// 個別失敗項目的重試由對應 VOTE_RETRY / TRANSLATION_RETRY /
-// REPLACEMENT_EVENT_RETRY message handler 重新排入隊列
-```
-
-`SubmissionQueueManager` 不提供直接 `sync()`；實際 API 同步由 Background 內部生命週期觸發。
+背景現在以 contribution queue 與 projection/retry 路徑為主。
 
 #### 2.3 Bridge Modules（橋接器）
 
@@ -370,7 +356,6 @@ translationBridge.enqueue({
 replacementEventBridge.enqueue({
   translationID: 'abc123',
   contributorUserID: 'user456',
-  beneficiaryUserID: 'current_user',
   occurredAt: Date.now()
 });
 ```
@@ -379,6 +364,7 @@ replacementEventBridge.enqueue({
 - 15 分鐘去重窗口
 - 異步記錄不阻塞字幕替換
 - 自動批次提交（最多 100 個）
+- `contributorUserID` 仍是 MAIN 送出的事件資料；background queue 會從 active profile atomically 補上 `beneficiaryUserID` 與 `backendProfileId`，再一起落庫。
 
 #### 2.4 VideoInfo (`content/core/video-info.js`)
 
@@ -410,11 +396,11 @@ replacementEventBridge.enqueue({
 **核心概念**:
 - **Epoch**: 每次 videoId 或 sessionId 改變時遞增，用於判斷字幕資料是否屬於當前播放上下文
 - **State**: `ready`（播放上下文就緒）或 `transitioning`（SPA 切換中，字幕處理暫緩）
-- **Polling**: 每 3 秒向 Page Script 請求診斷快照（`GET_SUBPAL_DEBUG_SNAPSHOT`），從中提取播放會話資訊
+- **Polling**: 以 `Playback.perform({ variant: 'context-snapshot' })` 經 private typed envelope 向 Page Script 取得 strict `Result` 診斷快照，從中提取播放會話資訊
 
 **工作流程**:
 ```javascript
-1. 初始化時向 Page Script 請求診斷快照
+1. 初始化時以 `Playback.perform({ variant: 'context-snapshot' })` 向 Page Script 請求診斷快照
 2. 從快照中提取播放 session、videoId、currentTrack
 3. 使用信心評分（sessionSelectionConfidence）篩選有效的 watch session
 4. 當 videoId 或 sessionId 改變時遞增 epoch 並轉為 transitioning 狀態
@@ -490,18 +476,17 @@ UIManager 維護原生 Netflix 字幕的可見性狀態，透過注入/移除 CS
 
 **字幕容器結構**:
 ```html
-<div id="subpal-subtitle-container">
-  <div class="subpal-region" data-align="bottom">
-    <div class="subpal-primary">主要字幕</div>
-    <div class="subpal-secondary">次要字幕</div>
-  </div>
+<div id="subpal-region-container">
+  <div id="subpal-primary-subtitle">主要字幕</div>
+  <div id="subpal-secondary-subtitle">次要字幕</div>
 </div>
 ```
 
 **Region 容器設計**:
-- 統一管理雙語字幕位置
-- 支持 `displayAlign` 屬性（top/bottom/center）
-- 使用 Flexbox 進行垂直佈局
+- `#subpal-region-container` 使用 `position: fixed`，由 Netflix 字幕 region 的 `left`、`top`、`width`、`height` 更新位置與大小。
+- primary 與 secondary 是獨立的 fixed subtitle containers；需要 region-based positioning 時才移入 region container。
+- 使用 Flexbox 進行垂直佈局，`displayAlign: 'after'` 對應靠下排列，其餘情況靠上排列。
+- 單語模式則使用 `#subpal-subtitle-container` 與 `.subpal-subtitle-text`。
 
 **字幕樣式**:
 - 支援 `fontWeight`（400/700）、`fontPreset`（system/clearSans/serif/code）
@@ -532,7 +517,7 @@ UIManager 維護原生 Netflix 字幕的可見性狀態，透過注入/移除 CS
 
 **交互流程**:
 ```
-用戶點擊讚按鈕 → InteractionPanel → VoteBridge → SubmissionQueueManager → Storage → Background Sync → API
+用戶點擊讚按鈕 → InteractionPanel → VoteBridge → 背景 contribution queue → Storage → Background Sync → API
 ```
 
 #### 3.4 SubmissionDialog (`content/ui/submission-dialog.js`)
@@ -777,7 +762,7 @@ loadInterceptedSubtitles()
 **D. Raw TTML pool management**:
 - 透過 `interceptedSubtitles` Map 保留所有已解析的 raw TTML
 - `cleanupOldVideoCache()`: 影片切換時清理不屬於當前影片的緩存（DOM match 歸屬的 entry 保留）
-- `handleRawTTMLIntercepted()`: 處理 Page Script 送來的 raw TTML，經過 gate/promotion guard 後決定是否 promotion 到 active slot
+- `captureTtmlEvidence()`: 接收 `TtmlAcquisitionIngress` 驗證後的 raw TTML evidence，經過 gate/promotion guard 後決定是否 promotion 到 active slot
 
 **E. 語言/情境過濾**:
 - `evaluateSubtitleGate()`: 嚴格的多層次門檻檢查，包含：
@@ -923,9 +908,9 @@ const subtitles = SubtitleParser.parse(ttmlString);
 1. 建立僅供本次執行期日誌關聯的 Service Worker instance ID（不寫入 storage、不推斷重啟）
 2. 註冊 onInstalled / onStartup、消息、port 與同步 listeners
 3. onInstalled / onStartup 執行舊設定鍵遷移
-4. 檢查 user.userId 與 jwt 是否存在；缺少時才產生 UUID 或呼叫 POST /users
+4. 檢查 active profile 與 backendProfiles 是否存在，legacy api/user/jwt 只在 migration-only 路徑中讀取，缺少時才補齊 active profile credentials
 5. sync module 載入時建立三個每 5 分鐘 alarms，並補跑現存 pending / failed queues
-6. 後續受保護 API 的 401 才觸發 JWT 重新註冊
+6. 後續受保護 API 的 401 才觸發 active profile JWT refresh
 7. 解析 clientVersion（`frontend-{manifest.version}`）供後端 rollout 使用
 ```
 
@@ -992,13 +977,13 @@ HTTP error 以 non-enumerable `jwtUsedForRequest` metadata 保存該 request 實
 
 **重試策略**:
 - 最大重試次數: 3 次
-- 失敗項目由 `retryFailedVotes()`、`retryFailedTranslations()`、`retryFailedReplacementEvents()` 重新排程，沒有固定指數退避序列
+- 失敗項目由背景的 `retryContribution()` 與 `retryFailedContributions()` 路徑重新排程，沒有固定指數退避序列
 - 永久錯誤標記（4xx 錯誤，除了 401）
 
 **觸發邊界**:
 - 一般 port 不再接受 `SYNC_DATA`、`SYNC_VOTES`、`SYNC_TRANSLATIONS`、`SYNC_REPLACEMENT_EVENTS`、`GET_SYNC_STATUS` 或三個 `TRIGGER_*` direct-sync commands。
-- 對外只保留 Options 使用的 `RETRY_FAILED_VOTES`、`RETRY_FAILED_TRANSLATIONS`、`RETRY_FAILED_REPLACEMENT_EVENTS`。
-- `triggerVoteSync()`、`triggerTranslationSync()`、`triggerReplacementEventSync()` 仍是 sync module 的內部 exported triggers，供 module-load、storage listener、alarms 與 startup 路徑使用。
+- 對外只保留 Options 使用的 `BACKEND_PROFILES_RETRY_FAILED`，由 `BackendProfiles` client 針對指定 profile 觸發重試。
+- `triggerVoteSync()`、`triggerTranslationSync()`、`triggerReplacementEventSync()` 只在 sync module 內部使用，不再對 Popup/Options 暴露成公開路由。
 
 #### 6.4 SyncListener (`background/sync-listener.js`)
 
@@ -1041,34 +1026,33 @@ HTTP error 以 non-enumerable `jwtUsedForRequest` metadata 保存該 request 實
 │                      Data Flow Architecture                      │
 └─────────────────────────────────────────────────────────────────┘
 
-1. 配置數據流：
-   Options / Popup ConfigManager ────────────────┐
-                                                 ▼
-   MAIN ConfigBridge ──CONFIG_SET────────► isolated ConfigManager ──write──► chrome.storage.local
-                                                 ▲                              │
-                                                 └──── storage.onChanged ───────┘
-                                                 │
-                                                 └── single CONFIG_CHANGED ──► MAIN ConfigBridge ──► MAIN subscribers
+1. 配置與能力數據流：
+   Popup active-profile stats client ──POPUP_ACTIVE_PROFILE_STATS──► background.js
+   Options BackendProfiles client ──options-page-channel / BACKEND_PROFILES_*──► background.js
+   MAIN settings caller ──► createPageSettings() ──private window event──► sealed PageIngress
+      └──► Settings.change() ──► isolated ConfigManager
+   isolated ConfigManager ──CONFIG_CHANGED──► subscribeSettingsChanges() ──► MAIN ConfigBridge ──► MAIN subscribers
 
    changed-value write 由 storage event 發布；same-value write 由 isolated ConfigManager 補發一次，
-   `ConfigBridge.set()` / `setMultiple()` 不做 optimistic cache mutation。
+   MAIN 只消費 projected one-way `CONFIG_CHANGED`，不直接讀 `chrome.storage.local`。
 
 2. 字幕數據流（正常路徑 — 含 PlaybackContext gating）：
-   Netflix CDN ──intercept──► Page Script (攔截 + session 檢查)
-                                   │
-                                   ▼ postMessage
-                          PlaybackContextManager ──gate──► SubtitleInterceptor
-                                                             │ (parse + promotion)
-                                                             ▼
-                                                         SubtitleCoordinator
-                                                             │
-                                                             ▼
-                                                         UIManager
-                                                          (native visibility)
-                                                             │
-                                                             ▼
-                                                         SubtitleDisplay
-                                                          (style applied)
+    Netflix CDN ──intercept──► Page Script (攔截 + session 檢查)
+                                    │
+                                    ▼ `subpal-ttml-acquisition-captured`
+                           TtmlAcquisitionIngress (validate)
+                                    │
+                                    ▼
+                           SubtitleInterceptor (cache/gate/promotion)
+                                    │
+                                    ▼
+                              SubtitleCoordinator
+                                    │
+                                    ▼
+                              UIManager → SubtitleDisplay
+                                      (native visibility / style)
+
+    PlaybackContextManager ──Playback.perform(context-snapshot)──► gate context
 
 2b. 字幕數據流（DOM Overlap Recovery / SPA 換片復原）：
    Netflix 原生字幕 DOM ──collect──► DOMOverlapMatcher
@@ -1077,94 +1061,137 @@ HTTP error 以 non-enumerable `jwtUsedForRequest` metadata 保存該 request 實
                                    raw TTML pool (interceptedSubtitles)
                                         │ (native-dom-match attribution)
                                         ▼
-                                   SubtitleInterceptor.handleRawTTMLIntercepted
-                                        │ (bypass gate via attribution)
+                                    TtmlAcquisitionIngress.capture()
+                                         │
+                                         ▼ SubtitleInterceptor.captureTtmlEvidence()
+                                         │ (native-dom-match attribution)
                                         ▼
                                    SubtitleCoordinator → UIManager → SubtitleDisplay
 
 2c. PlaybackContext polling（診斷快照）：
-   PlaybackContextManager ──GET_SUBPAL_DEBUG_SNAPSHOT──► Page Script
-       ◄── playback session snapshot ─────────────────── 
-       │ 
-       ├── epoch 管理（videoId/sessionId 改變時遞增）
-       ├── transitioning ←→ ready 狀態切換
-       └── gate 決策：transitioning 時暫緩字幕處理
+   PlaybackContextManager ──Playback.perform({ variant: 'context-snapshot' })──► private page transport
+        └──► Page Script ──strict Result playback session snapshot──► PlaybackContextManager
+        │
+        ├── epoch 管理（videoId/sessionId 改變時遞增）
+        ├── transitioning ←→ ready 狀態切換
+        └── gate 決策：transitioning 時暫緩字幕處理
 
 3. 用戶操作數據流：
-    用戶點擊 ──► UIManager ──► VoteBridge/TranslationBridge
-                                 └──► sendMessage ──► Content Script
-                                       └──► SubmissionQueueManager
-                                             └──► chrome.storage.local
-                                                   └──► Background Sync
-                                                         └──► API Server
+    contribution callers (VoteBridge/TranslationBridge/ReplacementEventBridge)
+      ──► createPageContributions() ──private window event──► sealed PageIngress
+      ──► Contributions ──private Port──► background contribution queue
+      ──► chrome.storage.local ──► Background Sync ──► API Server
 
 4. API 響應數據流：
-   API Server ──► Background ──► Port ──► Content Script
-                                               └──► CustomEvent ──► Page Context
+    API Server ──► Background ──► Port ──► Content Script
+                                                └──► CustomEvent ──► Page Context
+
+5. Direct privileged crowdsourcing（獨立授權路徑）：
+   isolated endscreen task client ──GET_CROWDSOURCING_TASKS runtime message──► background sender/watch/videoID/limit/languageCode guards
+   此路徑不經過 `PageIngress`、`createPageContributions()` 或一般 Port broker。
 ```
 
 ### 消息傳遞詳情
 
 #### 1. Page Context ↔ Content Script
 
-**通信方式**: CustomEvent
+**通信方式**: `window` CustomEvent；每個 request/response 都是 private typed envelope，回應必為 strict `Result`。
 
 ```javascript
-// Page Context → Content Script
+// Page Context → Content Script（sealed PageIngress: page observation）
 const event = new CustomEvent('messageToContentScript', {
-  detail: { type: 'API_REQUEST', data: {...} }
+  detail: {
+    messageId: 'msg-123',
+    message: {
+      category: 'page-observation',
+      variant: 'video-context-changed',
+      payload: {
+        oldVideoId: '81234567',
+        newVideoId: '81234568',
+        videoId: '81234568'
+      }
+    }
+  }
 });
-document.dispatchEvent(event);
+window.dispatchEvent(event);
 
-// Content Script → Page Context
-window.dispatchEvent(new CustomEvent('messageFromContentScript', {
-  detail: { message: {...} }
+// Page Context MAIN → Content Script（sealed PageIngress: subtitle query / settings / contributions）
+window.dispatchEvent(new CustomEvent('messageToContentScript', {
+  detail: {
+    messageId: 'msg-124',
+    message: {
+      category: 'subtitle-query',
+      variant: 'replacement-subtitle-query',
+      payload: {
+        videoId: '81234568',
+        originalSubtitle: 'Hello'
+      }
+    }
+  }
 }));
 
-// Content Script → Page Context（回應）
+// Content Script → Page Context MAIN（回應，仍以 responseFromContentScript 傳回）
 window.dispatchEvent(new CustomEvent('responseFromContentScript', {
-  detail: { messageId: 'msg-123', response: {...} }
+  detail: {
+    messageId: 'msg-124',
+    response: { ok: true, value: {...} } // strict Result
+  }
 }));
 ```
+
+`PageIngress.accept()` 目前接受的 sealed 路由是 `page-observation/video-context-changed`、`subtitle-query/replacement-subtitle-query`、`contribution-intent/enqueue-vote|enqueue-translation|enqueue-replacement-event|retry-operation`、`contribution-read/vote-authority|translation-reconciliation`、`settings-change`。
+其中貢獻 caller 使用 `createPageContributions()`，由 sealed `PageIngress` 轉交 `Contributions`，再由 private Port 到 background；settings caller 使用 `createPageSettings()`，而 `subscribeSettingsChanges()` 只接收 content script 投影的 `CONFIG_CHANGED`。
+
+`settings-read/snapshot` 是 content.js 直連的 private DOM request/response，不進入 `PageIngress.accept()`。
 
 #### 2. Content Script ↔ Background
 
 **通信方式**: chrome.runtime.connect (長連接)
 
 ```javascript
-// 建立連接
-const port = chrome.runtime.connect({ name: 'subtitle-assistant-channel' });
-
-// Content Script → Background
-port.postMessage({ type: 'FETCH_SUBTITLES', data: {...} });
+// Content Script → Background（sealed subtitle query；Subtitles.query() 透過 private Port 發送）
+port.postMessage({
+  messageId: 'msg-124',
+  request: {
+    type: 'SUBTITLE_QUERY',
+    query: {
+      videoId: '81234568',
+      timestamp: 123.456,
+      duration: 180,
+      context: { videoId: '81234568', sessionId: 'watch-xxx', epoch: 3 }
+    }
+  }
+});
 
 // Background → Content Script
 port.onMessage.addListener((message) => {
-  if (message.type === 'SUBTITLES_DATA') {
-    // 處理字幕數據
+  if (message.messageId === 'msg-124') {
+    // { messageId, response } 回到 content.js，再由 Subtitles.query() 做 normalized response 處理
   }
 });
 ```
 
+MAIN `Subtitles.query()` 只送 `{ videoId, timestamp, duration: 180 }`，並以 MAIN context 做本地 late-response suppression。isolated `Subtitles` 在 `PageIngress` 驗證後綁定自己的 authoritative `{ videoId, sessionId, epoch }` 再送出 `SUBTITLE_QUERY`；兩個 world 的 epoch 不可直接比較。background 只回 `{ messageId, response }`。
+
+TTML acquisition 是另一條專用 ingress：Page Script 的 raw TTML evidence 由 `TtmlAcquisitionIngress.capture()` 接收、驗證並交給 `SubtitleInterceptor` 的 cache/gate/promotion 流程；它不經過 generic message bus 或 `PageIngress`。
+
 #### 3. Page Context ↔ Netflix Page Script
 
-**通信方式**: window.postMessage
+**通信方式**: private typed playback envelope (`kind: 'playback'`)，由 `Playback.perform()` 發出。
 
 ```javascript
 // Page Context → Page Script
-window.postMessage({
-  source: 'subpal-content-script',
-  target: 'subpal-page-script',
-  type: 'GET_PLAYER_STATE'
-}, '*');
+Playback.perform({ variant: 'context-snapshot', payload: {} })
+  // private envelope: { protocolVersion, requestId, kind, payload }
+  // strict Result response carries the playback snapshot
 
-// Page Script → Page Context
-window.postMessage({
-  source: 'subpal-page-script',
-  target: 'subpal-content-script',
-  type: 'PLAYER_STATE',
-  data: {...}
-}, '*');
+// Page Script 回應的 Playback variants:
+// - context-snapshot
+// - available-languages
+// - current-language
+// - switch-language
+// - switch-track
+// - jump-to-timecode
 ```
 
 ### 數據格式
@@ -1248,55 +1275,23 @@ interface TranslationData {
 - API 調用有延遲和配額限制
 - 同一字幕會多次顯示
 
-**緩存設計**:
+**現行緩存設計**:
 ```javascript
-class SubtitleCache {
-  constructor() {
-    this.cache = new Map();           // 主緩存
-    this.accessOrder = [];            // 訪問順序（LRU）
-    this.maxSize = 500;               // 最大條目數
-  }
-  
-  // 生成緩存鍵
-  generateKey(text, timestamp) {
-    // 使用 2 秒時間窗口
-    return `${text}_${Math.floor(timestamp / 2)}`;
-  }
-  
-  // 獲取緩存
-  get(text, timestamp) {
-    // 1. 精確匹配
-    const key = this.generateKey(text, timestamp);
-    if (this.cache.has(key)) {
-      this.updateAccessOrder(key);
-      return this.cache.get(key);
-    }
-    
-    // 2. 模糊匹配（時間容差）
-    for (const [k, v] of this.cache) {
-      if (v.originalSubtitle === text && 
-          Math.abs(v.timestamp - timestamp) <= 2) {
-        this.updateAccessOrder(k);
-        return v;
-      }
-    }
-    
-    return null;
-  }
-  
-  // 添加緩存
-  set(key, value) {
-    // 如果滿了，移除最舊的
-    if (this.cache.size >= this.maxSize) {
-      const oldest = this.accessOrder.shift();
-      this.cache.delete(oldest);
-    }
-    
-    this.cache.set(key, value);
-    this.accessOrder.push(key);
-  }
+class SubtitleFetchCoordinator {
+  // 以目前播放 context 與字幕來源世代隔離記憶體快取。
+  scopeKey = `${videoId}:${sessionId}:${localEpoch}:${subtitleSourceGeneration}`;
+
+  // 每次 demand 查詢目前需求點後固定 180 秒；coverage 以 interval union 管理。
+  queryRange = { start: currentTime, end: currentTime + 180 };
+
+  // 成功空批次可形成 negative cache；failed 不形成 completed coverage。
 }
 ```
+
+- `SubtitleReplacer` 擁有 `SubtitleFetchCoordinator`；它不再維護獨立的固定筆數字幕快取。
+- replacement 只使用 canonical `slotKey` 精確命中，不使用舊的文字與時間容差組合 key。
+- session memory cache scope 為 `(videoId, sessionId, localEpoch, subtitleSourceGeneration)`，不持久化；換片、playback identity 或 active backend source 改變即清除。
+- 每批 response 是該查詢 range 的權威快照，不用獨立筆數上限淘汰字幕，避免保留虛假的 completed coverage。
 
 #### 1.3 預加載策略
 
@@ -1306,22 +1301,26 @@ class SubtitleCache {
 
 **預加載邏輯**:
 ```javascript
-// 當播放接近當前區間結束時預加載
-const PRELOAD_THRESHOLD = 60;  // 提前 60 秒
+const FETCH_DURATION_SECONDS = 180;
+const PREFETCH_THRESHOLD_SECONDS = 60;
 
-function shouldPreload(currentTime, currentRange) {
-  const timeToEnd = currentRange.end - currentTime;
-  return timeToEnd < PRELOAD_THRESHOLD;
+function shouldPrefetch(currentTime, completedCoverage) {
+  const remaining = completedCoverage.end - currentTime;
+  return remaining < PREFETCH_THRESHOLD_SECONDS;
 }
 
-// 獲取下一個區間
-function getNextRange(currentRange) {
+function getNextDemand(currentTime) {
   return {
-    start: currentRange.end,
-    end: currentRange.end + 180  // 3 分鐘
+    start: currentTime,
+    end: currentTime + FETCH_DURATION_SECONDS
   };
 }
 ```
+
+- `play` 會立即檢查 coverage；播放中每 15 秒檢查一次。
+- `seeked` 使用 250ms debounce；字幕 render event 是漏接時的 fallback demand。
+- 同時最多兩筆 request；滿載時只保留最新 demand，prefetch 不排隊。
+- retryable failure 使用 2/10/30/60 秒冷卻，只有下一次 tick、seek 或 render demand 才會重試。
 
 ### 2. 雙語字幕實現
 
@@ -1346,34 +1345,25 @@ function getNextRange(currentRange) {
 #### 2.2 Region 容器設計
 
 ```javascript
-// 創建 Region 容器
-function createRegionContainer(region) {
-  const container = document.createElement('div');
-  container.className = `subpal-region subpal-region-${region}`;
-  container.style.cssText = `
-    position: absolute;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    ${region === 'top' ? 'top: 10%;' : 'bottom: 10%;'}
-  `;
-  return container;
-}
+// SubtitleDisplay 先建立兩個獨立容器，再依 position 移入 region container。
+const regionContainer = document.createElement('div');
+regionContainer.id = 'subpal-region-container';
+regionContainer.style.cssText = `
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+`;
 
-// 渲染雙語字幕
-function renderBilingualSubtitle(primary, secondary, region) {
-  const container = getOrCreateRegionContainer(region);
-  
-  container.innerHTML = `
-    <div class="subpal-primary" style="${getPrimaryStyles()}">
-      ${primary}
-    </div>
-    <div class="subpal-secondary" style="${getSecondaryStyles()}">
-      ${secondary}
-    </div>
-  `;
+const primaryContainer = document.createElement('div');
+primaryContainer.id = 'subpal-primary-subtitle';
+const secondaryContainer = document.createElement('div');
+secondaryContainer.id = 'subpal-secondary-subtitle';
+
+// 字幕文字一律以 textContent 更新，樣式由 SubtitleStyleManager 套用。
+function renderBilingualSubtitle(primary, secondary) {
+  primaryContainer.textContent = primary || '';
+  secondaryContainer.textContent = secondary || '';
 }
 ```
 
@@ -1414,8 +1404,8 @@ function renderBilingualSubtitle(primary, secondary, region) {
 #### 3.2 隊列項目生命周期
 
 ```
-┌─────────┐    enqueue     ┌─────────┐    sync()     ┌─────────┐
-│  Init   │ ─────────────► │ Pending │ ────────────► │ Syncing │
+┌─────────┐    enqueue     ┌─────────┐   background  ┌─────────┐
+│  Init   │ ─────────────► │ Pending │ ─── sync ───► │ Syncing │
 └─────────┘                └─────────┘               └────┬────┘
                                                           │
                     ┌─────────────────────────────────────┘
@@ -1427,15 +1417,16 @@ function renderBilingualSubtitle(primary, secondary, region) {
                     │
         ┌───────────┼───────────┐
         ▼           ▼           ▼
-   ┌────────┐  ┌────────┐  ┌────────┐
-   │Success │  │ Retry  │  │ Failed │
-   └───┬────┘  └───┬────┘  └───┬────┘
-       │           │           │
-       ▼           ▼           ▼
-  ┌─────────┐  ┌─────────┐  ┌─────────┐
-  │Completed│  │ Pending │  │  Failed │
-  │         │  │(retry++)│  │(max ret)│
-  └─────────┘  └─────────┘  └─────────┘
+    ┌──────────────┐  ┌─────────┐  ┌─────────┐
+    │Success       │  │ Retry   │  │ Failed  │
+    │move to       │  └───┬─────┘  └───┬─────┘
+    │history       │      │            │
+    └──────┬───────┘      ▼            ▼
+           ▼        ┌─────────┐  ┌─────────┐
+   ┌────────────────┐│ Pending │  │ Failed  │
+   │Completed       ││retry++ │  │retryable│
+   │history record  │└─────────┘  └─────────┘
+   └────────────────┘
 ```
 
 #### 3.3 存儲結構
@@ -1447,14 +1438,37 @@ function renderBilingualSubtitle(primary, secondary, region) {
   voteQueue: [
     {
       id: 'uuid-v4',
-      data: { videoID, timestamp, voteType, ... },
-      status: 'pending',  // pending | syncing | completed | failed
+      operationId: 'uuid-v4',
+      backendProfileId: 'profile-id',
+      videoId: '80234304',
+      timestamp: 123.456,
+      voteType: 'upvote',
+      translationID: 'translation-id',
+      originalSubtitle: 'Hello',
+      slotKey: '80234304::Hello::zh-TW::123.4560',
+      status: 'pending',  // queue: pending | syncing | failed
+      syncedAt: null,
       retryCount: 0,
+      error: null,
       createdAt: 1234567890,
       updatedAt: 1234567890
     }
   ],
-  voteHistory: [...],
+  voteHistory: [
+    {
+      id: 'uuid-v4',
+      operationId: 'uuid-v4',
+      backendProfileId: 'profile-id',
+      status: 'completed',
+      syncedAt: 1234567890,
+      videoId: '80234304',
+      timestamp: 123.456,
+      voteType: 'upvote',
+      translationID: 'translation-id',
+      originalSubtitle: 'Hello',
+      slotKey: '80234304::Hello::zh-TW::123.4560'
+    }
+  ],
   translationQueue: [...],
   translationHistory: [...],
   replacementEventQueue: [...],
@@ -1465,17 +1479,37 @@ function renderBilingualSubtitle(primary, secondary, region) {
   debugMode: false,
   isEnabled: true,
   crowdsourcing: { endscreenTasksEnabled: true },
-  api: { baseUrl: 'https://subnfbackend.zeabur.app' },
-  user: { userId: 'user-uuid' },
-  jwt: 'eyJhbGciOiJIUzI1NiIs...',
+  subtitle: {...},
   video: {
     currentVideoId: '80234304',
     currentVideoTitle: 'Stranger Things',
     currentVideoLanguage: 'en'
   },
-  subtitle: {...}
+  storageSchemaVersion: 1,
+  storageMigrationState: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 },
+  backendProfiles: {
+    schemaVersion: 1,
+    activeProfileId: 'profile-id',
+    byId: {
+      'profile-id': { id: 'profile-id', endpoint: 'https://subnfbackend.zeabur.app', userId: 'uuid-v4', jwt: 'eyJhbGciOiJIUzI1NiIs...' }
+    }
+  }
 }
 ```
+
+同步成功時，background sync 會以同一個 `id` 與 `backendProfileId` 將 queue record 移除，建立 `status: 'completed'` 的 history record；history 依 profile 最多保留 100 筆。retryable failure 留在 queue 並更新 retry metadata，永久失敗則保留為 `failed`。
+
+`video.*` 是 0.4.1 遺留資料，不再是 runtime-owned current playback metadata；目前播放狀態由記憶體中的 PlaybackContext 擁有，升級不讀取也不刪除這個 root。
+
+`api`、`user` 與 top-level `jwt` 才是 legacy migration-only 轉換輸入。
+
+### 3.1 Storage schema v1 升級閘門
+
+- `storageSchemaVersion: 1` 與 `storageMigrationState` 是背景資料路徑共用的 readiness marker。
+- 0.4.1 的 `api/user/jwt` 轉成 `backendProfiles.default`；六組 contribution queue/history 補上 `backendProfileId` 與 `operationId`，`voteStateByTranslation` 補上 profile binding。
+- 轉換先在記憶體完成並驗證，再與 schema marker 一次寫入；失敗不快取 rejected readiness，後續可重試。
+- 不符合目前安全規則的 legacy endpoint 進入 `needs-attention`。修復前註冊、API 與同步全部 fail closed，只有可信 Options Port 可查詢狀態並提交使用者確認的新 endpoint。
+- 0.5.0 保留 legacy `api/user/jwt` 一個公開版本作回滾與救援來源；不得由 runtime 再直接使用。
 
 ### 4. 用戶認證與 JWT 管理
 
@@ -1483,15 +1517,16 @@ function renderBilingualSubtitle(primary, secondary, region) {
 
 ```
 1. onInstalled / onStartup credential presence bootstrap
-   └─► 讀取 user.userId 與 jwt
-   └─► 缺少 user.userId：生成 UUID v4 並保存至 user.userId
-   └─► 缺少 jwt：使用現有或新建 userId 呼叫 POST /users，保存 jwt
+   └─► 讀取 backendProfiles.activeProfileId 與 byId
+   └─► legacy api/user/top-level jwt migration-only，只有首次轉換舊資料時會讀
+   └─► legacy `video.*` 保留但不作為目前播放狀態來源
+   └─► active profile 缺少 userId 或 jwt 時，才補齊對應 credentials
    └─► 兩者已存在：不檢查有效期、不主動重新註冊
 
 2. 受保護 API 回傳 401
    └─► 比較 request 實際使用的 JWT 與目前 storage JWT
    └─► storage 已有較新 JWT：直接使用新值重試一次
-   └─► JWT 尚未更新：以既有 user.userId 重新呼叫 POST /users
+   └─► JWT 尚未更新：以 active profile 的 userId 重新註冊
    └─► concurrent / staggered 401 共用單一 in-flight refresh Promise
    └─► refresh settle 後清除共享 Promise，讓真正的新 401 可再次刷新
 ```
@@ -1501,9 +1536,18 @@ function renderBilingualSubtitle(primary, secondary, region) {
 ```javascript
 // 存儲結構
 {
-  user: { userId: 'uuid-v4' },
-  jwt: 'eyJhbGciOiJIUzI1NiIs...'
+  backendProfiles: {
+    activeProfileId: 'profile-id',
+    byId: {
+      'profile-id': { id: 'profile-id', endpoint: 'https://subnfbackend.zeabur.app', userId: 'uuid-v4', jwt: 'eyJhbGciOiJIUzI1NiIs...' }
+    }
+  }
 }
+
+// legacy api/user/top-level jwt migration-only
+// 只在舊資料轉換時讀取，不再是 runtime-owned roots
+
+// legacy video.* 僅保留供回滾，不再是 runtime authority
 
 // 401 刷新去重
 function refreshJwtTokenOnce() {
@@ -1547,13 +1591,15 @@ function refreshJwtTokenOnce() {
 
 路由：`GET /crowdsourcing-tasks`
 
+本 worktree 可直接確認的是此 route 的呼叫方式、參數驗證與 response 消費方式；後端資料表、任務計算與排序邏輯不在本 repository 內。以下任務模型與來源規則是 SubPal 目前依賴的後端整合契約，不表示後端實作已由本文件驗證。
+
 查詢參數：
 
 | 參數 | 說明 |
 |------|------|
 | `videoID` | 必要，Netflix 影片 ID |
 | `languageCode` | 必要，API 語言代碼（如 `zh-TW`） |
-| `limit` | 可選，預設 5，最大 20 |
+| `limit` | 後端 API 可選，預設 5、最大 20；SubPal extension caller 固定只使用 `5` |
 
 任務物件模型：
 
@@ -1598,14 +1644,14 @@ function refreshJwtTokenOnce() {
 - 排除使用者自己的貢獻與已經投過票的項目。
 - 支援 `review-candidate`（需要更多評價）或 `submit-better-candidate`（提交更好的候選翻譯）。
 
-背景腳本在 `chrome.runtime.onMessage` 中承接 `GET_CROWDSOURCING_TASKS` 並執行下列邊界檢查：
+背景腳本在 `chrome.runtime.onMessage` 中直接承接 `GET_CROWDSOURCING_TASKS`，這是唯一的 direct privileged crowdsourcing 例外。下列是 SubPal extension caller 的額外邊界檢查，不等同於後端 API 的一般參數範圍：
 
 - 發送者必須是同一擴充功能實例的 Netflix `https://*.netflix.com` content script。
 - 發送者網址必須符合 `/watch/<videoID>` 且與請求 `videoID` 一致。
 - `limit` 必須等於 `5`。
 - `languageCode` 必須在支援清單內。
 
-一般長連接 port 不處理任務查詢，避免 generic route 被濫用。
+一般長連接 port 不處理任務查詢，也不承接這條特權例外。
 
 #### 5.3 Isolated World 所有權
 
@@ -1733,7 +1779,7 @@ export const CONFIG_SCHEMA = {
 
 **字重選項**: `400`（一般）、`700`（粗體）
 
-**樣式流向**: Options 寫入 storage 後，isolated ConfigManager 發布 authoritative `CONFIG_CHANGED`，MAIN ConfigBridge 才更新 `subtitle.style.primary.*` 與 `subtitle.style.secondary.*` cache；SubtitleStyleManager 接著組合 glyph text outline 與 `letterSpacing`，最後下發給 SubtitleDisplay 套用到單語與雙語字幕。
+**樣式流向**: Options 寫入 storage 後，isolated ConfigManager 發布 projected one-way `CONFIG_CHANGED`，MAIN ConfigBridge 只消費 content-local typed settings snapshot，不直接讀 `chrome.storage.local`；SubtitleStyleManager 接著組合 glyph text outline 與 `letterSpacing`，最後下發給 SubtitleDisplay 套用到單語與雙語字幕。
 
 ### 2. 配置管理器
 
@@ -1782,11 +1828,7 @@ storage.onChanged(oldRoot, newRoot)
   → root deletion / partial replacement 的缺值套用 schema default
   → 先更新 cache，再以 callback(key, newValue, oldValue) 通知真正改變的 leaf
 
-ConfigBridge.set(key, value)
-  → CONFIG_SET request
-  → 等待 isolated ConfigManager 完成 write
-  → 不更新 MAIN cache
-  → 收到 authoritative CONFIG_CHANGED 後才更新 cache 並以 callback(newValue) 通知
+ConfigBridge 只消費 projected one-way CONFIG_CHANGED；由 isolated ConfigManager 完成 write 後，MAIN cache 才更新並以 callback(newValue) 通知。
 ```
 
 `setMultiple()` 遵守相同契約：changed keys 等待 storage event，same-value keys 各發布一次；validation 或 storage failure 會回滾全部 isolated cache，並發布零通知。單一 subscriber 拋錯不會阻斷其他 subscriber。
@@ -1992,7 +2034,7 @@ console.log('[SubPal][ConfigManager]', 'Config changed', { key, newValue });
 #### 系統層
 - `content/system/initialization-manager.js`
 - `content/system/messaging.js`
-- `content/system/netflix-api-bridge.js`
+- `content/system/capabilities/playback.js`
 - `content/system/isolated-endscreen-tasks.js`：片尾任務 isolated world 所有者（偵測/請求/面板/動作）
 - `content/system/endscreen-action-coordinator.js`：片尾任務動作協調器（投票/提交/timecode 跳轉）
 - `content/system/crowdsourcing-task-client.js`：片尾任務 runtime.sendMessage 客戶端
@@ -2004,7 +2046,7 @@ console.log('[SubPal][ConfigManager]', 'Config changed', { key, newValue });
 #### 核心層
 - `content/core/playback-context-manager.js` — 播放上下文管理（gate/videoId/session/epoch）
 - `content/core/subtitle-replacer.js`
-- `content/core/submission-queue-manager.js`
+- `background/contribution-queue.js`
 - `content/core/vote-bridge.js`
 - `content/core/translation-bridge.js`
 - `content/core/replacement-event-bridge.js`
