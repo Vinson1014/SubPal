@@ -21,6 +21,7 @@ class VideoInfoManager {
         
         // 後備視頻元素
         this.videoElement = null;
+        this.eventListenerVideoElement = null;
         this.checkInterval = null;
         
         // 綁定事件處理函數以保持 this 上下文
@@ -120,9 +121,7 @@ class VideoInfoManager {
         
         // 監聽 DOM 變化以檢測新的視頻元素
         const observer = new MutationObserver(() => {
-            if (!this.videoElement) {
-                this.findVideoElement();
-            }
+            this.findVideoElement();
         });
         
         observer.observe(document, { 
@@ -137,21 +136,24 @@ class VideoInfoManager {
     findVideoElement() {
         const videos = document.querySelectorAll('video');
         if (videos.length === 0) return;
-        
+
+        let nextVideoElement = null;
+
         // 優先選擇正在播放的視頻
         for (const video of videos) {
             if (!video.paused) {
-                this.videoElement = video;
-                this.setupVideoEventListeners(video);
-                this.log('找到播放中的視頻元素作為後備方案');
-                return;
+                nextVideoElement = video;
+                break;
             }
         }
-        
+
         // 如果沒有播放中的，選擇最後一個
-        this.videoElement = videos[videos.length - 1];
-        this.setupVideoEventListeners(this.videoElement);
-        this.log('使用最後一個視頻元素作為後備方案');
+        nextVideoElement ??= videos[videos.length - 1];
+        if (nextVideoElement === this.videoElement) return;
+
+        this.videoElement = nextVideoElement;
+        this.setupVideoEventListeners(nextVideoElement);
+        this.log(nextVideoElement.paused ? '使用最後一個視頻元素作為後備方案' : '找到播放中的視頻元素作為後備方案');
     }
 
     /**
@@ -159,8 +161,13 @@ class VideoInfoManager {
      */
     setupVideoEventListeners(videoElement) {
         if (!videoElement) return;
-        
-        // 移除舊的監聽器
+
+        if (this.eventListenerVideoElement && this.eventListenerVideoElement !== videoElement) {
+            this.eventListenerVideoElement.removeEventListener('play', this.boundHandleVideoPlay);
+            this.eventListenerVideoElement.removeEventListener('pause', this.boundHandleVideoPause);
+            this.eventListenerVideoElement.removeEventListener('seeked', this.boundHandleVideoSeeked);
+        }
+
         videoElement.removeEventListener('play', this.boundHandleVideoPlay);
         videoElement.removeEventListener('pause', this.boundHandleVideoPause);
         videoElement.removeEventListener('seeked', this.boundHandleVideoSeeked);
@@ -169,6 +176,7 @@ class VideoInfoManager {
         videoElement.addEventListener('play', this.boundHandleVideoPlay);
         videoElement.addEventListener('pause', this.boundHandleVideoPause);
         videoElement.addEventListener('seeked', this.boundHandleVideoSeeked);
+        this.eventListenerVideoElement = videoElement;
     }
 
     /**

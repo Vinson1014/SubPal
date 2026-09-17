@@ -1783,6 +1783,7 @@ class SubtitleInterceptor {
       position: position,
       region: region, // 保留 region 資訊供調試和後續使用
       timestamp: dualSubtitleData.timestamp,
+      renderGeneration: this._renderGeneration,
       mode: 'intercept',
       dualSubtitle: dualSubtitleData, // 保留完整的雙語字幕信息
       renderReadiness: dualSubtitleData.renderReadiness || this.getSubtitleReadinessSnapshot().renderReadiness,

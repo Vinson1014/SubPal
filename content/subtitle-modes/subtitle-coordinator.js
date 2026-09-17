@@ -229,6 +229,7 @@ class SubtitleCoordinator {
       
       // 時間信息
       timestamp,
+      renderGeneration: subtitleData.renderGeneration,
       
       // 模式信息
       mode: mode,

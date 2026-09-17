@@ -61,8 +61,8 @@ async function loadManager() {
   context.sendMessage = async () => ({});
   context.contributionProjection = async () => ({ ok: true, value: {} });
   const dependencies = new Map([
-    ['./subtitle-display.js', componentModule('SubtitleDisplay', 'show(value) { globalThis.lifecycle.renders.push(value); }')],
-    ['./interaction-panel.js', componentModule('InteractionPanel', 'onSubmitClick() {} onLikeClick() {} onDislikeClick() {} updateVoteDisplay() {} updatePosition(value) { globalThis.lifecycle.avoidanceUpdates.push({ panel: this, value }); }')],
+    ['./subtitle-display.js', componentModule('SubtitleDisplay', 'show(value) { globalThis.lifecycle.renders.push(value); } hide() {}')],
+    ['./interaction-panel.js', componentModule('InteractionPanel', 'onSubmitClick() {} onLikeClick() {} onDislikeClick() {} updateVoteDisplay() {} updatePosition(value) { globalThis.lifecycle.avoidanceUpdates.push({ panel: this, value }); } hide() {}')],
     ['./submission-dialog.js', componentModule('SubmissionDialog', 'onSubmit(callback) { globalThis.lifecycle.submissionCallback = callback; } onCancel() {} onClose() {}')],
     ['./fullscreen-handler.js', componentModule('FullscreenHandler', 'registerUIComponent() {} onFullscreenChange() {}')],
     ['./ui-avoidance-handler.js', componentModule('UIAvoidanceHandler')],
@@ -277,6 +277,34 @@ test('Given typed vote authority rejects after a video switch When the subtitle 
 
   assert.equal(fixture.manager.currentSubtitle, null);
   assert.equal(fixture.lifecycle.voteUpdates.length, 0, 'stale storage errors must not continue into vote/UI updates');
+});
+
+test('Given a seek starts a new render generation When an earlier cue arrives Then it renders while the previous generation is rejected', async () => {
+  const fixture = await loadManager();
+  const staleReplacement = deferred();
+  fixture.manager.subtitleReplacer.processSubtitle = (subtitle) =>
+    subtitle.text === 'before seek' ? staleReplacement.promise : Promise.resolve(subtitle);
+
+  const staleRender = fixture.manager.showSubtitle({
+    text: 'before seek',
+    timestamp: 1211.11,
+    mode: 'intercept',
+    renderGeneration: 0
+  });
+  await flush();
+
+  fixture.handlers.get('SUBTITLE_RENDER_RESET')({ renderGeneration: 1 });
+  await fixture.manager.showSubtitle({
+    text: 'after backward seek',
+    timestamp: 1202.13,
+    mode: 'intercept',
+    renderGeneration: 1
+  });
+  staleReplacement.resolve({ text: 'before seek', timestamp: 1211.11, mode: 'intercept' });
+  await staleRender;
+
+  assert.deepEqual(fixture.lifecycle.renders.map(subtitle => subtitle.text), ['after backward seek']);
+  assert.equal(fixture.manager.currentSubtitle.text, 'after backward seek');
 });
 
 test('Given avoidance is delayed When the manager tears down Then the old callback does not dereference teardown state or update a new panel', async () => {

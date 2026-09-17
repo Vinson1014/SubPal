@@ -466,3 +466,20 @@ test('Given raw TTML and a diagnostic summary owned by the ingress When cache, d
   });
   assert.deepEqual(harness.genericPageRpcCalls(), []);
 });
+
+test('Given an interceptor render generation When it emits a subtitle Then the payload carries that generation', async () => {
+  const harness = await createTTMLHarness();
+  const interceptor = harness.interceptor();
+  interceptor._renderGeneration = 3;
+
+  const subtitle = interceptor.convertToStandardFormat({
+    primaryText: 'seek target cue',
+    secondaryText: '',
+    timestamp: 1202.13,
+    primarySubtitle: null,
+    secondarySubtitle: null,
+    renderReadiness: {}
+  });
+
+  assert.equal(subtitle.renderGeneration, 3);
+});
