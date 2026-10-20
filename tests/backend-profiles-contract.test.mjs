@@ -5,6 +5,7 @@ import {
   BACKEND_PROFILE_SCHEMA_VERSION,
   DEFAULT_BACKEND_ENDPOINT,
   DEFAULT_BACKEND_PROFILE_ID,
+  RETIRED_BACKEND_ENDPOINT,
   activateBackendProfile,
   createBackendProfile,
   deleteBackendProfile,
@@ -291,6 +292,79 @@ test('Given legacy credentials and contribution records When migrated Then defau
 
   await ensureBackendProfilesMigrated(storage.local);
   assert.equal(storage.setCalls.length, 1, 'a ready migration is idempotent and performs no second write');
+});
+
+test('Given profiles on the retired backend host When migrated Then exact matches move to the new backend and lose only their JWT', async () => {
+  const storage = createStorage({
+    backendProfiles: {
+      schemaVersion: BACKEND_PROFILE_SCHEMA_VERSION,
+      activeProfileId: DEFAULT_BACKEND_PROFILE_ID,
+      byId: {
+        [DEFAULT_BACKEND_PROFILE_ID]: {
+          id: DEFAULT_BACKEND_PROFILE_ID,
+          endpoint: RETIRED_BACKEND_ENDPOINT,
+          userId: 'default-user',
+          jwt: 'default-jwt'
+        },
+        custom: {
+          id: 'custom',
+          endpoint: RETIRED_BACKEND_ENDPOINT,
+          userId: 'custom-user',
+          jwt: 'custom-jwt'
+        },
+        pathVariant: {
+          id: 'pathVariant',
+          endpoint: `${RETIRED_BACKEND_ENDPOINT}/v2`,
+          userId: 'path-user',
+          jwt: 'path-jwt'
+        },
+        other: {
+          id: 'other',
+          endpoint: 'https://other.example.test',
+          userId: 'other-user',
+          jwt: 'other-jwt'
+        }
+      }
+    },
+    voteQueue: [
+      { id: 'vote', operationId: 'vote', backendProfileId: DEFAULT_BACKEND_PROFILE_ID, status: 'pending' }
+    ]
+  });
+
+  await ensureBackendProfilesMigrated(storage.local);
+
+  const { backendProfiles, voteQueue } = storage.data();
+  assert.deepEqual(backendProfiles.byId[DEFAULT_BACKEND_PROFILE_ID], {
+    id: DEFAULT_BACKEND_PROFILE_ID,
+    endpoint: DEFAULT_BACKEND_ENDPOINT,
+    userId: 'default-user',
+    jwt: null
+  });
+  assert.deepEqual(backendProfiles.byId.custom, {
+    id: 'custom',
+    endpoint: DEFAULT_BACKEND_ENDPOINT,
+    userId: 'custom-user',
+    jwt: null
+  });
+  assert.deepEqual(backendProfiles.byId.pathVariant, {
+    id: 'pathVariant',
+    endpoint: `${RETIRED_BACKEND_ENDPOINT}/v2`,
+    userId: 'path-user',
+    jwt: 'path-jwt'
+  });
+  assert.deepEqual(backendProfiles.byId.other, {
+    id: 'other',
+    endpoint: 'https://other.example.test',
+    userId: 'other-user',
+    jwt: 'other-jwt'
+  });
+  assert.equal(backendProfiles.activeProfileId, DEFAULT_BACKEND_PROFILE_ID);
+  assert.equal(voteQueue[0].backendProfileId, DEFAULT_BACKEND_PROFILE_ID);
+  assert.equal(storage.setCalls.length, 1);
+
+  const repeatStorage = createStorage(storage.data());
+  await ensureBackendProfilesMigrated(repeatStorage.local);
+  assert.equal(repeatStorage.setCalls.length, 0, 'the retired endpoint remap is idempotent');
 });
 
 test('Given valid existing profiles and a stale active ID When migrated Then profiles survive and only the active profile is repaired', async () => {

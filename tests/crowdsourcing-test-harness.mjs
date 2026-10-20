@@ -128,7 +128,7 @@ async function loadBackground(resolveModule, fetchImpl = fetch, options = {}) {
             byId: {
               default: {
                 id: 'default',
-                endpoint: storage.api?.baseUrl ?? 'https://subnfbackend.zeabur.app',
+                endpoint: storage.api?.baseUrl ?? 'https://api.subpal.dev',
                 userId: storage.user?.userId ?? 'generated-profile-user',
                 jwt: storage.jwt ?? null
               }

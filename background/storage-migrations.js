@@ -5,7 +5,7 @@ import {
 } from './backend-profiles.js';
 import { runStorageMutation } from './storage-mutation-coordinator.js';
 
-export const STORAGE_SCHEMA_VERSION = 1;
+export const STORAGE_SCHEMA_VERSION = 2;
 const STORAGE_SCHEMA_VERSION_KEY = 'storageSchemaVersion';
 const STORAGE_MIGRATION_STATE_KEY = 'storageMigrationState';
 const STORAGE_MIGRATION_KEYS = [

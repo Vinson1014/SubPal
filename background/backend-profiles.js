@@ -1,7 +1,8 @@
 import { runStorageMutation } from './storage-mutation-coordinator.js';
 
 export const DEFAULT_BACKEND_PROFILE_ID = 'default';
-export const DEFAULT_BACKEND_ENDPOINT = 'https://subnfbackend.zeabur.app';
+export const DEFAULT_BACKEND_ENDPOINT = 'https://api.subpal.dev';
+export const RETIRED_BACKEND_ENDPOINT = 'https://subnfbackend.zeabur.app';
 export const BACKEND_PROFILE_SCHEMA_VERSION = 1;
 
 const PROFILE_STORE_KEY = 'backendProfiles';
@@ -143,6 +144,17 @@ function buildProfileStore(data, endpointOverride) {
   return { store, changed: serialize(rawStore) !== serialize(store) };
 }
 
+function remapRetiredBackendEndpoints(store) {
+  let changed = false;
+  for (const profile of Object.values(store.byId)) {
+    if (profile.endpoint !== RETIRED_BACKEND_ENDPOINT) continue;
+    profile.endpoint = DEFAULT_BACKEND_ENDPOINT;
+    profile.jwt = null;
+    changed = true;
+  }
+  return changed;
+}
+
 function migrateContributionRecord(record) {
   if (!isRecord(record)) return { record, changed: false, malformed: true };
   if (!isNonEmptyString(record.id)) return { record, changed: false, malformed: true };
@@ -189,10 +201,11 @@ function migrateVoteState(value) {
 }
 
 export function buildBackendProfileMigration(data, { endpointOverride } = {}) {
-  const { store, changed: profileChanged } = buildProfileStore(data, endpointOverride);
+  const { store, changed: storeChanged } = buildProfileStore(data, endpointOverride);
+  const endpointRemapped = remapRetiredBackendEndpoints(store);
   const updates = {};
   let malformedRecordCount = 0;
-  if (profileChanged) updates[PROFILE_STORE_KEY] = store;
+  if (storeChanged || endpointRemapped) updates[PROFILE_STORE_KEY] = store;
 
   for (const key of CONTRIBUTION_KEYS) {
     const migrated = migrateContributionArray(data[key]);

@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  DEFAULT_BACKEND_ENDPOINT,
+  RETIRED_BACKEND_ENDPOINT
+} from '../background/backend-profiles.js';
+import {
   STORAGE_SCHEMA_VERSION,
   ensureStorageMigrationsComplete,
   getStorageMigrationStatus,
@@ -177,4 +181,149 @@ test('Given malformed legacy records When migration runs Then they are retained,
 
   assert.equal(result.malformedRecordCount, 2);
   assert.deepEqual(storage.data().voteQueue.slice(-2), [null, { status: 'pending', secret: 'preserved' }]);
+});
+
+test('Given a schema v1 store on the retired host When readiness runs Then it upgrades to schema v2 without changing identity or queue bindings', async () => {
+  const storage = createStorage({
+    storageSchemaVersion: 1,
+    storageMigrationState: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 },
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'default',
+      byId: {
+        default: {
+          id: 'default',
+          endpoint: RETIRED_BACKEND_ENDPOINT,
+          userId: 'existing-user',
+          jwt: 'old-jwt'
+        }
+      }
+    },
+    voteQueue: [{ id: 'vote', operationId: 'vote', backendProfileId: 'default', status: 'pending' }]
+  });
+
+  const result = await ensureStorageMigrationsComplete(storage.local);
+  const migrated = storage.data();
+
+  assert.deepEqual(result, { status: 'ready', targetVersion: STORAGE_SCHEMA_VERSION, malformedRecordCount: 0 });
+  assert.equal(STORAGE_SCHEMA_VERSION, 2);
+  assert.equal(migrated.storageSchemaVersion, 2);
+  assert.deepEqual(migrated.backendProfiles.byId.default, {
+    id: 'default', endpoint: DEFAULT_BACKEND_ENDPOINT, userId: 'existing-user', jwt: null
+  });
+  assert.deepEqual(migrated.voteQueue, [
+    { id: 'vote', operationId: 'vote', backendProfileId: 'default', status: 'pending' }
+  ]);
+  assert.equal(storage.setCalls.length, 1);
+
+  await reconcileStorageMigrations(storage.local);
+  assert.equal(storage.setCalls.length, 1, 'schema v2 reconciliation is a no-op');
+});
+
+test('Given a 0.4.1 snapshot on the retired host When schema v2 migration runs Then the default profile moves and the legacy JWT is cleared', async () => {
+  const storage = createStorage(full041Fixture(`${RETIRED_BACKEND_ENDPOINT}/`));
+
+  const result = await ensureStorageMigrationsComplete(storage.local);
+  const migrated = storage.data();
+
+  assert.deepEqual(result, { status: 'ready', targetVersion: STORAGE_SCHEMA_VERSION, malformedRecordCount: 0 });
+  assert.deepEqual(migrated.backendProfiles.byId.default, {
+    id: 'default', endpoint: DEFAULT_BACKEND_ENDPOINT, userId: 'legacy-user-1234', jwt: null
+  });
+  assert.equal(migrated.voteQueue[0].backendProfileId, 'default');
+  assert.deepEqual(migrated.api, { baseUrl: `${RETIRED_BACKEND_ENDPOINT}/` });
+  assert.deepEqual(migrated.user, { userId: 'legacy-user-1234' });
+  assert.equal(migrated.jwt, 'legacy-jwt');
+});
+
+test('Given a fresh installation When readiness runs Then it uses the new official endpoint directly', async () => {
+  const storage = createStorage();
+
+  await ensureStorageMigrationsComplete(storage.local);
+
+  const profile = storage.data().backendProfiles.byId.default;
+  assert.equal(DEFAULT_BACKEND_ENDPOINT, 'https://api.subpal.dev');
+  assert.equal(profile.endpoint, 'https://api.subpal.dev');
+  assert.ok(profile.userId);
+  assert.equal(profile.jwt, null);
+  assert.equal(storage.setCalls.length, 1);
+});
+
+for (const version of [1, 2]) {
+  test(`Given schema v${version} with multiple profiles and bound contributions When reconciled Then only retired endpoints and their JWTs change`, async () => {
+    const fixture = {
+      storageSchemaVersion: version,
+      storageMigrationState: { status: 'ready', targetVersion: version, malformedRecordCount: 0 },
+      backendProfiles: {
+        schemaVersion: 1,
+        activeProfileId: 'custom',
+        byId: {
+          default: { id: 'default', endpoint: RETIRED_BACKEND_ENDPOINT, userId: 'default-user', jwt: 'old-default-jwt' },
+          custom: { id: 'custom', endpoint: `  ${RETIRED_BACKEND_ENDPOINT.toUpperCase()}:443///  `, userId: 'custom-user', jwt: 'old-custom-jwt' },
+          manual: { id: 'manual', endpoint: DEFAULT_BACKEND_ENDPOINT, userId: 'manual-user', jwt: 'manual-jwt' },
+          other: { id: 'other', endpoint: 'https://other.example.test', userId: 'other-user', jwt: 'other-jwt' }
+        }
+      },
+      voteStateByTranslation: {
+        translation: { voteState: 'like', updatedAt: 456, backendProfileId: 'custom' }
+      }
+    };
+    for (const key of [
+      'voteQueue', 'voteHistory', 'translationQueue', 'translationHistory',
+      'replacementEventQueue', 'replacementEventHistory'
+    ]) {
+      fixture[key] = ['default', 'custom', 'manual', 'other'].map((profileId) => ({
+        ...legacyRecord(`${key}-${profileId}`, key.endsWith('Queue') ? 'pending' : 'completed'),
+        operationId: `${key}-${profileId}`,
+        backendProfileId: profileId
+      }));
+    }
+    const storage = createStorage(fixture);
+
+    await reconcileStorageMigrations(storage.local);
+
+    const expected = clone(fixture);
+    expected.storageSchemaVersion = 2;
+    expected.storageMigrationState.targetVersion = 2;
+    for (const id of ['default', 'custom']) {
+      expected.backendProfiles.byId[id].endpoint = 'https://api.subpal.dev';
+      expected.backendProfiles.byId[id].jwt = null;
+    }
+    assert.deepEqual(storage.data(), expected);
+    assert.equal(storage.setCalls.length, 1);
+    assert.deepEqual(storage.setCalls[0].backendProfiles, expected.backendProfiles);
+
+    // 新 token 寫入後，重跑 migration 不得再次清空。
+    expected.backendProfiles.byId.custom.jwt = 'new-backend-jwt';
+    await storage.local.set({ backendProfiles: expected.backendProfiles });
+    await reconcileStorageMigrations(storage.local);
+    assert.deepEqual(storage.data(), expected);
+    assert.equal(storage.setCalls.length, 2, 'reconciliation does not rewrite a migrated profile');
+  });
+}
+
+test('Given a retired endpoint and a failed v2 migration write When readiness retries Then endpoint JWT and schema change together', async () => {
+  const fixture = {
+    storageSchemaVersion: 1,
+    storageMigrationState: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 },
+    backendProfiles: {
+      schemaVersion: 1,
+      activeProfileId: 'default',
+      byId: {
+        default: { id: 'default', endpoint: RETIRED_BACKEND_ENDPOINT, userId: 'existing-user', jwt: 'old-jwt' }
+      }
+    }
+  };
+  const storage = createStorage(fixture);
+  storage.failNextSet();
+
+  await assert.rejects(ensureStorageMigrationsComplete(storage.local), /storage write failed/);
+  assert.deepEqual(storage.data(), fixture);
+
+  await ensureStorageMigrationsComplete(storage.local);
+  assert.equal(storage.setCalls.length, 1);
+  assert.equal(storage.setCalls[0].storageSchemaVersion, 2);
+  assert.deepEqual(storage.setCalls[0].backendProfiles.byId.default, {
+    id: 'default', endpoint: 'https://api.subpal.dev', userId: 'existing-user', jwt: null
+  });
 });
