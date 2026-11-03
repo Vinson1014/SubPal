@@ -33,7 +33,7 @@ SubPal 是一個 Chrome 擴充功能，旨在通過社群協作改善 Netflix �
 | **擴充功能** | Chrome Extension Manifest V3 |
 | **前端** | Vanilla JavaScript (ES6+) |
 | **樣式** | CSS3 (動態注入) |
-| **後端 API** | https://subnfbackend.zeabur.app |
+| **後端 API** | https://api.subpal.dev |
 | **認證** | JWT Token |
 | **存儲** | chrome.storage.local |
 
@@ -1485,13 +1485,13 @@ function renderBilingualSubtitle(primary, secondary) {
     currentVideoTitle: 'Stranger Things',
     currentVideoLanguage: 'en'
   },
-  storageSchemaVersion: 1,
-  storageMigrationState: { status: 'ready', targetVersion: 1, malformedRecordCount: 0 },
+  storageSchemaVersion: 2,
+  storageMigrationState: { status: 'ready', targetVersion: 2, malformedRecordCount: 0 },
   backendProfiles: {
     schemaVersion: 1,
     activeProfileId: 'profile-id',
     byId: {
-      'profile-id': { id: 'profile-id', endpoint: 'https://subnfbackend.zeabur.app', userId: 'uuid-v4', jwt: 'eyJhbGciOiJIUzI1NiIs...' }
+      'profile-id': { id: 'profile-id', endpoint: 'https://api.subpal.dev', userId: 'uuid-v4', jwt: 'eyJhbGciOiJIUzI1NiIs...' }
     }
   }
 }
@@ -1503,13 +1503,23 @@ function renderBilingualSubtitle(primary, secondary) {
 
 `api`、`user` 與 top-level `jwt` 才是 legacy migration-only 轉換輸入。
 
-### 3.1 Storage schema v1 升級閘門
+### 3.1 Storage schema 升級閘門
 
-- `storageSchemaVersion: 1` 與 `storageMigrationState` 是背景資料路徑共用的 readiness marker。
-- 0.4.1 的 `api/user/jwt` 轉成 `backendProfiles.default`；六組 contribution queue/history 補上 `backendProfileId` 與 `operationId`，`voteStateByTranslation` 補上 profile binding。
+- `storageSchemaVersion: 2` 與 `storageMigrationState` 是背景資料路徑共用的 readiness marker。
+- 0.4.1 → v1：`api/user/jwt` 轉成 `backendProfiles.default`；六組 contribution queue/history 補上 `backendProfileId` 與 `operationId`，`voteStateByTranslation` 補上 profile binding。
+- v1 → v2：將 endpoint 正規化後完全等於 `https://subnfbackend.zeabur.app` 的 profile 原地改寫為 `https://api.subpal.dev`，並清空 `jwt`；`userId`、profile id、queue/history 與 vote state 綁定全部保留。
 - 轉換先在記憶體完成並驗證，再與 schema marker 一次寫入；失敗不快取 rejected readiness，後續可重試。
 - 不符合目前安全規則的 legacy endpoint 進入 `needs-attention`。修復前註冊、API 與同步全部 fail closed，只有可信 Options Port 可查詢狀態並提交使用者確認的新 endpoint。
 - 0.5.0 保留 legacy `api/user/jwt` 一個公開版本作回滾與救援來源；不得由 runtime 再直接使用。
+
+### 3.2 後端 endpoint 遷移
+
+- `DEFAULT_BACKEND_ENDPOINT` 為 `https://api.subpal.dev`；`RETIRED_BACKEND_ENDPOINT` 為 `https://subnfbackend.zeabur.app`。
+- `remapRetiredBackendEndpoints()` 只改寫正規化後完全相等的 endpoint；帶路徑的變體（例如 `/v2`）不自動改寫。
+- 改寫時將 `jwt` 設為 `null`，由初始化註冊或既有的 401 自動刷新流程以相同 `userId` 重新註冊。
+- Remap 在 `buildBackendProfileMigration()` 內執行，因此 schema 升級與後續 reconciliation 都會套用，且重複執行為 no-op。
+- Client 不提供 endpoint fallback，避免 queue 與投票狀態在兩個 DB 之間 split-brain；本輪依使用者決策暫緩完整 rollback，接受後端短暫降級並直接修復。
+- Extension 版本更新與 worker 重啟不同：更新可能使既有 Netflix 分頁的 content-script context 失效，單純重新 `runtime.connect()` 不足以恢復。本輪公開 Netflix 頁實測需重新整理才能建立新的有效 context；不可承諾舊分頁無需重載，已登入播放情境仍待驗證。
 
 ### 4. 用戶認證與 JWT 管理
 
@@ -1539,7 +1549,7 @@ function renderBilingualSubtitle(primary, secondary) {
   backendProfiles: {
     activeProfileId: 'profile-id',
     byId: {
-      'profile-id': { id: 'profile-id', endpoint: 'https://subnfbackend.zeabur.app', userId: 'uuid-v4', jwt: 'eyJhbGciOiJIUzI1NiIs...' }
+      'profile-id': { id: 'profile-id', endpoint: 'https://api.subpal.dev', userId: 'uuid-v4', jwt: 'eyJhbGciOiJIUzI1NiIs...' }
     }
   }
 }
