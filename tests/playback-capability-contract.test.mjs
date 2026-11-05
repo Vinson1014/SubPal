@@ -118,8 +118,28 @@ async function loadPlayback() {
 }
 
 function track() {
-  return { code: 'en', name: 'English', trackId: 'track-en', trackType: 'PRIMARY', rawTrackType: null };
+  return { code: 'en', name: 'English', trackId: 'track-en', trackType: 'PRIMARY', rawTrackType: null,
+    isNoneTrack: false, isForcedNarrative: false };
 }
+
+test('timed-text flags are strict booleans and secondary switch has an exact context-bound payload', async () => {
+  const { createPlayback, parsePlaybackIntent } = await loadPlayback();
+  const request = intent('switch-secondary-language', { languageCode: 'ja', excludedTrackIds: ['failed-track', 0] });
+  assert.deepEqual(plain(parsePlaybackIntent(request)), { ok: true, value: request });
+  for (const payload of [{ languageCode: 'ja' }, { languageCode: 'ja', excludedTrackIds: [null] },
+    { languageCode: 'ja', excludedTrackIds: [], extra: true }]) {
+    assert.equal(parsePlaybackIntent(intent('switch-secondary-language', payload)).ok, false);
+  }
+  assert.equal(parsePlaybackIntent({ variant: request.variant, payload: request.payload }).ok, false);
+  for (const flags of [{ isForcedNarrative: true }, { isForcedNarrative: 'false' },
+    { isNoneTrack: 0 }, { isForcedNarrative: false, unknown: true }]) {
+    const projected = { ...track(), ...flags };
+    const playback = createPlayback({ getCurrentContext: () => context(),
+      adapter: createAdapter({ ok: true, value: { languages: [projected] } }) });
+    const result = await playback.perform(intent('available-languages', {}));
+    assert.equal(result.ok, flags.isForcedNarrative === true);
+  }
+});
 
 function snapshot() {
   return {
@@ -140,6 +160,9 @@ function responseFor(variant) {
     case 'context-snapshot': return { playback: snapshot() };
     case 'available-languages': return { languages: [track()] };
     case 'current-language': return { language: track() };
+    case 'original-language': return { originalLanguage: {
+      status: 'resolved', reason: 'native-audio-language', baseLanguage: 'ja', languages: ['ja', 'ja-JP']
+    } };
     case 'switch-language':
     case 'switch-track': return { language: track() };
     case 'jump-to-timecode': return { status: 'partial' };
@@ -175,12 +198,13 @@ test('Given the typed Playback module When it is loaded Then its only public fac
   assert.equal(typeof playback.createPagePlayback, 'function');
 });
 
-test('Given the six allowlisted playback variants When parsed Then each has exactly its typed payload and context contract', async () => {
+test('Given the allowlisted playback variants When parsed Then each has exactly its typed payload and context contract', async () => {
   const { parsePlaybackIntent } = await loadPlayback();
   const variants = [
     intent('context-snapshot'),
     intent('available-languages', {}),
     intent('current-language', {}),
+    intent('original-language', {}),
     intent('switch-language', { languageCode: 'zh-Hant' }),
     intent('switch-track', { trackId: 12 }),
     intent('jump-to-timecode', {
@@ -342,6 +366,7 @@ test('Given each context-bound playback variant When it succeeds Then it checks 
   const cases = [
     ['available-languages', {}, 3000],
     ['current-language', {}, 3000],
+    ['original-language', {}, 3000],
     ['switch-language', { languageCode: 'en' }, 10000],
     ['switch-track', { trackId: 'track-a' }, 10000],
     ['jump-to-timecode', { targetTimestamp: 15, controlId: 'control-a', requestId: 'request-a', issuedAt: 99 }, 3000]
@@ -513,6 +538,7 @@ test('Given page responses with extra secrets or debug data When Playback projec
     ['context-snapshot', {}],
     ['available-languages', {}],
     ['current-language', {}],
+    ['original-language', {}],
     ['switch-language', { languageCode: 'en' }],
     ['switch-track', { trackId: 'track-en' }],
     ['jump-to-timecode', { targetTimestamp: 10, controlId: 'control-a', requestId: 'request-a', issuedAt: 4 }]
@@ -540,6 +566,102 @@ test('Given a partial jump success When Playback validates the page outcome Then
     issuedAt: 4
   }))), { ok: true, value: { variant: 'jump-to-timecode', status: 'partial' } });
   assert.equal(adapter.calls.length, 1);
+});
+
+test('Given original language unknown or ambiguous Then only the fixed status and reason cross into content', async () => {
+  const { createPlayback } = await loadPlayback();
+  for (const originalLanguage of [
+    { status: 'unknown', reason: 'no-valid-native-audio-language' },
+    { status: 'ambiguous', reason: 'multiple-native-audio-languages' }
+  ]) {
+    const adapter = createAdapter({ ok: true, value: { originalLanguage } });
+    const playback = createPlayback({ getCurrentContext: () => context(), adapter });
+    assert.deepEqual(plain(await playback.perform(intent('original-language', {}))), {
+      ok: true, value: { variant: 'original-language', originalLanguage }
+    });
+  }
+});
+
+test('Given malformed original language results Then strict projection rejects raw tracks and inconsistent languages without getters', async () => {
+  const { createPlayback } = await loadPlayback();
+  const resolved = responseFor('original-language').originalLanguage;
+  let getterReads = 0;
+  const accessor = { ...resolved };
+  Object.defineProperty(accessor, 'languages', { enumerable: true, get() { getterReads += 1; return ['ja']; } });
+  const arrayAccessor = ['ja'];
+  Object.defineProperty(arrayAccessor, '0', { enumerable: true, get() { getterReads += 1; return 'ja'; } });
+  const symbolResult = { ...resolved, [Symbol('secret')]: true };
+  for (const originalLanguage of [
+    { ...resolved, audioTracks: [{ bcp47: 'ja', isNative: true, secret: 'private' }] },
+    { ...resolved, languages: [123] }, { ...resolved, languages: [] },
+    { ...resolved, languages: ['not a language'] }, { ...resolved, languages: ['ja_JP'] },
+    { ...resolved, languages: ['ja', 'en'] }, { ...resolved, languages: ['ja', 'ja'] },
+    { ...resolved, baseLanguage: 'en' }, { ...resolved, baseLanguage: 123 },
+    { ...resolved, languages: arrayAccessor }, accessor, symbolResult,
+    { status: 'unknown', reason: 'multiple-native-audio-languages' },
+    { status: 'ambiguous', reason: 'multiple-native-audio-languages', languages: ['ja', 'en'] },
+    { status: 'unavailable', reason: 'audio-track-list-unavailable' }
+  ]) {
+    const adapter = createAdapter({ ok: true, value: { originalLanguage } });
+    const playback = createPlayback({ getCurrentContext: () => context(), adapter });
+    assert.deepEqual(plain(await playback.perform(intent('original-language', {}))), {
+      ok: false, error: { kind: 'domain-rejected', code: 'invalid-page-response', retryable: false }
+    });
+  }
+  assert.equal(getterReads, 0);
+});
+
+test('Given original-language requests Then payload, expected context, timeout, disconnect and unavailable retain existing error categories', async () => {
+  const { createPlayback, parsePlaybackIntent } = await loadPlayback();
+  for (const request of [
+    { variant: 'original-language', payload: {} },
+    intent('original-language', { audioTracks: [] }),
+    intent('original-language', {}, { ...expected(), sessionId: 'preview-session' })
+  ]) assert.deepEqual(plain(parsePlaybackIntent(request)), {
+    ok: false, error: { kind: 'invalid', code: 'playback-intent', retryable: false }
+  });
+
+  const request = intent('original-language', {});
+  const stale = { ok: false, error: { kind: 'stale-context', code: 'playback-stale-context', retryable: false } };
+  for (const staleContext of [
+    { ...context(), videoId: 'other-video' }, { ...context(), sessionId: 'watch-other' },
+    context(5), { ...context(), state: 'unavailable' }
+  ]) {
+    const adapter = createAdapter({ ok: true, value: responseFor('original-language') });
+    const playback = createPlayback({ getCurrentContext: () => staleContext, adapter });
+    assert.deepEqual(plain(await playback.perform(request)), stale);
+    assert.equal(adapter.calls.length, 0);
+  }
+  let reads = 0;
+  const adapter = createAdapter({ ok: true, value: responseFor('original-language') });
+  const postflight = createPlayback({ getCurrentContext: () => context(++reads === 1 ? 4 : 5), adapter });
+  assert.deepEqual(plain(await postflight.perform(request)), stale);
+  assert.equal(adapter.calls.length, 1);
+
+  const clock = new FakeClock();
+  const pending = deferred();
+  const timeoutAdapter = createAdapter(() => pending.promise);
+  const timeout = createPlayback({ getCurrentContext: () => context(), adapter: timeoutAdapter,
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+  const timeoutResult = timeout.perform(request);
+  clock.advanceBy(3000);
+  assert.deepEqual(plain(await timeoutResult), {
+    ok: false, error: { kind: 'timeout', code: 'playback-timeout', retryable: true }
+  });
+  pending.resolve({ ok: true, value: responseFor('original-language') });
+  await Promise.resolve();
+  assert.equal(timeoutAdapter.calls.length, 1);
+  assert.equal(timeoutAdapter.calls[0].options.signal.aborted, true);
+
+  for (const [error, normalized] of [
+    [{ kind: 'disconnected', code: 'transport-lost', retryable: true },
+      { kind: 'disconnected', code: 'page-adapter-disconnected', retryable: true }],
+    [{ kind: 'domain-rejected', code: 'original-language-unavailable', retryable: false },
+      { kind: 'domain-rejected', code: 'original-language-unavailable', retryable: false }]
+  ]) {
+    const playback = createPlayback({ getCurrentContext: () => context(), adapter: createAdapter({ ok: false, error }) });
+    assert.deepEqual(plain(await playback.perform(request)), { ok: false, error: normalized });
+  }
 });
 
 test('Given shared page adapter work When one Playback capability is disposed Then only its own pending and future operations terminalize', async () => {

@@ -304,10 +304,11 @@
           code: track.bcp47,
           name: track.displayName,
           trackId: track.trackId,
-          isNone: track.isNoneTrack || false,
+          isNoneTrack: track.isNoneTrack ?? false,
+          isForcedNarrative: track.isForcedNarrative,
           trackType: track.trackType,
           rawTrackType: track.rawTrackType
-        })).filter(lang => !lang.isNone);
+        }));
 
         debugLog('可用字幕語言 (詳細):', languages);
         return languages;
@@ -460,7 +461,9 @@
           name: currentTrack.displayName,
           trackId: currentTrack.trackId,
           trackType: currentTrack.trackType,
-          rawTrackType: currentTrack.rawTrackType
+          rawTrackType: currentTrack.rawTrackType,
+          isNoneTrack: currentTrack.isNoneTrack ?? false,
+          isForcedNarrative: currentTrack.isForcedNarrative
         };
       } catch (error) {
         console.error('獲取當前字幕語言時出錯:', error);
@@ -665,7 +668,9 @@
               name: currentTrack.displayName,
               trackId: currentTrack.trackId,
               trackType: currentTrack.trackType,
-              rawTrackType: currentTrack.rawTrackType
+              rawTrackType: currentTrack.rawTrackType,
+              isNoneTrack: currentTrack.isNoneTrack ?? false,
+              isForcedNarrative: currentTrack.isForcedNarrative
             } : null;
           } catch (error) {
             snapshot.currentTrackError = error.message;
@@ -2079,7 +2084,9 @@
     'context-snapshot': new Set(),
     'available-languages': new Set(),
     'current-language': new Set(),
+    'original-language': new Set(),
     'switch-language': new Set(['languageCode']),
+    'switch-secondary-language': new Set(['languageCode', 'excludedTrackIds']),
     'switch-track': new Set(['trackId']),
     'jump-to-timecode': new Set(['targetTimestamp', 'controlId', 'requestId', 'issuedAt'])
   });
@@ -2227,6 +2234,9 @@
     const payload = strictPrivateRecord(value, PRIVATE_PLAYBACK_VARIANTS[variant], PRIVATE_PLAYBACK_VARIANTS[variant]);
     if (!payload) return null;
     if (variant === 'switch-language' && (typeof payload.languageCode !== 'string' || !payload.languageCode)) return null;
+    if (variant === 'switch-secondary-language' && (typeof payload.languageCode !== 'string' || !payload.languageCode ||
+      !Array.isArray(payload.excludedTrackIds) || !payload.excludedTrackIds.every(id =>
+        typeof id === 'string' && id || Number.isInteger(id) && id >= 0))) return null;
     if (variant === 'switch-track' && !(typeof payload.trackId === 'string' && payload.trackId ||
       Number.isInteger(payload.trackId) && payload.trackId >= 0)) return null;
     if (variant === 'jump-to-timecode' && (!Number.isFinite(payload.targetTimestamp) || payload.targetTimestamp < 0 ||
@@ -2277,17 +2287,23 @@
   function projectPrivateTrack(value) {
     try {
       if (!value || typeof value !== 'object') return null;
+      if (value.isForcedNarrative === undefined) {
+        subtitleInterceptor.recordDebugEvent('TIMED_TEXT_FORCED_FLAG_MISSING', { trackId: value.trackId ?? null });
+      }
       const track = {
         code: value.code ?? value.bcp47 ?? null,
         name: value.name ?? value.displayName ?? null,
         trackId: value.trackId ?? null,
         trackType: value.trackType ?? null,
-        rawTrackType: value.rawTrackType ?? null
+        rawTrackType: value.rawTrackType ?? null,
+        isNoneTrack: value.isNoneTrack ?? false,
+        isForcedNarrative: value.isForcedNarrative === undefined ? false : value.isForcedNarrative
       };
       return (track.code === null || typeof track.code === 'string') && (track.name === null || typeof track.name === 'string') &&
         (track.trackId === null || typeof track.trackId === 'string' || Number.isFinite(track.trackId)) &&
         (track.trackType === null || typeof track.trackType === 'string') &&
-        (track.rawTrackType === null || typeof track.rawTrackType === 'string') ? track : null;
+        (track.rawTrackType === null || typeof track.rawTrackType === 'string') &&
+        typeof track.isNoneTrack === 'boolean' && typeof track.isForcedNarrative === 'boolean' ? track : null;
     } catch {
       return null;
     }
@@ -2328,11 +2344,54 @@
     return playerHelper.hasActiveSession() ? true : playerHelper.reinitialize();
   }
 
+  function isTrustedOriginalLanguageSnapshot(snapshot) {
+    return Boolean(snapshot?.pageUrlVideoId) && isWatchSessionId(snapshot?.selectedSessionId) &&
+      ['high', 'medium'].includes(snapshot?.sessionSelectionConfidence);
+  }
+
+  async function dispatchPrivateOriginalLanguage(context) {
+    try {
+      const snapshot = getPrivatePlaybackSnapshot();
+      if (!isTrustedOriginalLanguageSnapshot(snapshot)) {
+        return privateFail('domain-rejected', 'original-language-unavailable');
+      }
+      if (!privateContextMatches(snapshot, context) || snapshot.pageUrlVideoId !== context.videoId) {
+        return privateFail('stale-context', 'page-context-mismatch');
+      }
+      const { resolveOriginalLanguage } = await import('./shared/original-language-resolver.js');
+      // 模組載入期間可能換片；只能讀取仍屬於請求 context 的 session。
+      const beforeRead = getPrivatePlaybackSnapshot();
+      if (!privateContextMatches(beforeRead, context) || beforeRead.pageUrlVideoId !== context.videoId) {
+        return privateFail('stale-context', 'page-context-mismatch');
+      }
+      if (!isTrustedOriginalLanguageSnapshot(beforeRead)) return privateFail('domain-rejected', 'original-language-unavailable');
+      const api = getNetflixPlayerAPI();
+      const player = api?.videoPlayer?.getVideoPlayerBySessionId?.(context.sessionId);
+      if (typeof player?.getAudioTrackList !== 'function') {
+        return privateFail('domain-rejected', 'original-language-unavailable');
+      }
+      const audioTracks = player.getAudioTrackList();
+      if (!Array.isArray(audioTracks)) return privateFail('domain-rejected', 'original-language-unavailable');
+      const originalLanguage = resolveOriginalLanguage(audioTracks);
+      const afterRead = getPrivatePlaybackSnapshot();
+      if (!privateContextMatches(afterRead, context) || afterRead.pageUrlVideoId !== context.videoId) {
+        return privateFail('stale-context', 'page-context-mismatch');
+      }
+      if (!isTrustedOriginalLanguageSnapshot(afterRead)) return privateFail('domain-rejected', 'original-language-unavailable');
+      return privateOk({ originalLanguage });
+    } catch {
+      return privateFail('domain-rejected', 'original-language-unavailable');
+    }
+  }
+
   async function dispatchPrivatePlayback(envelope) {
     try {
       if (envelope.variant === 'context-snapshot') {
         const playback = projectPrivateSnapshot(getPrivatePlaybackSnapshot());
         return playback ? privateOk({ playback }) : privateFail('domain-rejected', 'invalid-playback-snapshot');
+      }
+      if (envelope.variant === 'original-language') {
+        return dispatchPrivateOriginalLanguage(envelope.context);
       }
       if (!privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) {
         return privateFail('stale-context', 'page-context-mismatch');
@@ -2350,7 +2409,23 @@
         const projected = language === null ? null : projectPrivateTrack(language);
         return language === null || projected ? privateOk({ language: projected }) : privateFail('domain-rejected', 'invalid-language-response');
       }
-      if (envelope.variant === 'switch-language') {
+      if (envelope.variant === 'switch-secondary-language') {
+        const { selectSecondaryTrack } = await import('./shared/secondary-track-selection.js');
+        if (!privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) return privateFail('stale-context', 'page-context-mismatch');
+        const rawTracks = playerHelper.videoPlayer.getTimedTextTrackList();
+        const languages = rawTracks.map(projectPrivateTrack);
+        if (!languages.every(Boolean)) return privateFail('domain-rejected', 'invalid-language-response');
+        const selection = selectSecondaryTrack([envelope.payload.languageCode], languages);
+        const target = selection.candidates.find(track => !envelope.payload.excludedTrackIds.includes(track.trackId));
+        if (!target) return privateFail('domain-rejected', selection.reason || 'no-eligible-secondary-track');
+        // 缺少 trackId 時仍只能使用本次結構化選出的原始物件，不可回到名稱猜測。
+        const rawTarget = rawTracks[languages.findIndex(track => track === target ||
+          track.trackId === target.trackId && track.code === target.code && track.trackType === target.trackType &&
+          track.rawTrackType === target.rawTrackType && !track.isNoneTrack && !track.isForcedNarrative)];
+        if (!rawTarget) return privateFail('domain-rejected', 'secondary-track-unavailable');
+        await playerHelper.videoPlayer.setTimedTextTrack(rawTarget);
+        if (!privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) return privateFail('stale-context', 'page-context-mismatch');
+      } else if (envelope.variant === 'switch-language') {
         if (!await playerHelper.switchToLanguage(envelope.payload.languageCode) ||
           !privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) return privateFail('stale-context', 'page-context-mismatch');
       } else if (envelope.variant === 'switch-track') {

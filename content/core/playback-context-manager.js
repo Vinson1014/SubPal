@@ -229,9 +229,11 @@ class PlaybackContextManager {
     const currentTrack = playback?.currentTrack ? {
       code: playback.currentTrack.code || null,
       name: playback.currentTrack.name || null,
-      trackId: playback.currentTrack.trackId || null,
+      trackId: playback.currentTrack.trackId ?? null,
       trackType: playback.currentTrack.trackType || null,
-      rawTrackType: playback.currentTrack.rawTrackType || null
+      rawTrackType: playback.currentTrack.rawTrackType || null,
+      isNoneTrack: playback.currentTrack.isNoneTrack,
+      isForcedNarrative: playback.currentTrack.isForcedNarrative
     } : null;
 
     return {

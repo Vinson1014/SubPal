@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import * as secondarySelection from '../shared/secondary-track-selection.js';
 
 const configManagerUrl = new URL('../content/system/config/config-manager.js', import.meta.url);
 const configBridgeUrl = new URL('../content/system/config/config-bridge.js', import.meta.url);
@@ -286,6 +287,7 @@ async function createSubtitleInterceptorHarness({ languageWrite, dualWrite }) {
     window: { addEventListener() {}, removeEventListener() {} }
   });
   const dependencies = new Map([
+    ['../../shared/secondary-track-selection.js', await createSyntheticModule(sandbox, 'secondary-track-selection.js', secondarySelection)],
     ['../utils/subtitle-parser.js', await createSyntheticModule(sandbox, 'subtitle-parser.js', {
       buildTimeIndex() { return []; }, findSubtitleByTime() { return null; }, findSubtitleByTimeIndex() { return null; }, parseSubtitle() { return { subtitles: [], regionConfigs: {} }; }
     })],

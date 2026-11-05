@@ -4,6 +4,8 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 
 const pageScriptSource = await readFile(new URL('../netflix-page-script.js', import.meta.url), 'utf8');
+const originalLanguageSource = await readFile(new URL('../shared/original-language-resolver.js', import.meta.url), 'utf8');
+const secondarySelectionSource = await readFile(new URL('../shared/secondary-track-selection.js', import.meta.url), 'utf8');
 const harnessPageScriptSource = pageScriptSource.replace(
   "  window.addEventListener('message', handleMessage);",
   "  window.__subpalTestHandleJump = handleJumpToTimecode;\n\n  window.addEventListener('message', handleMessage);"
@@ -20,7 +22,8 @@ function createPageHarness({
   apiAvailable = true,
   playerUi = {},
   rawTtmlBody = null,
-  fetchResponses = null
+  fetchResponses = null,
+  timedTextTracks = null
 } = {}) {
   const listeners = new Map();
   const documentListeners = new Map();
@@ -215,7 +218,7 @@ function createPageHarness({
     getCurrentTime: () => currentTimeMs,
     getDuration: () => currentDuration,
     getTimedTextTrack: () => currentTimedTextTrack,
-    getTimedTextTrackList: () => [currentTimedTextTrack],
+    getTimedTextTrackList: () => typeof timedTextTracks === 'function' ? timedTextTracks() : timedTextTracks || [currentTimedTextTrack],
     setTimedTextTrack: async (track) => {
       trackMutations += 1;
       currentTimedTextTrack = track;
@@ -387,7 +390,20 @@ function createPageHarness({
       constructor(type, options = {}) { this.type = type; this.detail = options.detail; }
     }
   });
-  vm.runInContext(harnessPageScriptSource, context, { filename: 'netflix-page-script.js' });
+  vm.runInContext(harnessPageScriptSource, context, {
+    filename: 'netflix-page-script.js',
+    importModuleDynamically: async (specifier) => {
+      const sources = new Map([
+        ['./shared/original-language-resolver.js', originalLanguageSource],
+        ['./shared/secondary-track-selection.js', secondarySelectionSource]
+      ]);
+      assert.equal(sources.has(specifier), true, `Unexpected dynamic import: ${specifier}`);
+      const module = new vm.SourceTextModule(sources.get(specifier), { context });
+      await module.link(() => { throw new Error('字幕純解析器不應有外部依賴'); });
+      await module.evaluate();
+      return module;
+    }
+  });
 
   function send(data, { source = window, origin = location.origin, target = 'subpal-page-script' } = {}) {
     const before = responses.length;
@@ -489,6 +505,126 @@ async function settlePageCommand() {
 
 const validExpected = { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 3, targetTimestamp: 12.5 };
 
+test('Given a trusted watch session Then original-language reads only that session native audio and returns no raw audio data', async () => {
+  const harness = createPageHarness();
+  let reads = 0;
+  harness.selectedPlayer.getAudioTrackList = () => {
+    reads += 1;
+    return [
+      { bcp47: 'en', isNative: false, selected: true },
+      { bcp47: 'JA-jp', isNative: true, secret: 'private', trackId: 'audio-ja' },
+      { bcp47: 'ja', isNative: true, trackType: 'ASSISTIVE' }
+    ];
+  };
+  harness.otherPlayer.getAudioTrackList = () => { throw new Error('不得讀取其他 session 音軌'); };
+  harness.sendTyped(typedRequest('original-language', 'playback', 'original-language', {}, typedContext));
+  await settlePageCommand();
+  assert.deepEqual(plain(harness.responses.at(-1)).response, { ok: true, value: { originalLanguage: {
+    status: 'resolved', reason: 'native-audio-language', baseLanguage: 'ja', languages: ['ja-JP', 'ja']
+  } } });
+  assert.equal(reads, 1);
+  assert.equal(harness.trackMutations, 0);
+  assert.deepEqual(harness.seekCalls, []);
+});
+
+test('Given missing, throwing, or malformed audio list API Then original-language reports capability unavailable', async () => {
+  for (const readAudio of [undefined, () => { throw new Error('private audio error'); }, () => null, () => ({ tracks: [] })]) {
+    const harness = createPageHarness();
+    harness.selectedPlayer.getAudioTrackList = readAudio;
+    harness.sendTyped(typedRequest('unavailable', 'playback', 'original-language', {}, typedContext));
+    await settlePageCommand();
+    assert.deepEqual(plain(harness.responses.at(-1)).response, {
+      ok: false, error: { kind: 'domain-rejected', code: 'original-language-unavailable', retryable: false }
+    });
+    assert.equal(harness.trackMutations, 0);
+  }
+});
+
+test('Given an untrusted or unavailable session Then original-language never reads audio even when video and session hints match', async () => {
+  for (const options of [
+    { playerApiVideoId: null, movieId: null, duration: 0 },
+    { sessions: ['preview-session'] },
+    { apiAvailable: false }
+  ]) {
+    const harness = createPageHarness(options);
+    let reads = 0;
+    harness.selectedPlayer.getAudioTrackList = () => { reads += 1; return [{ bcp47: 'ja', isNative: true }]; };
+    harness.sendTyped(typedRequest('untrusted', 'playback', 'original-language', {}, typedContext));
+    await settlePageCommand();
+    assert.deepEqual(plain(harness.responses.at(-1)).response, {
+      ok: false, error: { kind: 'domain-rejected', code: 'original-language-unavailable', retryable: false }
+    });
+    assert.equal(reads, 0);
+  }
+});
+
+test('Given original-language context drift before import or during audio read Then old results stay stale and never escape', async () => {
+  const stale = { ok: false, error: { kind: 'stale-context', code: 'page-context-mismatch', retryable: false } };
+  for (const timing of ['before-import', 'during-read']) {
+    const harness = createPageHarness();
+    let reads = 0;
+    harness.selectedPlayer.getAudioTrackList = () => {
+      reads += 1;
+      if (timing === 'during-read') harness.setSessions(['watch-new-session']);
+      return [{ bcp47: 'ja', isNative: true }];
+    };
+    harness.sendTyped(typedRequest('drift', 'playback', 'original-language', {}, typedContext));
+    if (timing === 'before-import') harness.setSessions(['watch-new-session']);
+    await settlePageCommand();
+    assert.deepEqual(plain(harness.responses.at(-1)).response, stale);
+    assert.equal(reads, timing === 'before-import' ? 0 : 1);
+  }
+});
+
+test('Given no watch route or downgraded session trust during import Then original-language does not read audio', async () => {
+  for (const timing of ['no-watch-route', 'trust-downgrade']) {
+    const harness = createPageHarness();
+    let reads = 0;
+    harness.selectedPlayer.getAudioTrackList = () => { reads += 1; return [{ bcp47: 'ja', isNative: true }]; };
+    if (timing === 'no-watch-route') harness.window.location.href = 'https://www.netflix.com/browse';
+    harness.sendTyped(typedRequest('trust', 'playback', 'original-language', {}, typedContext));
+    if (timing === 'trust-downgrade') {
+      harness.api.getVideoIdBySessionId = () => null;
+      harness.selectedPlayer.getMovieId = () => null;
+      harness.setDuration(0);
+    }
+    await settlePageCommand();
+    assert.deepEqual(plain(harness.responses.at(-1)).response, {
+      ok: false, error: { kind: 'domain-rejected', code: 'original-language-unavailable', retryable: false }
+    });
+    assert.equal(reads, 0);
+  }
+});
+
+test('Given native audio evidence absent or multilingual Then the page preserves unknown and ambiguous without guessing', async () => {
+  for (const [tracks, originalLanguage] of [
+    [[{ bcp47: 'ja', selected: true }, { bcp47: 'en', isNative: 'true' }],
+      { status: 'unknown', reason: 'no-valid-native-audio-language' }],
+    [[{ bcp47: 'ja', isNative: true }, { bcp47: 'en', isNative: true }],
+      { status: 'ambiguous', reason: 'multiple-native-audio-languages' }]
+  ]) {
+    const harness = createPageHarness();
+    harness.selectedPlayer.getAudioTrackList = () => tracks;
+    harness.sendTyped(typedRequest('evidence', 'playback', 'original-language', {}, typedContext));
+    await settlePageCommand();
+    assert.deepEqual(plain(harness.responses.at(-1)).response, { ok: true, value: { originalLanguage } });
+  }
+});
+
+test('Given original-language malformed payload or missing context Then page rejects the envelope before audio access', async () => {
+  for (const [payload, context] of [[{ languageCode: 'ja' }, typedContext], [{}, undefined]]) {
+    const harness = createPageHarness();
+    let reads = 0;
+    harness.selectedPlayer.getAudioTrackList = () => { reads += 1; return []; };
+    harness.sendTyped(typedRequest('invalid-original', 'playback', 'original-language', payload, context));
+    await settlePageCommand();
+    assert.deepEqual(plain(harness.responses.at(-1)).response, {
+      ok: false, error: { kind: 'invalid', code: 'invalid-private-envelope', retryable: false }
+    });
+    assert.equal(reads, 0);
+  }
+});
+
 test('Given flattened legacy page commands When received Then no page owner action or response occurs', async () => {
   const harness = createPageHarness();
 
@@ -537,7 +673,8 @@ test('Given forged legacy page messages When their physical headers are invalid 
 });
 
 test('Given canonical typed Playback requests When received by the page Then all six allowlisted variants return exact normalized Results', async () => {
-  const track = { code: 'en', name: 'English', trackId: 'track-en', trackType: 'PRIMARY', rawTrackType: null };
+  const track = { code: 'en', name: 'English', trackId: 'track-en', trackType: 'PRIMARY', rawTrackType: null,
+    isNoneTrack: false, isForcedNarrative: false };
   const cases = [
     ['context-snapshot', {}, undefined, {
       playback: {
@@ -600,6 +737,57 @@ test('Given canonical typed Playback requests When received by the page Then all
   assert.deepEqual(forbiddenHarness.seekCalls, []);
 });
 
+test('secondary page switch excludes forced and none and can skip an unavailable full track without changing primary selection', async () => {
+  const raw = (trackId, extra = {}) => ({ bcp47: 'ja', displayName: '關閉', trackId,
+    trackType: 'PRIMARY', rawTrackType: 'SUBTITLES', isNoneTrack: false, isForcedNarrative: false, ...extra });
+  const tracks = [raw('forced', { isForcedNarrative: true }), raw('none', { isNoneTrack: true }),
+    raw('cc', { trackType: 'ASSISTIVE', rawTrackType: 'CLOSEDCAPTIONS' }), raw('full')];
+  const harness = createPageHarness({ timedTextTracks: tracks });
+  harness.sendTyped(typedRequest('list', 'playback', 'available-languages', {}, typedContext));
+  await settlePageCommand();
+  const list = harness.responses.at(-1).response.value.languages;
+  assert.equal(list.length, 4);
+  assert.equal(list[0].isForcedNarrative, true);
+  assert.equal(list[1].isNoneTrack, true);
+  for (const [excludedTrackIds, expectedId] of [[[], 'full'], [['full'], 'cc']]) {
+    harness.sendTyped(typedRequest('secondary', 'playback', 'switch-secondary-language',
+      { languageCode: 'ja', excludedTrackIds }, typedContext));
+    // Dynamic import is asynchronous I/O, not a playback timeout.
+    await new Promise(resolve => setImmediate(resolve));
+    await settlePageCommand();
+    assert.equal(harness.responses.at(-1).response.value?.language.trackId, expectedId);
+  }
+  harness.sendTyped(typedRequest('primary', 'playback', 'switch-language', { languageCode: 'ja' }, typedContext));
+  await settlePageCommand();
+  assert.equal(harness.responses.at(-1).response.value.language.trackId, 'forced');
+});
+
+test('missing forced flag is projected as false with diagnostics but malformed flags are rejected', async () => {
+  const harness = createPageHarness();
+  harness.sendTyped(typedRequest('missing-forced', 'playback', 'available-languages', {}, typedContext));
+  await settlePageCommand();
+  assert.equal(harness.responses.at(-1).response.value.languages[0].isForcedNarrative, false);
+  assert.equal(harness.window.subpalPageScript.getDebugSnapshot().recentEvents.some(event =>
+    event.type === 'TIMED_TEXT_FORCED_FLAG_MISSING'), true);
+  const malformed = createPageHarness({ timedTextTracks: [{ bcp47: 'en', trackId: 'bad', isForcedNarrative: 'false' }] });
+  malformed.sendTyped(typedRequest('bad-forced', 'playback', 'available-languages', {}, typedContext));
+  await settlePageCommand();
+  assert.equal(malformed.responses.at(-1).response.error.code, 'invalid-language-response');
+});
+
+test('secondary selection and setter use one timed-text list snapshot even if later reads would expose forced tracks', async () => {
+  let reads = 0;
+  const full = { bcp47: 'ja', trackId: 'full', trackType: 'PRIMARY', rawTrackType: 'SUBTITLES', isForcedNarrative: false };
+  const harness = createPageHarness({ timedTextTracks: () => ++reads === 1 ? [full] :
+    [{ ...full, trackId: 'forced', isForcedNarrative: true }] });
+  harness.sendTyped(typedRequest('single-snapshot', 'playback', 'switch-secondary-language',
+    { languageCode: 'ja', excludedTrackIds: [] }, typedContext));
+  await new Promise(resolve => setImmediate(resolve));
+  await settlePageCommand();
+  assert.equal(harness.responses.at(-1).response.value?.language.trackId, 'full');
+  assert.equal(reads, 1);
+});
+
 test('Given typed Playback identity telemetry When the authoritative projection is checked Then matching movie and reasonable sessions mutate while true video or session mismatches stay stale', async () => {
   const expected = { videoId: '81234567', sessionId: typedContext.sessionId, epoch: 3 };
   const stale = { ok: false, error: { kind: 'stale-context', code: 'page-context-mismatch', retryable: false } };
@@ -612,7 +800,8 @@ test('Given typed Playback identity telemetry When the authoritative projection 
   const movieMatch = createPageHarness({ playerApiVideoId: null, movieId: expected.videoId });
   assert.deepEqual(await switchLanguage(movieMatch, 'typed-movie-match'), {
     ok: true,
-    value: { language: { code: 'en', name: 'English', trackId: 'track-en', trackType: 'PRIMARY', rawTrackType: null } }
+    value: { language: { code: 'en', name: 'English', trackId: 'track-en', trackType: 'PRIMARY', rawTrackType: null,
+      isNoneTrack: false, isForcedNarrative: false } }
   });
   assert.equal(movieMatch.window.subpalPageScript.getDebugSnapshot().playback.selectedSessionReason, 'watch-movie-id-match');
   assert.equal(movieMatch.trackMutations, 1);
@@ -620,7 +809,8 @@ test('Given typed Playback identity telemetry When the authoritative projection 
   const reasonableMatch = createPageHarness({ videoId: '99999999', playerApiVideoId: expected.videoId, movieId: '77777777' });
   assert.deepEqual(await switchLanguage(reasonableMatch, 'typed-reasonable-match'), {
     ok: true,
-    value: { language: { code: 'en', name: 'English', trackId: 'track-en', trackType: 'PRIMARY', rawTrackType: null } }
+    value: { language: { code: 'en', name: 'English', trackId: 'track-en', trackType: 'PRIMARY', rawTrackType: null,
+      isNoneTrack: false, isForcedNarrative: false } }
   });
   assert.equal(reasonableMatch.window.subpalPageScript.getDebugSnapshot().playback.selectedSessionReason, 'watch-reasonable-playback-state');
   assert.equal(reasonableMatch.trackMutations, 1);

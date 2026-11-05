@@ -4,7 +4,7 @@ import { createEnvelope, createPageTransport } from './private-transports.js';
 const OBJECT_CONSTRUCTOR_SOURCE = Function.prototype.toString.call(Object);
 const CONTEXT_KEYS = new Set(['videoId', 'sessionId', 'epoch']);
 const EMPTY_KEYS = new Set();
-const TRACK_KEYS = new Set(['code', 'name', 'trackId', 'trackType', 'rawTrackType']);
+const TRACK_KEYS = new Set(['code', 'name', 'trackId', 'trackType', 'rawTrackType', 'isNoneTrack', 'isForcedNarrative']);
 const SNAPSHOT_KEYS = new Set([
   'pageUrlVideoId', 'playerApiVideoId', 'movieId', 'selectedSessionId', 'selectedSessionReason',
   'sessionSelectionConfidence', 'currentTime', 'duration', 'currentTrack'
@@ -13,7 +13,9 @@ const VARIANTS = Object.freeze({
   'context-snapshot': { payloadKeys: EMPTY_KEYS, deadlineMs: 3000, contextBound: false },
   'available-languages': { payloadKeys: EMPTY_KEYS, deadlineMs: 3000, contextBound: true },
   'current-language': { payloadKeys: EMPTY_KEYS, deadlineMs: 3000, contextBound: true },
+  'original-language': { payloadKeys: EMPTY_KEYS, deadlineMs: 3000, contextBound: true },
   'switch-language': { payloadKeys: new Set(['languageCode']), deadlineMs: 10000, contextBound: true },
+  'switch-secondary-language': { payloadKeys: new Set(['languageCode', 'excludedTrackIds']), deadlineMs: 10000, contextBound: true },
   'switch-track': { payloadKeys: new Set(['trackId']), deadlineMs: 10000, contextBound: true },
   'jump-to-timecode': {
     payloadKeys: new Set(['targetTimestamp', 'controlId', 'requestId', 'issuedAt']),
@@ -87,6 +89,11 @@ function parsePayload(variant, value) {
   const payload = strictOwnRecord(value, VARIANTS[variant].payloadKeys, VARIANTS[variant].payloadKeys);
   if (!payload) return null;
   if (variant === 'switch-language' && !isNonEmptyString(payload.languageCode)) return null;
+  if (variant === 'switch-secondary-language') {
+    const ids = strictOwnArray(payload.excludedTrackIds);
+    if (!isNonEmptyString(payload.languageCode) || !ids || !ids.every(id =>
+      isNonEmptyString(id) || (Number.isInteger(id) && id >= 0))) return null;
+  }
   if (variant === 'switch-track' && !(isNonEmptyString(payload.trackId) ||
     (Number.isInteger(payload.trackId) && payload.trackId >= 0))) return null;
   if (variant === 'jump-to-timecode' &&
@@ -158,13 +165,16 @@ function projectTrack(value) {
   const track = strictOwnRecord(value, TRACK_KEYS, TRACK_KEYS);
   if (!track || !isControlledString(track.code) || !isControlledString(track.name) ||
     !(track.trackId === null || typeof track.trackId === 'string' || Number.isFinite(track.trackId)) ||
-    !isControlledString(track.trackType) || !isControlledString(track.rawTrackType)) return null;
+    !isControlledString(track.trackType) || !isControlledString(track.rawTrackType) ||
+    typeof track.isNoneTrack !== 'boolean' || typeof track.isForcedNarrative !== 'boolean') return null;
   return {
     code: track.code,
     name: track.name,
     trackId: track.trackId,
     trackType: track.trackType,
-    rawTrackType: track.rawTrackType
+    rawTrackType: track.rawTrackType,
+    isNoneTrack: track.isNoneTrack,
+    isForcedNarrative: track.isForcedNarrative
   };
 }
 
@@ -193,7 +203,33 @@ function projectSnapshot(value) {
   };
 }
 
+function isOriginalLanguageSet(baseLanguage, languages) {
+  if (!isNonEmptyString(baseLanguage) || !languages?.length || !languages.every(isNonEmptyString) ||
+    new Set(languages).size !== languages.length) return false;
+  try {
+    return languages.every(language => Intl.getCanonicalLocales(language)[0] === language &&
+      new Intl.Locale(language).language === baseLanguage);
+  } catch {
+    return false;
+  }
+}
+
 function projectSuccess(variant, value) {
+  if (variant === 'original-language') {
+    const outcome = strictOwnRecord(value, new Set(['originalLanguage']), new Set(['originalLanguage']));
+    const statusOnly = outcome && strictOwnRecord(outcome.originalLanguage,
+      new Set(['status', 'reason']), new Set(['status', 'reason']));
+    if ((statusOnly?.status === 'unknown' && statusOnly.reason === 'no-valid-native-audio-language') ||
+      (statusOnly?.status === 'ambiguous' && statusOnly.reason === 'multiple-native-audio-languages')) {
+      return ok({ variant, originalLanguage: statusOnly });
+    }
+    const originalLanguage = outcome && strictOwnRecord(outcome.originalLanguage,
+      new Set(['status', 'reason', 'baseLanguage', 'languages']), new Set(['status', 'reason', 'baseLanguage', 'languages']));
+    const languages = originalLanguage && strictOwnArray(originalLanguage.languages);
+    return originalLanguage?.status === 'resolved' && originalLanguage.reason === 'native-audio-language' &&
+      isOriginalLanguageSet(originalLanguage.baseLanguage, languages)
+      ? ok({ variant, originalLanguage: { ...originalLanguage, languages } }) : null;
+  }
   if (variant === 'context-snapshot') {
     const outcome = strictOwnRecord(value, new Set(['playback']), new Set(['playback']));
     const playback = outcome && projectSnapshot(outcome.playback);
@@ -205,7 +241,7 @@ function projectSuccess(variant, value) {
     const projected = languages?.map(projectTrack);
     return projected && projected.every(Boolean) ? ok({ variant, languages: projected }) : null;
   }
-  if (variant === 'current-language' || variant === 'switch-language' || variant === 'switch-track') {
+  if (variant === 'current-language' || variant === 'switch-language' || variant === 'switch-secondary-language' || variant === 'switch-track') {
     const outcome = strictOwnRecord(value, new Set(['language']), new Set(['language']));
     const language = outcome && projectLanguage(outcome.language);
     return language !== null || outcome?.language === null ? ok({ variant, language }) : null;

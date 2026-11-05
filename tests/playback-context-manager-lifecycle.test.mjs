@@ -103,7 +103,9 @@ function createSnapshot(videoId = '81234567') {
       name: 'English',
       trackId: 'track-en',
       trackType: 'PRIMARY',
-      rawTrackType: null
+      rawTrackType: null,
+      isNoneTrack: false,
+      isForcedNarrative: false
     }
   };
 }
@@ -117,6 +119,21 @@ function contextSnapshotResult(videoId) {
     }
   };
 }
+
+test('playback context preserves timed-text flags and the valid numeric zero track identity', async () => {
+  const { Manager, setPerform } = await loadManagerHarness();
+  const result = contextSnapshotResult();
+  result.value.playback.currentTrack.trackId = 0;
+  result.value.playback.currentTrack.isForcedNarrative = true;
+  setPerform(async () => result);
+  const manager = new Manager();
+  await manager.initialize();
+  const track = manager.getCurrentContext().currentTrack;
+  assert.equal(track.trackId, 0);
+  assert.equal(track.isNoneTrack, false);
+  assert.equal(track.isForcedNarrative, true);
+  manager.cleanup();
+});
 
 test('Given a normalized initial snapshot failure When an owned PlaybackContext retries Then it disposes the failed owner once and creates a fresh owner without duplicate handlers', async () => {
   const { Manager, handlers, playbackCalls, createdPlaybacks, setPerform, getPlaybackDisposals } = await loadManagerHarness();
