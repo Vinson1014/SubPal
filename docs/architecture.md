@@ -164,7 +164,7 @@ SubPal 採用 **多層架構設計**，以解決 Chrome Extension 與 Netflix �
 - `content.js` 與 `background.js` 共享 `subtitle-assistant-channel` port，private transport source 是 `subpal-content-script`，內容腳本只負責 private DOM request/response 的橋接，不直接碰 Netflix page context 的內部狀態。
 - `MAIN` world 只消費 content-local typed settings snapshot，`Content -> MAIN` 的 one-way projected `CONFIG_CHANGED` notification（`messageFromContentScript`），不直接讀 `chrome.storage.local`。
 - `settings-read/snapshot` 由 `content.js` 直連的 private DOM request/response 處理，不屬於 `PageIngress.accept()` 的 sealed route；`SettingsSnapshot` 只有 `read()` 與 `dispose()`，snapshot 只透過這條私有路徑回來。
-- `Playback` 走 page transport 的 `perform()`，支援 `context-snapshot`、`available-languages`、`current-language`、`switch-language`、`switch-track`、`jump-to-timecode`。
+- `Playback` 走 page transport 的 `perform()`，支援 `context-snapshot`、`available-languages`、`current-language`、`original-language`、`switch-language`、`switch-secondary-language`、`switch-track`、`jump-to-timecode`。
 - `Subtitles` 只暴露 `query()`，把 `replacement-subtitle-query` 綁到目前 playback context。
 - `Contributions` 暴露 `enqueue`、`getProjection` 與 `retry`，背景 owner 保持投票、翻譯與替換事件的持久化。
 - `GET_CROWDSOURCING_TASKS` 是 background 承接的 direct privileged crowdsourcing 例外，僅限 Netflix content script 且通過 sender、watch、videoID、limit、languageCode guard。
@@ -255,7 +255,7 @@ Messaging System 不提供 Page Script injection API. There is no generic public
 
 **核心 surface**:
 - `Playback.perform({ variant: 'context-snapshot' })` - 取得 strict `Result` 播放診斷快照
-- `available-languages`、`current-language`、`switch-language`、`switch-track`、`jump-to-timecode` - 僅限既有 caller 的 typed variant
+- `available-languages`、`current-language`、`original-language`、`switch-language`、`switch-secondary-language`、`switch-track`、`jump-to-timecode` - 僅限 typed variant；自動次要字幕的最小投影見下文
 
 #### 1.4 Config System（配置系統）
 
@@ -744,15 +744,15 @@ loadInterceptedSubtitles()
   → recordDefaultLanguage()
   → ensureLanguageAvailable(primaryLanguage, 'primary')
     → tryLoadLanguageFromCaches() (快取優先)
-    → refreshLanguageTrack() / switchLanguageAndWait() (切換或刷新字幕軌道)
+    → runNativeTrackWork() → refreshLanguageTrack() / switchLanguageAndWait()
     → waitForInterception() (等候 raw TTML 攔截事件)
     → parse & promote (解析並 promotion 到 active slot)
-  → ensureSecondaryLanguageAvailableOnce() (次要語言，含 idempotent 去重)
-  → restoreDefaultLanguage()
+  → ensureSecondaryLanguageAvailableOnce() (configured/effective、結構化選軌、去重)
+    → 必要的切軌工作持有自己的 native owner，等待與 finally restore 完成才釋放
 ```
 
 **B. Acquisition waiter 去重**:
-- `ensureSecondaryLanguageAvailableOnce()` 利用 `_secondaryAcquisitionInFlight` 確保同 videoId/epoch/language 只進行一次 secondary 軌道切換
+- `ensureSecondaryLanguageAvailableOnce()` 利用 `_secondaryAcquisitionInFlight` 確保同 resolution／target generation、videoId／sessionId／epoch／effective language／selected trackId 只進行一次 secondary 取得；promise 包含 finally restore
 - `acquisitionWaiters` Map 管理 pending waiter，支援超時清理
 
 **C. Epoch-based parsed cache invalidation**:
@@ -1189,7 +1189,9 @@ Playback.perform({ variant: 'context-snapshot', payload: {} })
 // - context-snapshot
 // - available-languages
 // - current-language
+// - original-language
 // - switch-language
+// - switch-secondary-language
 // - switch-track
 // - jump-to-timecode
 ```
@@ -1392,6 +1394,53 @@ function renderBilingualSubtitle(primary, secondary) {
 - Polski (pl)
 - Svenska (sv)
 
+#### 2.4 自動跟隨影片原始語言
+
+0.7.0 新增次要語言 `auto`。它是設定模式，不是語言碼；主要語言與 `SUPPORTED_LANGUAGES` 不接受它。新安裝預設 auto，既有已儲存的具體語言保持原值，不做 migration。備份 v3.0／v4.0 接受 auto，格式與精確 key 集合不變。
+
+```
+雙語開啟 + 可信 watch context
+  → original-language（唯讀、context-bound、精確空 payload）
+  → MAIN 讀取該 session 的 native 音軌，純函式解析 BCP47
+  → structured secondary selection（同手動模式）
+  → effective language + selected track identity
+  → track-specific cache → primary ready 後才允許必要的原生切軌 → TTML 攔截 → parse/promote
+  → ownership guard 通過才還原起始原生字幕軌
+  → readiness/render + best-effort runtime snapshot
+```
+
+**原始語言契約**：`original-language` 不回傳 raw audio list，只回傳 resolved／unknown／ambiguous 的最小語言投影與原因。只採 `isNative === true` 且合法 BCP47 的項目；同 base 的多個標籤算同一原始語言並保留全部標籤。沒有合法 native 為 unknown，不同 base 為 ambiguous；方法不存在、拋錯或能力不可用以既有 Result 失敗分類表示。不能用目前配音、第一條音軌、片名或帳戶語言猜測。不新增音軌 setter、Netflix endpoint 或直接字幕 fetch。
+
+**選軌契約**：先完整 BCP47 精確匹配，無命中時僅允許同 base 恰好一個不同字幕語言碼的 fallback；中文不推定繁簡、跨 script 不回退。排除 none／forced，依「PRIMARY + SUBTITLES 完整字幕 → CC（CLOSEDCAPTIONS／ASSISTIVE）→ 其他合格軌」排序，同級保留 Netflix 清單順序。選定軌失敗才依序試下一條並標記 CC／degraded，不能用同語言的其他 cache 冒充選定 trackId。forced 欄位缺少時 producer 補 false 並記錄事件，這是已知的排除能力退化。主要字幕既有選軌不變。
+
+**狀態權威**：configured 是使用者設定（auto／具體語言），effective 是實際 BCP47 或 null，selected track 保存 identity／品質，resolution 是以下七態及 reason。取得、cache、readiness 與 render 只用 effective；解析結果不寫回設定。primary／secondary 已知 trackId 時依 identity 判斷同軌；identity 不可得才比 canonical 完整語言碼。同軌為 ready／same-primary-track 的成功省略，不取得、不重複顯示、不報失敗；primary 改變時只重評抑制並復用 parsed cache，不重新解析或取得次要字幕。
+
+| 狀態／失敗 | 第二字幕與處理 |
+| --- | --- |
+| resolving | 清空舊目標，等待本 context 的解析／取得 |
+| ready | 顯示選定軌；同軌則有意省略，CC／degraded 附註品質 |
+| unknown／ambiguous | 不猜測、不回退手動語言，保留主要字幕 |
+| missing | 原始語言已知但無合格字幕，保留主要字幕 |
+| unavailable（字幕取得失敗） | 保留具體語言與取得失敗原因，不啟用手動 fallback |
+| unavailable（原始語言不可讀） | 只有不可重試 domain-rejected／original-language-unavailable 且同 context 的 available-languages 成功，才讀上次手動語言並沿同一選軌／取得管線回退 |
+| manual | 具體語言沿結構化選軌流程，不走原始語言解析 |
+
+timeout、斷線、stale、格式錯誤不授權手動 fallback。回退成功仍標示 isManualFallback，不假報已解析原始語言。DOM emergency／page-script 不可用時不產生第二字幕，維持主要／原生字幕退路。warning 沿既有 readiness 路徑，只在雙語 + auto 時每部影片每種原因最多一次。
+
+**生命週期與有限重試**：以 video／session／epoch／清單 revision 管理成功、負結果及 single-flight promise。最多含首次三次，僅既有 PLAYBACK_CONTEXT_POLLED（3 秒節奏）授權後續重試，不新增 timer；未 ready 的 primary defer 不耗額度。revision 只反映音軌／字幕清單內容，不含目前配音／字幕選取；暫時讀不到清單不重置額度。單純配音、口述影像或 primary 選取改變不重新解析／取得次要字幕；若 Netflix 同時改寫實際字幕清單（例如 forced 軌或完整軌 identity），仍依清單 revision 重新解析並優先復用 cache，不把它當成單純選取變更。雙語關閉不啟動工作；重開可沿用已完成 cache，但不能復活舊 pending 工作。
+
+換片先同步清除 secondary slot／index／meta／effective／選軌與舊 record，不因第二字幕失效清主要資料。不可變 invocation、resolution generation 與 target generation 阻擋晚到結果及 ABA；primary／secondary／legacy／DOM recovery 的整段 cache、setter、等待與 finally 共用原生切軌序列。setter 回應保存呼叫前的實際 target 投影，consumer 認領前再驗請求目標，不把 await 後的使用者軌當 owner。restore 使用原 expected context；關閉雙語雖撤銷取得，仍允許同 context／目標且 native identity 仍 owned 的 cleanup，讀取後及 setter 前再驗，避免覆寫使用者自行換軌。
+
+完成 auto cache 在 off/on 後須由新的合法取得／poll invocation 重授權並發布 ready，不重解析、下載或耗 retry；舊 pending publication 仍失效。DOM recovery 成功與 already-ready 一樣經共同成功 handler，取得入口回傳成功給 retry owner，不讓第三次成功仍永久快取先前 timeout。
+
+**偏好與狀態跨 world 邊界**：`subpalLastManualSecondaryLanguage` 是獨立 local 偏好（有效支援語言，預設 en），UI 在手動切 auto 前保存；MAIN 只能透過嚴格 `settings-read/last-manual-secondary-language` 空 payload 唯讀取得。`subpalSecondaryRuntimeStatus` 是另一個固定非設定 snapshot，含 videoId、effectiveLanguage、quality、status、reason、isManualFallback、updatedAt；兩者都不加入公開 schema、CONFIG_CHANGED 或備份。
+
+MAIN 的 `secondary-runtime-status/publish` 只傳最小 snapshot、context 與序號，isolated owner 僅寫固定鍵並產生 updatedAt。精確白名單、序列化寫入、route／video／session 再驗與 producer 世代 guard 防止晚到覆蓋；MAIN 與 isolated 的 epoch 不互相比較。popup／options 開啟及語言變更時 best-effort 讀取，以 textContent 顯示可讀語言、原因、同軌省略與回退來源，缺資料顯示 auto 設定標籤；auto 預覽使用說明性佔位文字。
+
+**多分頁限制**：這是最後已知狀態，不查 active tab、不保證即時或關片清除；多個 Netflix 分頁可顯示最後完成更新者。snapshot 不是字幕取得的權威來源，寫入／讀取失敗不阻止播放。
+
+原始語言解析與字幕選軌分別由 [`shared/original-language-resolver.js`](../shared/original-language-resolver.js) 與 [`shared/secondary-track-selection.js`](../shared/secondary-track-selection.js) 的純函式負責；執行狀態的嚴格投影與顯示由 [`shared/secondary-runtime-status.js`](../shared/secondary-runtime-status.js) 定義。
+
 ### 3. 離線隊列系統
 
 #### 3.1 設計目標
@@ -1518,8 +1567,8 @@ function renderBilingualSubtitle(primary, secondary) {
 - `remapRetiredBackendEndpoints()` 只改寫正規化後完全相等的 endpoint；帶路徑的變體（例如 `/v2`）不自動改寫。
 - 改寫時將 `jwt` 設為 `null`，由初始化註冊或既有的 401 自動刷新流程以相同 `userId` 重新註冊。
 - Remap 在 `buildBackendProfileMigration()` 內執行，因此 schema 升級與後續 reconciliation 都會套用，且重複執行為 no-op。
-- Client 不提供 endpoint fallback，避免 queue 與投票狀態在兩個 DB 之間 split-brain；本輪依使用者決策暫緩完整 rollback，接受後端短暫降級並直接修復。
-- Extension 版本更新與 worker 重啟不同：更新可能使既有 Netflix 分頁的 content-script context 失效，單純重新 `runtime.connect()` 不足以恢復。本輪公開 Netflix 頁實測需重新整理才能建立新的有效 context；不可承諾舊分頁無需重載，已登入播放情境仍待驗證。
+- Client 不提供 endpoint fallback，避免 queue 與投票狀態在兩個 DB 之間 split-brain；後端不可用時沿既有失敗與重試流程處理，不自動切換資料來源。
+- Extension 版本更新與 worker 重啟不同：更新可能使既有 Netflix 分頁的 content-script context 失效，單純重新 `runtime.connect()` 不足以恢復；需重新整理分頁以建立有效 context，不保證既有分頁能無重載恢復。
 
 ### 4. 用戶認證與 JWT 管理
 
@@ -1601,7 +1650,7 @@ function refreshJwtTokenOnce() {
 
 路由：`GET /crowdsourcing-tasks`
 
-本 worktree 可直接確認的是此 route 的呼叫方式、參數驗證與 response 消費方式；後端資料表、任務計算與排序邏輯不在本 repository 內。以下任務模型與來源規則是 SubPal 目前依賴的後端整合契約，不表示後端實作已由本文件驗證。
+本專案包含此 route 的呼叫方式、參數驗證與 response 消費方式；後端資料表、任務計算與排序邏輯不在此 repository 內。以下任務模型與來源規則是 SubPal 依賴的後端整合契約，不代表後端內部實作。
 
 查詢參數：
 
@@ -1737,7 +1786,7 @@ export const CONFIG_SCHEMA = {
   subtitle: {
     dualModeEnabled:   { type: 'boolean', default: true },
     primaryLanguage:   { type: 'string', default: 'zh-Hant' },
-    secondaryLanguage: { type: 'string', default: 'en' },
+    secondaryLanguage: { type: 'string', default: 'auto' },
 
     // 字幕樣式配置（層次結構）
     style: {

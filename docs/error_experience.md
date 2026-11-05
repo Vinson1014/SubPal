@@ -24,7 +24,8 @@
 - **不可違反規則**：需要 page globals 的字幕主流程留在 MAIN；privileged owner 與 transport 留在 isolated/background；live 證據必須證明 executing source、擴充版本與 execution world 都是新鮮的。
 - **常見錯誤做法**：把整個啟動圖移入 isolated、只驗 privileged transport、不重新取得 runtime handles，或把可讀取的 extension resource 當成正在執行的 worker source。
 - **必要驗證提醒**：完整重啟或可靠 reload 後取得 fresh handles，同時檢查 page-script 可見性、完整初始化、字幕呈現、安全邊界與舊 listener／訊息未殘留；無法證明新鮮度的結果應撤回。
-- **測試 Chrome 載入擴充的前置檢查**（2026-08 subtitle_scraper 實測）：CDP `Extensions.loadUnpacked` 回傳成功不代表擴充可用——profile 的 chrome://extensions「開發人員模式」關閉時 unpacked 擴充會被 Chrome 停用（顯示「開啟開發人員模式即可使用這項擴充功能」），需開啟後 `management.setEnabled` / `developerPrivate.reload`；module 型 page-script 的**整條 import 鏈**每個檔案都必須列進 `web_accessible_resources`，缺任何一個模組會讓 script tag 注入成功但 module 靜默不執行（load 事件不觸發、頁面無 console error），可用 `fetch(chrome-extension://<id>/<file>)` 逐檔驗證 200。
+- **切換 unpacked 路徑提醒**：同一 extension identity 從主 repo 切到 worktree 時，Chrome 重啟 + `Extensions.loadUnpacked` 與新 manifest version 仍不足以證明 worker imports 已更新。以 `Debugger.getScriptSource` 比對正在執行的 worker／import chain；若不符，可靠 reload 擴充再重建頁面與 handles，撤回重載前證據。勿以 resource 可讀或單一入口相符代替。
+- **測試 Chrome 載入擴充的前置檢查**：CDP `Extensions.loadUnpacked` 回傳成功不代表擴充可用——profile 的 chrome://extensions「開發人員模式」關閉時 unpacked 擴充會被 Chrome 停用（顯示「開啟開發人員模式即可使用這項擴充功能」），需開啟後 `management.setEnabled` / `developerPrivate.reload`；module 型 page-script 的**整條 import 鏈**每個檔案都必須列進 `web_accessible_resources`，缺任何一個模組會讓 script tag 注入成功但 module 靜默不執行（load 事件不觸發、頁面無 console error），可用 `fetch(chrome-extension://<id>/<file>)` 逐檔驗證 200。
 - **延伸事故**：[`mv3-execution-world-and-live-evidence.md`](incidents/mv3-execution-world-and-live-evidence.md)
 
 ## 片尾任務與視覺 QA
@@ -49,6 +50,11 @@
 - **不可違反規則**：epoch 只能由其 authority 判斷；核心 playback context 不得由 optional feature 擁有；coverage 與 cache data 由同一 coordinator 原子更新；跨 world 只傳必要的非敏感 generation／query 資訊。
 - **常見錯誤做法**：跨 realm 比較同名 epoch、由片尾 owner 初始化或 cleanup 共用 context、把 interval／Map／prefetch 分散管理，或把 retryable 當成 transport 自動重送授權。
 - **必要驗證提醒**：覆蓋功能關閉與 opt-out、初始化失敗重試、range union、並發上限、negative cache、冷卻、淘汰後 coverage、scope 切換與 late-response suppression；完整驗證 response 並以純文字呈現。
+- **context polling 重試提醒**：`PLAYBACK_CONTEXT_CHANGED` 在穩定 context 不發事件，不能拿它代替 poll。自動次要字幕的有限 retry 必須接既有 `PLAYBACK_CONTEXT_POLLED`，以實際 interval callback 驗證；清單 revision 不含目前配音／字幕選取，且讀取失敗不得當成清單變更重置額度。見[自動次要字幕架構](architecture.md#24-自動跟隨影片原始語言)。
+- **切軌還原 ownership**：原生切軌須序列化整段取得／等待／recovery／restore，不能只排 setter。page setter ack 必須在 setter 前保存不可變 actual target，consumer 認領前驗本次目標，不可用 await 後 current 冒充。finally 攜帶原 context 與 target，讀完 current 後再次驗 cleanup 授權且仍 owned 才還原；關雙語撤銷取得但不能遺留暫切軌，也不可放寬 context／target／使用者換軌 guard。換片撤銷舊 waiter，不清主要資料。見[自動次要字幕架構](architecture.md#24-自動跟隨影片原始語言)。
+- **同語言多軌提醒**：primary／secondary 必須各自判斷 promotion guard，不能用 primary-first `else if` 或 primary guard 提早 return 吞掉另一條軌。已知 trackId 優先於語言；同軌抑制需保留 parsed cache，驗證主要語言切換後可無重新取得地恢復。見[自動次要字幕架構](architecture.md#24-自動跟隨影片原始語言)。
+- **Runtime snapshot 提醒**：MAIN→isolated 發布不得跨 world 比較 epoch；擷取 immutable context，發送與排隊寫入前再驗 video/session/route，序號須跨同頁 producer 重建遞增。lazy import 後亦須比對 resolution／target 世代，不可復活 off/on 前的 pending ready；同 context 完成 cache 則須由 fresh acquisition／poll invocation 重授權並發布，不重解析或耗額度，publisher 不管理世代。被 transition 擋下不可留下成功去重鍵；fallback／同軌成功須保留來源旗標。見[自動次要字幕架構](architecture.md#24-自動跟隨影片原始語言)。
+- **已就緒成功路徑提醒**：Netflix 可在 primary defer 後先攔截完成第二字幕；`already-ready` 與 DOM recovery 都須經共同成功結果處理器更新 resolution／runtime snapshot。recovery 成功必須回傳成功給 retry owner，不可再快取前一次 timeout，尤其第三次成功後多次 poll 仍須 ready。以 VM capture→取得入口驗 ready、發布與 render，不只驗 slot count。
 - **延伸事故**：[`subtitle-fetch-coordination.md`](incidents/subtitle-fetch-coordination.md)
 
 文件本身的維護契約與提案邊界另見 [`documentation-contracts.md`](incidents/documentation-contracts.md)。
