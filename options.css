@@ -373,7 +373,7 @@ body {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: var(--spacing-md);
-  align-items: end;
+  align-items: start;
 }
 
 .select-wrapper {
@@ -386,6 +386,13 @@ body {
   font-size: 0.85rem;
   color: var(--color-text-secondary);
   white-space: nowrap;
+}
+
+#secondaryRuntimeStatus {
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .select-wrapper select {

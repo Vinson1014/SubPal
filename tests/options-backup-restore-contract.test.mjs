@@ -3,9 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import * as secondaryPreference from '../shared/secondary-language-preference.js';
+import * as runtimeStatus from '../shared/secondary-runtime-status.js';
 
 const BACKUP_ROOTS = ['debugMode', 'isEnabled', 'crowdsourcing', 'subtitle'];
-const PROTECTED_KEYS = ['backendProfiles', 'voteQueue', 'translationHistory', 'user', 'jwt', secondaryPreference.LAST_MANUAL_SECONDARY_LANGUAGE_KEY];
+const PROTECTED_KEYS = ['backendProfiles', 'voteQueue', 'translationHistory', 'user', 'jwt', secondaryPreference.LAST_MANUAL_SECONDARY_LANGUAGE_KEY, runtimeStatus.SECONDARY_RUNTIME_STATUS_KEY];
 
 function clone(value) {
   return structuredClone(value);
@@ -56,6 +57,8 @@ function canonicalEnvelope(schema, overrides = {}) {
 function protectedStorage() {
   return {
     [secondaryPreference.LAST_MANUAL_SECONDARY_LANGUAGE_KEY]: 'ja',
+    [runtimeStatus.SECONDARY_RUNTIME_STATUS_KEY]: { videoId: '801', effectiveLanguage: 'ja',
+      quality: { isCC: false, degraded: false }, status: 'ready', reason: 'same-primary-track', isManualFallback: false, updatedAt: 1 },
     debugMode: false,
     subtitle: { dualModeEnabled: true, secretUnknownSubtitleValue: 'subtitle-secret' },
     backendProfiles: {
@@ -179,6 +182,11 @@ async function loadOptionsBackupHarness({ initialStorage = protectedStorage() } 
   }, { context });
   await preferenceModule.link(() => { throw new Error('Unexpected preference dependency'); });
   await preferenceModule.evaluate();
+  const runtimeModule = new vm.SyntheticModule(Object.keys(runtimeStatus), function initialize() {
+    for (const [name, value] of Object.entries(runtimeStatus)) this.setExport(name, value);
+  }, { context });
+  await runtimeModule.link(() => { throw new Error('Unexpected runtime dependency'); });
+  await runtimeModule.evaluate();
   const optionsModule = new vm.SourceTextModule(source, {
     context,
     identifier: 'options.js',
@@ -191,6 +199,7 @@ async function loadOptionsBackupHarness({ initialStorage = protectedStorage() } 
     if (specifier === './content/system/config/config-schema.js') return schemaModule;
     if (specifier === './shared/subtitle-preview-renderer.js') return previewModule;
     if (specifier === './shared/secondary-language-preference.js') return preferenceModule;
+    if (specifier === './shared/secondary-runtime-status.js') return runtimeModule;
     throw new Error(`Unexpected static import: ${specifier}`);
   });
   await optionsModule.evaluate();

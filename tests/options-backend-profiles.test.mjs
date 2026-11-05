@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import * as secondaryPreference from '../shared/secondary-language-preference.js';
+import * as runtimeStatus from '../shared/secondary-runtime-status.js';
 
 const root = new URL('../', import.meta.url);
 
@@ -423,6 +424,11 @@ async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles,
     }
   });
   await module.link(specifier => {
+    if (specifier === './shared/secondary-runtime-status.js') {
+      return new vm.SyntheticModule(Object.keys(runtimeStatus), function initialize() {
+        for (const [name, value] of Object.entries(runtimeStatus)) this.setExport(name, value);
+      }, { context });
+    }
     if (specifier === './shared/secondary-language-preference.js') {
       return new vm.SyntheticModule(Object.keys(secondaryPreference), function initialize() {
         for (const [name, value] of Object.entries(secondaryPreference)) this.setExport(name, value);

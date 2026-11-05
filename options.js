@@ -16,6 +16,7 @@ import {
   renderSubtitlePreview
 } from './shared/subtitle-preview-renderer.js';
 import { createSecondaryLanguagePreference, renderLastManualSecondaryLanguage } from './shared/secondary-language-preference.js';
+import { updateSecondaryRuntimeStatus } from './shared/secondary-runtime-status.js';
 
 // ==================== 配置管理 ====================
 
@@ -226,6 +227,7 @@ async function restoreOptionsUI() {
     if (secondaryLanguageSelect) {
       secondaryLanguageSelect.value = config['subtitle.secondaryLanguage'];
       await updateLastManualLanguage(config['subtitle.secondaryLanguage']);
+      await updateSecondaryRuntimeStatus(document.getElementById('secondaryRuntimeStatus'), config['subtitle.secondaryLanguage'], chrome.storage.local);
     }
 
     // 字幕外觀模式
@@ -594,6 +596,7 @@ function setupEventListeners() {
         value => saveConfig('subtitle.secondaryLanguage', value));
       secondaryLanguageSelect.value = language;
       await updateLastManualLanguage(language);
+      await updateSecondaryRuntimeStatus(document.getElementById('secondaryRuntimeStatus'), language, chrome.storage.local);
       updatePreviewFromControls();
     });
   }

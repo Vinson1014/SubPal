@@ -2,6 +2,7 @@
 import { configManager } from './content/system/config/config-manager.js';
 import { SUPPORTED_LANGUAGES } from './content/system/config/config-schema.js';
 import { createSecondaryLanguagePreference, renderLastManualSecondaryLanguage } from './shared/secondary-language-preference.js';
+import { updateSecondaryRuntimeStatus } from './shared/secondary-runtime-status.js';
 
 let isEnabled = true;
 let activeProfileUserMask = '--';
@@ -256,6 +257,7 @@ async function initSubtitleCard() {
     if (fontSizeSlider) fontSizeSlider.value = fontSize;
     if (fontSizeValue) fontSizeValue.textContent = `${fontSize}px`;
     await updateLastManualLanguage();
+    await updateSecondaryRuntimeStatus(document.getElementById('popup-secondary-runtime-status'), secondaryLang, chrome.storage.local);
 }
 
 /**
@@ -340,6 +342,7 @@ function setupSubtitleCardListeners() {
                     value => configManager.set('subtitle.secondaryLanguage', value));
                 secondarySelect.value = language;
                 await updateLastManualLanguage();
+                await updateSecondaryRuntimeStatus(document.getElementById('popup-secondary-runtime-status'), language, chrome.storage.local);
                 const langName = language === 'auto' ? '自動（跟隨影片原始語言）' :
                     SUPPORTED_LANGUAGES.find(l => l.code === language)?.name || language;
                 showToast(`次要語言: ${langName}`);
@@ -403,6 +406,7 @@ function setupSubtitleCardListeners() {
             secondarySelect.value = newValue;
         }
         void updateLastManualLanguage();
+        void updateSecondaryRuntimeStatus(document.getElementById('popup-secondary-runtime-status'), newValue, chrome.storage.local);
     });
 
     configManager.subscribe('subtitle.style.primary.fontSize', (_key, newValue) => {

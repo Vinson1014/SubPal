@@ -31,6 +31,7 @@
   let contributionsCapabilityPromise = null;
   let subtitleQueryCapabilityPromise = null;
   let settingsCapabilityPromise = null;
+  let secondaryRuntimeStatusOwnerPromise = null;
   let publicConfigKeys = new Set();
   let subtitleSourceGeneration = 0;
 
@@ -351,7 +352,8 @@
       }
       if (category?.value === 'page-observation' || category?.value === 'subtitle-query' ||
           category?.value === 'contribution-intent' || category?.value === 'contribution-read' ||
-          category?.value === 'settings-change' || category?.value === 'settings-read') {
+          category?.value === 'settings-change' || category?.value === 'settings-read' ||
+          category?.value === 'secondary-runtime-status') {
         return { input: message, category: category.value, type: type.value, authorityEscalated };
       }
       if (type.value !== 'VIDEO_ID_CHANGED') {
@@ -410,6 +412,37 @@
     } catch {
       respondToPageObservation(messageId, {
         ok: false, error: { kind: 'disconnected', code: 'last-manual-secondary-language-unavailable', retryable: true }
+      });
+    }
+  }
+
+  async function publishSecondaryRuntimeStatus(messageId, observation) {
+    if (observation.authorityEscalated) {
+      respondToPageObservation(messageId, terminalIngressFailure(true).terminal);
+      return;
+    }
+    try {
+      if (!secondaryRuntimeStatusOwnerPromise) {
+        secondaryRuntimeStatusOwnerPromise = Promise.all([
+          import(chrome.runtime.getURL('content/system/capabilities/secondary-runtime-status.js')),
+          ensureIsolatedPlaybackContextManager()
+        ]).then(([{ createSecondaryRuntimeStatusOwner }, manager]) => createSecondaryRuntimeStatusOwner({
+          storage: chrome.storage.local,
+          getCurrentContext: () => {
+            const context = manager.getCurrentContext();
+            const routeVideoId = window.location.pathname.match(/^\/watch\/(\d+)(?:\/|$)/)?.[1];
+            return routeVideoId === context.videoId ? context : null;
+          }
+        })).catch(error => {
+          secondaryRuntimeStatusOwnerPromise = null;
+          throw error;
+        });
+      }
+      const owner = await secondaryRuntimeStatusOwnerPromise;
+      respondToPageObservation(messageId, await owner.publish(observation.input));
+    } catch {
+      respondToPageObservation(messageId, {
+        ok: false, error: { kind: 'disconnected', code: 'secondary-runtime-status-unavailable', retryable: true }
       });
     }
   }
@@ -504,6 +537,11 @@
       return;
     }
     debugLog('Received from page:', messageId, rawMessage);
+
+    if (pageIngressMessage.category === 'secondary-runtime-status') {
+      void publishSecondaryRuntimeStatus(messageId, pageIngressMessage);
+      return;
+    }
 
     if (pageIngressMessage.category === 'settings-read') {
       if (ownDataProperty(rawMessage, 'variant')?.value === 'last-manual-secondary-language') {

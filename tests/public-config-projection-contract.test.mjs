@@ -4,6 +4,8 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 import { createSecondaryLanguagePreference, LAST_MANUAL_SECONDARY_LANGUAGE_KEY } from '../shared/secondary-language-preference.js';
 import { parseLastManualSecondaryLanguageRequest } from '../content/system/capabilities/secondary-language-preference.js';
+import { createSecondaryRuntimeStatusOwner } from '../content/system/capabilities/secondary-runtime-status.js';
+import { SECONDARY_RUNTIME_STATUS_KEY } from '../shared/secondary-runtime-status.js';
 
 function plain(value) { return value === undefined ? undefined : JSON.parse(JSON.stringify(value)); }
 
@@ -27,8 +29,11 @@ async function createContentHarness(initialConfig, lastManual = 'ja') {
   const bridgeEvents = [];
   const responses = [];
   const subscriptions = [];
+  const storageWrites = [];
+  const currentContext = { videoId: '801', sessionId: 'watch-801', epoch: 99, state: 'ready' };
   let config = initialConfig;
   const window = {
+    location: { pathname: '/watch/801' },
     addEventListener(type, listener) {
       const registered = listeners.get(type) ?? new Set();
       registered.add(listener);
@@ -66,12 +71,16 @@ async function createContentHarness(initialConfig, lastManual = 'ja') {
         connect() { return { postMessage() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }; },
         getURL(path) { return `chrome-extension://test/${path}`; }
       },
-      storage: { local: { async get() { return { [LAST_MANUAL_SECONDARY_LANGUAGE_KEY]: lastManual }; } } }
+      storage: { local: {
+        async get() { return { [LAST_MANUAL_SECONDARY_LANGUAGE_KEY]: lastManual }; },
+        async set(items) { storageWrites.push(plain(items)); }
+      } }
     }
   });
   const modules = {
     preference: await createModule(context, 'secondary-language-preference.js', { createSecondaryLanguagePreference }),
     preferenceCapability: await createModule(context, 'preference-capability.js', { parseLastManualSecondaryLanguageRequest }),
+    runtimeStatus: await createModule(context, 'runtime-status-capability.js', { createSecondaryRuntimeStatusOwner }),
     config: await createModule(context, 'config-manager.js', {
       ConfigManager: class ConfigManager {
         async initialize() {}
@@ -85,7 +94,9 @@ async function createContentHarness(initialConfig, lastManual = 'ja') {
     }),
     messaging: await createModule(context, 'messaging.js', { initMessaging: async () => {} }),
     isolated: await createModule(context, 'isolated-endscreen-tasks.js', { startIsolatedEndscreenTasks: async () => {} }),
-    playback: await createModule(context, 'playback-context-manager.js', { playbackContextManager: {} }),
+    playback: await createModule(context, 'playback-context-manager.js', { playbackContextManager: {
+      async initialize() {}, getCurrentContext: () => currentContext
+    } }),
     transports: await createModule(context, 'private-transports.js', {
       createEnvelope: (value) => value,
       createPortTransport: ({ connect }) => ({ start: connect, request: async () => ({ ok: false }) })
@@ -95,6 +106,7 @@ async function createContentHarness(initialConfig, lastManual = 'ja') {
   const script = new vm.Script(source, {
     importModuleDynamically(specifier) {
       if (specifier.endsWith('capabilities/secondary-language-preference.js')) return modules.preferenceCapability;
+      if (specifier.endsWith('capabilities/secondary-runtime-status.js')) return modules.runtimeStatus;
       if (specifier.endsWith('shared/secondary-language-preference.js')) return modules.preference;
       if (specifier.endsWith('config-manager.js')) return modules.config;
       if (specifier.endsWith('config-schema.js')) return modules.schema;
@@ -111,11 +123,19 @@ async function createContentHarness(initialConfig, lastManual = 'ja') {
   assert.ok(publicSubscription, 'content must capture the ConfigManager public subscription callback');
   return {
     bridgeEvents,
+    storageWrites,
+    currentContext,
+    pageLocation: window.location,
     emitChange(key, newValue, oldValue) { publicSubscription.callback(key, newValue, oldValue); },
     failChange() {},
     getConfig: () => config,
     async readLastManual(message = { category: 'settings-read', variant: 'last-manual-secondary-language', payload: {} }) {
       window.dispatchEvent(new context.CustomEvent('messageToContentScript', { detail: { messageId: 'last-manual', message } }));
+      await settle();
+      return responses.at(-1)?.response;
+    },
+    async publishRuntime(message) {
+      window.dispatchEvent(new context.CustomEvent('messageToContentScript', { detail: { messageId: 'runtime-status', message } }));
       await settle();
       return responses.at(-1)?.response;
     },
@@ -158,6 +178,34 @@ test('Given a public settings snapshot When legacy authority and unknown config 
       }
     }
   });
+});
+
+test('isolated runtime route writes only its fixed snapshot and never changes public settings or preference capability', async () => {
+  const harness = await createContentHarness({ debugMode: false });
+  const snapshot = { videoId: '801', effectiveLanguage: 'ja', quality: { isCC: false, degraded: false },
+    status: 'ready', reason: 'same-primary-track', isManualFallback: false, updatedAt: 1 };
+  const request = { category: 'secondary-runtime-status', variant: 'publish', payload: {
+    context: { videoId: '801', sessionId: 'watch-801', epoch: 1 }, sequence: 1, snapshot
+  } };
+  assert.deepEqual(plain(await harness.publishRuntime(request)), { ok: true, value: { published: true } });
+  assert.equal(harness.storageWrites.length, 1);
+  assert.deepEqual(Object.keys(harness.storageWrites[0]), [SECONDARY_RUNTIME_STATUS_KEY]);
+  assert.equal(harness.storageWrites[0][SECONDARY_RUNTIME_STATUS_KEY].reason, 'same-primary-track');
+  assert.equal(Object.hasOwn((await harness.requestSnapshot()).response.value, SECONDARY_RUNTIME_STATUS_KEY), false);
+  harness.emitChange(SECONDARY_RUNTIME_STATUS_KEY, snapshot, null);
+  assert.deepEqual(harness.bridgeEvents, []);
+  assert.deepEqual(plain(await harness.readLastManual()), { ok: true, value: { language: 'ja' } });
+  for (const input of [{ ...request, storage: 'JWT' }, { ...request, payload: { ...request.payload, key: 'JWT' } }]) {
+    assert.equal((await harness.publishRuntime(input)).ok, false);
+  }
+  harness.currentContext.videoId = '802';
+  assert.equal((await harness.publishRuntime({ ...request, payload: { ...request.payload, sequence: 2 } })).ok, false);
+  assert.equal(harness.storageWrites.length, 1);
+  harness.currentContext.videoId = '801';
+  harness.pageLocation.pathname = '/watch/802';
+  assert.equal((await harness.publishRuntime({ ...request, payload: { ...request.payload, sequence: 3 } })).ok, false,
+    'route drift must reject an old request even if isolated context polling still points at the old video');
+  assert.equal(harness.storageWrites.length, 1);
 });
 
 test('isolated preference bridge returns only the validated last manual language, outside settings snapshots and notifications', async () => {

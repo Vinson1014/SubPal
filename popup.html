@@ -336,6 +336,24 @@
         .secondary-language-row {
             transition: all var(--transition-normal);
             overflow: hidden;
+            align-items: flex-start;
+        }
+
+        .secondary-language-row > .language-label {
+            padding-top: 8px;
+        }
+
+        .secondary-language-row .language-select-wrapper::after {
+            top: 18px;
+        }
+
+        #popup-secondary-runtime-status {
+            display: block;
+            margin-top: 6px;
+            color: var(--color-gray);
+            font-size: 0.8em;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
         }
 
         .secondary-language-row.hidden {
@@ -347,7 +365,7 @@
 
         .secondary-language-row:not(.hidden) {
             opacity: 1;
-            max-height: 50px;
+            max-height: none;
         }
 
         /* 字幕大小控制 */
@@ -633,6 +651,7 @@
                         <!-- 由 JS 動態填充 -->
                     </select>
                     <small id="popup-last-manual-language" hidden></small>
+                    <small id="popup-secondary-runtime-status" role="status" aria-live="polite" title="播放狀態僅供參考；多個 Netflix 分頁時顯示最後更新的狀態。"></small>
                 </div>
             </div>
         </div>

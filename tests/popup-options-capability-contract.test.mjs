@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import * as secondaryPreference from '../shared/secondary-language-preference.js';
+import * as runtimeStatus from '../shared/secondary-runtime-status.js';
 
 const root = new URL('../', import.meta.url);
 
@@ -38,10 +39,10 @@ function statsResult(points = 5) {
   };
 }
 
-async function loadPopupHarness({ automaticResponse, secondaryLanguage = 'en', lastManual } = {}) {
+async function loadPopupHarness({ automaticResponse, secondaryLanguage = 'en', lastManual, snapshot } = {}) {
   const elements = new Map([
     'profile-user-id', 'score', 'contrib-count', 'replace-count', 'translation-views', 'upvotes-received',
-    'success-toast', 'mainToggle', 'settings-btn', 'popup-primary-lang', 'popup-secondary-lang', 'popup-last-manual-language'
+    'success-toast', 'mainToggle', 'settings-btn', 'popup-primary-lang', 'popup-secondary-lang', 'popup-last-manual-language', 'popup-secondary-runtime-status'
   ].map((id) => [id, createElement()]));
   const documentListeners = new Map();
   const runtimeMessages = [];
@@ -52,6 +53,7 @@ async function loadPopupHarness({ automaticResponse, secondaryLanguage = 'en', l
   const configGets = [];
   const configWrites = [];
   const privateStorage = { [secondaryPreference.LAST_MANUAL_SECONDARY_LANGUAGE_KEY]: lastManual };
+  privateStorage[runtimeStatus.SECONDARY_RUNTIME_STATUS_KEY] = snapshot;
   const configManager = {
     isInitialized: true,
     get(key) {
@@ -110,6 +112,11 @@ async function loadPopupHarness({ automaticResponse, secondaryLanguage = 'en', l
   const preferenceModule = new vm.SyntheticModule(Object.keys(secondaryPreference), function initialize() {
     for (const [name, value] of Object.entries(secondaryPreference)) this.setExport(name, value);
   }, { context, identifier: 'secondary-language-preference.js' });
+  const runtimeModule = new vm.SyntheticModule(Object.keys(runtimeStatus), function initialize() {
+    for (const [name, value] of Object.entries(runtimeStatus)) this.setExport(name, value);
+  }, { context, identifier: 'secondary-runtime-status.js' });
+  await runtimeModule.link(() => { throw new Error('Unexpected runtime dependency'); });
+  await runtimeModule.evaluate();
   await preferenceModule.link(() => { throw new Error('Unexpected preference dependency'); });
   await preferenceModule.evaluate();
   await configModule.link(() => { throw new Error('Unexpected config dependency'); });
@@ -118,6 +125,7 @@ async function loadPopupHarness({ automaticResponse, secondaryLanguage = 'en', l
     if (specifier.endsWith('config-manager.js')) return configModule;
     if (specifier.endsWith('config-schema.js')) return schemaModule;
     if (specifier.endsWith('secondary-language-preference.js')) return preferenceModule;
+    if (specifier.endsWith('secondary-runtime-status.js')) return runtimeModule;
     throw new Error(`Unexpected popup dependency: ${specifier}`);
   });
   await configModule.evaluate();
@@ -155,6 +163,21 @@ test('Given popup language controls When secondary auto is selected Then only se
   await secondary.listener('change')({ target: secondary });
   assert.deepEqual(popup.configWrites, [{ key: 'subtitle.secondaryLanguage', value: 'auto' }]);
   assert.equal(popup.elements.get('success-toast').textContent, '次要語言: 自動（跟隨影片原始語言）');
+});
+
+test('popup reads runtime status on open, preserves last-manual hint and falls back to auto label without runtime data', async () => {
+  const popup = await loadPopupHarness({ automaticResponse: statsResult(), secondaryLanguage: 'auto', lastManual: 'ja', snapshot: {
+    videoId: '801', effectiveLanguage: 'ja', quality: { isCC: true, degraded: true },
+    status: 'ready', reason: 'same-primary-track', isManualFallback: false, updatedAt: 1
+  } });
+  assert.equal(popup.elements.get('popup-secondary-runtime-status').textContent, '自動：日本語（CC、降級、與主要字幕同軌，已省略）');
+  assert.equal(popup.elements.get('popup-last-manual-language').textContent, '上次手動語言：日本語');
+  const fresh = await loadPopupHarness({ automaticResponse: statsResult(), secondaryLanguage: 'auto' });
+  assert.equal(fresh.elements.get('popup-secondary-runtime-status').textContent, '自動（跟隨影片原始語言）');
+  const select = fresh.elements.get('popup-secondary-lang');
+  select.value = 'ja';
+  await select.listener('change')({ target: select });
+  assert.equal(fresh.elements.get('popup-secondary-runtime-status').textContent, '手動：日本語');
 });
 
 test('popup remembers Japanese before auto, shows readonly preference, restores manual and honors explicit language choices', async () => {

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import { createSecondaryLanguagePreference, renderLastManualSecondaryLanguage, LAST_MANUAL_SECONDARY_LANGUAGE_KEY } from '../shared/secondary-language-preference.js';
+import { updateSecondaryRuntimeStatus, SECONDARY_RUNTIME_STATUS_KEY } from '../shared/secondary-runtime-status.js';
 
 const DEFAULT_CONFIG = {
   debugMode: false,
@@ -132,7 +133,7 @@ function deepMerge(existing, updates) {
 function createElementMap() {
   const ids = [
     'debugModeCheckbox', 'endscreenTasksEnabledCheckbox', 'apiBaseUrlInput',
-    'singleMode', 'dualMode', 'primaryLanguageSelect', 'secondaryLanguageSelect', 'lastManualSecondaryLanguage',
+    'singleMode', 'dualMode', 'primaryLanguageSelect', 'secondaryLanguageSelect', 'lastManualSecondaryLanguage', 'secondaryRuntimeStatus',
     'subtitleStyleMode', 'subtitleFontPreset', 'fontPresetControl',
     'primaryPreview', 'secondaryPreview', 'secondaryLanguageGroup', 'secondaryStyleSection'
   ];
@@ -159,10 +160,12 @@ async function loadOptionsHarness({ storage = {} } = {}) {
     .replace(/import\s+\{[\s\S]*?getDefaultValues\s*\}\s+from\s+'\.\/content\/system\/config\/config-schema\.js';\n/, '')
     .replace(/import\s+\{[\s\S]*?renderSubtitlePreview\s*\}\s+from\s+'\.\/shared\/subtitle-preview-renderer\.js';\n/, '')
     .replace(/import \{ createSecondaryLanguagePreference, renderLastManualSecondaryLanguage \} from '.\/shared\/secondary-language-preference.js';\n/, '')
+    .replace(/import \{ updateSecondaryRuntimeStatus \} from '.\/shared\/secondary-runtime-status.js';\n/, '')
     .concat('\nglobalThis.__optionsApi = { restoreOptionsUI, updateStyleControls, getPreviewConfigFromControls, setupStyleControlListeners, resetStyles, populateLanguageSelects, setupEventListeners };\n');
 
   const context = vm.createContext({
     createSecondaryLanguagePreference, renderLastManualSecondaryLanguage,
+    updateSecondaryRuntimeStatus,
     console: { log() {}, error() {} },
     confirm: () => true,
     Option: class { constructor(text, value) { this.text = text; this.value = value; } },
@@ -198,6 +201,21 @@ async function loadOptionsHarness({ storage = {} } = {}) {
 
   return { api: context.__optionsApi, elements, previewCalls, setCalls, stored };
 }
+
+test('options reads best-effort runtime status on restore without writing configuration or replacing the manual hint', async () => {
+  const harness = await loadOptionsHarness({ storage: {
+    subtitle: { secondaryLanguage: 'auto', dualModeEnabled: true }, [LAST_MANUAL_SECONDARY_LANGUAGE_KEY]: 'ja',
+    [SECONDARY_RUNTIME_STATUS_KEY]: { videoId: '801', effectiveLanguage: 'da', quality: { isCC: true, degraded: false },
+      status: 'ready', reason: 'last-manual-subtitles-ready', isManualFallback: true, updatedAt: 1 }
+  } });
+  await harness.api.restoreOptionsUI();
+  assert.equal(harness.elements.secondaryRuntimeStatus.textContent, '自動：目前無法讀取原始語言；使用上次手動語言：da（CC）');
+  assert.equal(harness.elements.lastManualSecondaryLanguage.textContent, '上次手動語言：日本語');
+  assert.equal(harness.setCalls.length, 0);
+  const fresh = await loadOptionsHarness({ storage: { subtitle: { secondaryLanguage: 'auto' } } });
+  await fresh.api.restoreOptionsUI();
+  assert.equal(fresh.elements.secondaryRuntimeStatus.textContent, '自動（跟隨影片原始語言）');
+});
 
 test('Given options language controls When selecting auto Then only secondary offers the mode and saves auto while preserving stored siblings', async () => {
   const { api, elements, stored } = await loadOptionsHarness({ storage: { subtitle: { primaryLanguage: 'en', secondaryLanguage: 'en' } } });
