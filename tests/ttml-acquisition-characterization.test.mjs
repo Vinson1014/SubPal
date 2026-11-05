@@ -45,13 +45,14 @@ async function createSyntheticModule(context, identifier, exports) {
   return module;
 }
 
-async function createTTMLHarness({ prepareSecondary = true } = {}) {
+async function createTTMLHarness({ prepareSecondary = true, domSample = null, domMatchResult = null } = {}) {
   let context = createPlaybackContext('episode-A', 1);
   const rawCache = new Map();
   const rendered = [];
   const genericPageRpcCalls = [];
   const playbackCalls = [];
   const matcherOptions = [];
+  const matcherLanguages = [];
   const ingressInstances = [];
   const eventListeners = new Map();
   const track = {
@@ -144,8 +145,11 @@ async function createTTMLHarness({ prepareSecondary = true } = {}) {
       startWatching() { return true; }
       stopWatching() {}
       isWatching() { return false; }
-      collectDOMSample() { return null; }
-      async runMatchOnce() {
+      getDebugInfo() { return {}; }
+      collectDOMSample() { return domSample; }
+      async runMatchOnce(language) {
+        matcherLanguages.push(language);
+        if (domMatchResult) return domMatchResult;
         const rawPool = await this.options.readRawPool();
         return { matched: false, failureReason: rawPool.ok ? 'no-match' : 'raw-pool-unavailable', allResults: [] };
       }
@@ -219,16 +223,17 @@ async function createTTMLHarness({ prepareSecondary = true } = {}) {
 
   const interceptor = new module.namespace.SubtitleInterceptor();
   interceptor.primaryLanguage = 'zh-Hant';
-  interceptor.secondaryLanguage = 'en';
+  interceptor.applyConfiguredSecondaryLanguage('en');
   interceptor.dualSubtitleEnabled = true;
   if (prepareSecondary) {
-    await interceptor.prepareSecondaryTrack('en');
+    await interceptor.prepareSecondaryTrack();
     playbackCalls.length = 0;
   }
   interceptor.onSubtitleDetected(output => {
     rendered.push({
       primaryText: output.dualSubtitle.primaryText,
-      secondaryText: output.dualSubtitle.secondaryText
+      secondaryText: output.dualSubtitle.secondaryText,
+      secondaryLanguage: output.dualSubtitle.secondaryLanguage
     });
   });
 
@@ -282,6 +287,9 @@ async function createTTMLHarness({ prepareSecondary = true } = {}) {
     matcherOptions() {
       return matcherOptions;
     },
+    matcherLanguages() {
+      return matcherLanguages;
+    },
     ingressInstances() {
       return ingressInstances;
     },
@@ -310,6 +318,227 @@ function captureActiveEpisode(harness, videoId, label, requestTime) {
   return { primaryCacheKey, secondaryCacheKey };
 }
 
+test('auto secondary resolves Japanese original language into the selected full track, cache and render without persisting inferred settings', async () => {
+  const harness = await createTTMLHarness({ prepareSecondary: false });
+  const interceptor = harness.interceptor();
+  const writes = [];
+  interceptor.configBridge = { async setSubtitleLanguages(...languages) { writes.push(languages); } };
+  await interceptor.setLanguages('zh-Hant', 'auto');
+  const full = { code: 'ja', trackId: 'ja-full', trackType: 'PRIMARY', rawTrackType: 'SUBTITLES',
+    isNoneTrack: false, isForcedNarrative: false };
+  harness.setPlaybackResult('original-language', { ok: true, value: { variant: 'original-language',
+    originalLanguage: { status: 'resolved', reason: 'native-audio-language', baseLanguage: 'ja', languages: ['ja'] } } });
+  harness.setPlaybackResult('available-languages', { ok: true, value: { variant: 'available-languages', languages: [
+    { ...full, trackId: 'ja-forced', isForcedNarrative: true },
+    { ...full, trackId: 'ja-none', isNoneTrack: true },
+    { ...full, trackId: 'ja-cc', trackType: 'ASSISTIVE', rawTrackType: 'CLOSEDCAPTIONS' }, full
+  ] } });
+  interceptor.dualSubtitleEnabled = false;
+  harness.capture({ videoId: 'episode-A', language: 'zh-Hant', text: '主要字幕' });
+  harness.capture({ videoId: 'episode-A', language: 'ja', text: '日本語 CC', trackId: 'ja-cc' });
+  harness.capture({ videoId: 'episode-A', language: 'ja', text: '日本語', trackId: 'ja-full' });
+  interceptor.dualSubtitleEnabled = true;
+  const result = await interceptor.ensureSecondaryLanguageAvailableOnce('auto-japanese');
+  assert.equal(result.success, true);
+  assert.equal(interceptor.getStatus().configuredSecondaryLanguage, 'auto');
+  assert.equal(interceptor.getStatus().effectiveSecondaryLanguage, 'ja');
+  assert.equal(interceptor.getStatus().selectedSecondaryTrack.trackId, 'ja-full');
+  assert.equal(interceptor.getStatus().secondaryResolution.status, 'ready');
+  assert.deepEqual(harness.render(), { primaryText: '主要字幕', secondaryText: '日本語', secondaryLanguage: 'ja' });
+  assert.equal(harness.readiness().secondary.ready, true);
+  assert.deepEqual(writes, [['zh-Hant', 'auto']]);
+  assert.deepEqual(harness.playbackCalls().filter(call => call.variant === 'original-language'), [{
+    variant: 'original-language', payload: {}, expected: { videoId: 'episode-A', sessionId: 'watch-episode-A', epoch: 1 }
+  }]);
+  assert.equal(harness.playbackCalls().some(call => call.variant.startsWith('switch-')), false);
+});
+
+test('auto original unknown, ambiguous and missing subtitles keep primary ready and publish distinct reasons without manual fallback', async () => {
+  for (const resolution of [
+    { status: 'unknown', reason: 'no-valid-native-audio-language' },
+    { status: 'ambiguous', reason: 'multiple-native-audio-languages' },
+    { status: 'resolved', reason: 'native-audio-language', baseLanguage: 'ja', languages: ['ja'] }
+  ]) {
+    const harness = await createTTMLHarness({ prepareSecondary: false });
+    const interceptor = harness.interceptor();
+    interceptor.dualSubtitleEnabled = false;
+    captureActiveEpisode(harness, 'episode-A', 'A');
+    interceptor.applyConfiguredSecondaryLanguage('auto');
+    interceptor.isActive = true;
+    harness.setPlaybackResult('original-language', { ok: true, value: { variant: 'original-language', originalLanguage: resolution } });
+    interceptor.dualSubtitleEnabled = true;
+    const expectedReason = resolution.status === 'resolved' ? 'no-eligible-secondary-track' : resolution.reason;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = await interceptor.ensureSecondaryLanguageAvailableOnce('auto-negative');
+      assert.equal(result.reason, expectedReason);
+      assert.equal(harness.readiness().primary.ready, true);
+      assert.equal(harness.readiness().secondary.ready, false);
+      assert.equal(harness.readiness().secondary.missingReason, expectedReason);
+      assert.equal(harness.render().secondaryText, '');
+      assert.equal(harness.render().primaryText, 'A primary');
+      assert.equal(harness.readiness().canHideNativeSubtitles, true);
+    }
+    assert.equal(interceptor.getStatus().secondaryResolution.status, resolution.status === 'resolved' ? 'missing' : resolution.status);
+    assert.equal(harness.playbackCalls().filter(call => call.variant === 'original-language').length, 1);
+    assert.equal(harness.playbackCalls().some(call => call.variant.startsWith('switch-')), false);
+    assert.equal(interceptor.getStatus().selectedSecondaryTrack, null);
+  }
+});
+
+test('auto English original acquires the structured selected track through interception and restores the original Netflix subtitle track', async () => {
+  const harness = await createTTMLHarness({ prepareSecondary: false });
+  const interceptor = harness.interceptor();
+  interceptor.dualSubtitleEnabled = false;
+  harness.capture({ videoId: 'episode-A', language: 'zh-Hant', text: 'primary' });
+  interceptor.applyConfiguredSecondaryLanguage('auto');
+  harness.setPlaybackResult('original-language', { ok: true, value: { variant: 'original-language',
+    originalLanguage: { status: 'resolved', reason: 'native-audio-language', baseLanguage: 'en', languages: ['en'] } } });
+  harness.setPlaybackResult('current-language', { ok: true, value: { variant: 'current-language', language: { code: 'zh-Hant', trackId: 'zh-track' } } });
+  harness.setPlaybackResult('switch-track', input => {
+    if (input.payload.trackId === 'en-track') harness.capture({ videoId: 'episode-A', language: 'en', text: 'English original', trackId: 'en-track' });
+    return { ok: true, value: { variant: input.variant, language: { code: input.payload.trackId === 'en-track' ? 'en' : 'zh-Hant', trackId: input.payload.trackId } } };
+  });
+  interceptor.dualSubtitleEnabled = true;
+  assert.equal((await interceptor.ensureSecondaryLanguageAvailableOnce('auto-english', { timeoutMs: 25 })).success, true);
+  assert.deepEqual(harness.render(), { primaryText: 'primary', secondaryText: 'English original', secondaryLanguage: 'en' });
+  assert.deepEqual(harness.playbackCalls().filter(call => call.variant.startsWith('switch-')).map(call => [call.variant, call.payload.trackId]),
+    [['switch-track', 'en-track'], ['switch-track', 'zh-track']]);
+  assert.equal(interceptor.getStatus().secondaryResolution.status, 'ready');
+});
+
+test('auto original matching retains all native labels and promotes actual exact or unique-base subtitle codes including unsupported languages', async () => {
+  for (const fixture of [
+    { languages: ['ja', 'ja-JP'], codes: ['ja', 'ja-JP'], selectedCode: 'ja-JP' },
+    { languages: ['pt-BR'], codes: ['pt'], selectedCode: 'pt' },
+    { languages: ['da'], codes: ['da'], selectedCode: 'da' }
+  ]) {
+    const harness = await createTTMLHarness({ prepareSecondary: false });
+    const interceptor = harness.interceptor();
+    const tracks = fixture.codes.map((code, index) => ({ code, trackId: `track-${index}`, trackType: 'PRIMARY', rawTrackType: 'SUBTITLES',
+      isForcedNarrative: false, isNoneTrack: false }));
+    if (tracks.length > 1) Object.assign(tracks[0], { trackType: 'ASSISTIVE', rawTrackType: 'CLOSEDCAPTIONS' });
+    harness.setPlaybackResult('original-language', { ok: true, value: { variant: 'original-language', originalLanguage: {
+      status: 'resolved', reason: 'native-audio-language', baseLanguage: fixture.languages[0].split('-')[0], languages: fixture.languages
+    } } });
+    harness.setPlaybackResult('available-languages', { ok: true, value: { variant: 'available-languages', languages: tracks } });
+    interceptor.dualSubtitleEnabled = false;
+    harness.capture({ videoId: 'episode-A', language: 'zh-Hant', text: 'primary' });
+    for (const track of tracks) harness.capture({ videoId: 'episode-A', language: track.code, text: track.code, trackId: track.trackId });
+    interceptor.applyConfiguredSecondaryLanguage('auto');
+    interceptor.dualSubtitleEnabled = true;
+    assert.equal((await interceptor.ensureSecondaryLanguageAvailableOnce('auto-matching')).success, true);
+    assert.equal(harness.render().secondaryLanguage, fixture.selectedCode);
+    assert.equal(harness.render().secondaryText, fixture.selectedCode);
+    assert.equal(interceptor.getStatus().effectiveSecondaryLanguage, fixture.selectedCode);
+    assert.equal(harness.readiness().secondary.ready, true);
+  }
+});
+
+test('auto context cache survives dubbing, primary changes and dual off/on while disabled mode never starts resolution or acquisition', async () => {
+  const harness = await createTTMLHarness({ prepareSecondary: false });
+  const interceptor = harness.interceptor();
+  interceptor.dualSubtitleEnabled = false;
+  captureActiveEpisode(harness, 'episode-A', 'A');
+  interceptor.applyConfiguredSecondaryLanguage('auto');
+  const original = { status: 'resolved', reason: 'native-audio-language', baseLanguage: 'en', languages: ['en'] };
+  harness.setPlaybackResult('original-language', { ok: true, value: { variant: 'original-language', originalLanguage: original } });
+  assert.equal((await interceptor.ensureSecondaryLanguageAvailableOnce('disabled')).reason, 'dual-subtitle-disabled');
+  assert.equal(harness.playbackCalls().length, 0);
+  interceptor.dualSubtitleEnabled = true;
+  assert.equal((await interceptor.ensureSecondaryLanguageAvailableOnce('enabled')).success, true);
+  const calls = harness.playbackCalls().length;
+  // 模擬切配音／口述影像後播放器的讀取值已改變；同 context 的解析不得再讀。
+  harness.setPlaybackResult('original-language', { ok: true, value: { variant: 'original-language', originalLanguage: {
+    status: 'unknown', reason: 'no-valid-native-audio-language'
+  } } });
+  assert.equal((await interceptor.ensureSecondaryLanguageAvailableOnce('dubbing-or-audio-description-changed')).success, true);
+  interceptor.configBridge = { async setSubtitleLanguages() {}, async setDualSubtitleEnabled() {} };
+  await interceptor.setLanguages('ja', 'auto');
+  assert.equal((await interceptor.ensureSecondaryLanguageAvailableOnce('primary-changed')).success, true);
+  await interceptor.setDualSubtitleEnabled(false);
+  assert.equal((await interceptor.ensureSecondaryLanguageAvailableOnce('disabled-again')).reason, 'dual-subtitle-disabled');
+  await interceptor.setDualSubtitleEnabled(true);
+  assert.equal((await interceptor.ensureSecondaryLanguageAvailableOnce('enabled-again')).success, true);
+  assert.equal(harness.playbackCalls().length, calls);
+  assert.equal(interceptor.getStatus().effectiveSecondaryLanguage, 'en');
+  assert.equal(harness.readiness().secondary.ready, true);
+});
+
+test('a pending auto resolution invalidated by a manual choice cannot start acquisition for the new choice', async () => {
+  const harness = await createTTMLHarness({ prepareSecondary: false });
+  const interceptor = harness.interceptor();
+  interceptor.dualSubtitleEnabled = false;
+  captureActiveEpisode(harness, 'episode-A', 'A');
+  interceptor.applyConfiguredSecondaryLanguage('auto');
+  let resolveOriginal;
+  harness.setPlaybackResult('original-language', () => new Promise(resolve => { resolveOriginal = resolve; }));
+  interceptor.dualSubtitleEnabled = true;
+  const pending = interceptor.ensureSecondaryLanguageAvailableOnce('pending-auto');
+  interceptor.applyConfiguredSecondaryLanguage('en');
+  resolveOriginal({ ok: true, value: { variant: 'original-language', originalLanguage: {
+    status: 'resolved', reason: 'native-audio-language', baseLanguage: 'ja', languages: ['ja']
+  } } });
+  assert.equal((await pending).reason, 'stale-original-language-resolution');
+  assert.equal(interceptor.getStatus().configuredSecondaryLanguage, 'en');
+  assert.equal(interceptor.getStatus().effectiveSecondaryLanguage, 'en');
+  assert.equal(harness.playbackCalls().length, 1);
+  assert.equal(harness.readiness().primary.ready, true);
+});
+
+test('auto resolution cache is context bound and a late previous-video result cannot replace the current effective language', async () => {
+  const harness = await createTTMLHarness({ prepareSecondary: false });
+  const interceptor = harness.interceptor();
+  interceptor.dualSubtitleEnabled = false;
+  captureActiveEpisode(harness, 'episode-A', 'A');
+  interceptor.applyConfiguredSecondaryLanguage('auto');
+  let resolveA;
+  harness.setPlaybackResult('original-language', input => input.expected.videoId === 'episode-A' ?
+    new Promise(resolve => { resolveA = resolve; }) : {
+      ok: true, value: { variant: 'original-language', originalLanguage: {
+        status: 'resolved', reason: 'native-audio-language', baseLanguage: 'en', languages: ['en']
+      } }
+    });
+  interceptor.dualSubtitleEnabled = true;
+  const pendingA = interceptor.ensureSecondaryLanguageAvailableOnce('pending-A');
+  harness.switchPlayback('episode-B');
+  interceptor.dualSubtitleEnabled = false;
+  captureActiveEpisode(harness, 'episode-B', 'B');
+  interceptor.dualSubtitleEnabled = true;
+  assert.equal((await interceptor.ensureSecondaryLanguageAvailableOnce('current-B')).success, true);
+  resolveA({ ok: true, value: { variant: 'original-language', originalLanguage: {
+    status: 'resolved', reason: 'native-audio-language', baseLanguage: 'ja', languages: ['ja']
+  } } });
+  assert.equal((await pendingA).reason, 'stale-original-language-resolution');
+  assert.equal(interceptor.getStatus().effectiveSecondaryLanguage, 'en');
+  assert.deepEqual(harness.render(), { primaryText: 'B primary', secondaryText: 'B secondary', secondaryLanguage: 'en' });
+  assert.deepEqual(harness.playbackCalls().filter(call => call.variant === 'original-language').map(call => call.expected.videoId),
+    ['episode-A', 'episode-B']);
+  assert.equal(harness.playbackCalls().some(call => call.variant.startsWith('switch-')), false);
+});
+
+test('manual secondary configuration exposes separate effective language, selected track and resolution without persisting runtime state', async () => {
+  const harness = await createTTMLHarness({ prepareSecondary: false });
+  const interceptor = harness.interceptor();
+  const writes = [];
+  interceptor.configBridge = { async setSubtitleLanguages(...languages) { writes.push(languages); } };
+  await interceptor.setLanguages('zh-Hant', 'en');
+  interceptor.dualSubtitleEnabled = false;
+  harness.capture({ videoId: 'episode-A', language: 'zh-Hant', text: 'primary' });
+  harness.capture({ videoId: 'episode-A', language: 'en', text: 'manual secondary' });
+  interceptor.dualSubtitleEnabled = true;
+  const result = await interceptor.ensureSecondaryLanguageAvailableOnce('manual-state');
+  assert.equal(result.success, true);
+  const status = interceptor.getStatus();
+  assert.equal(status.configuredSecondaryLanguage, 'en');
+  assert.equal(status.effectiveSecondaryLanguage, 'en');
+  assert.equal(status.secondaryLanguage, 'en');
+  assert.equal(status.selectedSecondaryTrack.trackId, 'en-track');
+  assert.equal(status.secondaryResolution.status, 'manual');
+  assert.equal(harness.readiness().secondary.language, 'en');
+  assert.deepEqual(harness.render(), { primaryText: 'primary', secondaryText: 'manual secondary', secondaryLanguage: 'en' });
+  assert.deepEqual(writes, [['zh-Hant', 'en']]);
+});
+
 test('manual secondary cache chooses full track identity instead of another same-language CC capture', async () => {
   const harness = await createTTMLHarness({ prepareSecondary: false });
   const interceptor = harness.interceptor();
@@ -325,6 +554,130 @@ test('manual secondary cache chooses full track identity instead of another same
   assert.equal(interceptor.selectedSecondaryTrack.isCC, false);
   assert.equal(interceptor.isLanguageSlotReady('ja', 'secondary'), false);
   assert.equal(harness.playbackCalls().some(call => call.variant.startsWith('switch-')), false);
+});
+
+test('secondary legacy acquisition uses effective language rather than a configured auto argument', async () => {
+  const harness = await createTTMLHarness({ prepareSecondary: false });
+  const interceptor = harness.interceptor();
+  const writes = [];
+  interceptor.configBridge = { async setSubtitleLanguages(...languages) { writes.push(languages); } };
+  interceptor.dualSubtitleEnabled = false;
+  harness.capture({ videoId: 'episode-A', language: 'zh-Hant', text: 'primary' });
+  harness.capture({ videoId: 'episode-A', language: 'en', text: 'effective secondary' });
+  interceptor.applyConfiguredSecondaryLanguage('auto');
+  interceptor.setEffectiveSecondaryLanguage('en', { status: 'ready', reason: 'fixture-resolution' });
+  interceptor.dualSubtitleEnabled = true;
+  const result = await interceptor.switchLanguageAndWait('auto', 'secondary', { timeoutMs: 25 });
+  assert.equal(result.ready, true);
+  assert.equal(result.languageCode, 'en');
+  assert.equal(harness.render().secondaryText, 'effective secondary');
+  assert.equal(harness.readiness().secondary.language, 'en');
+  assert.equal(interceptor.getStatus().configuredSecondaryLanguage, 'auto');
+  assert.equal(interceptor.getStatus().secondaryResolution.status, 'ready');
+  assert.deepEqual(writes, []);
+  assert.equal(harness.playbackCalls().some(call => call.variant === 'original-language' || call.payload?.languageCode === 'auto'), false);
+});
+
+test('unresolved configured auto clears only secondary state and never reaches cache, readiness, recovery or legacy switching as a language', async () => {
+  const harness = await createTTMLHarness();
+  const interceptor = harness.interceptor();
+  interceptor.isActive = true;
+  captureActiveEpisode(harness, 'episode-A', 'A');
+  harness.render();
+  assert.equal(harness.readiness().secondary.ready, true);
+  interceptor.applyConfiguredSecondaryLanguage('auto');
+  assert.equal(harness.readiness().primary.ready, true);
+  assert.equal(harness.readiness().canHideNativeSubtitles, true);
+  assert.equal(harness.readiness().secondary.language, null);
+  assert.equal(harness.readiness().secondary.ready, false);
+  assert.equal(interceptor.secondaryTimeIndex, null);
+  assert.equal(interceptor.getStatus().selectedSecondaryTrack, null);
+  assert.equal(interceptor.getStatus().secondaryResolution.status, 'resolving');
+  assert.deepEqual(harness.render(), { primaryText: 'A primary', secondaryText: '', secondaryLanguage: null });
+  const callsBefore = harness.playbackCalls().length;
+  harness.setPlaybackResult('original-language', { ok: false, error: { kind: 'domain-rejected', code: 'original-language-unavailable', retryable: false } });
+  harness.setPlaybackResult('switch-language', { ok: false, error: { code: 'invalid-language' } });
+  const result = await interceptor.ensureSecondaryLanguageAvailableOnce('unresolved');
+  assert.equal(result.reason, 'original-language-unavailable');
+  assert.equal(interceptor.getStatus().secondaryResolution.status, 'unavailable');
+  assert.equal(harness.readiness().primary.ready, true);
+  assert.equal(harness.readiness().secondary.missingReason, 'original-language-unavailable');
+  assert.equal(await interceptor.trySecondaryDomRecovery('unresolved'), false);
+  await interceptor.fetchLanguageIfNeeded('auto', 'zh-Hant');
+  await interceptor.loadSubtitleForLanguage('auto', 'secondary');
+  await interceptor.refreshLanguageTrack('auto', 'secondary', null, { timeoutMs: 1 });
+  assert.equal(harness.playbackCalls().length, callsBefore + 1);
+  assert.equal(harness.playbackCalls().at(-1).variant, 'original-language');
+  assert.equal(interceptor.selectBestLanguageCacheEntry('auto', 'secondary'), null);
+  assert.equal(interceptor.isLanguageSlotReady('auto', 'secondary'), false);
+  assert.equal(interceptor.acquisitionWaiters.size, 0);
+  assert.equal(interceptor.analyzeCacheStatus(new Map([['auto', {}]])).needsSecondary, false);
+});
+
+test('secondary cache and diagnostics use an effective language outside configured language choices, never the auto request label', async () => {
+  const harness = await createTTMLHarness({ prepareSecondary: false });
+  const interceptor = harness.interceptor();
+  interceptor.applyConfiguredSecondaryLanguage('auto');
+  interceptor.setEffectiveSecondaryLanguage('da', { status: 'ready', reason: 'fixture-resolution' });
+  harness.setPlaybackResult('original-language', { ok: true, value: { variant: 'original-language', originalLanguage: {
+    status: 'resolved', reason: 'native-audio-language', baseLanguage: 'da', languages: ['da']
+  } } });
+  harness.setPlaybackResult('available-languages', { ok: true, value: { variant: 'available-languages', languages: [
+    { code: 'da', trackId: 'da-track', trackType: 'PRIMARY', rawTrackType: 'SUBTITLES',
+      isNoneTrack: false, isForcedNarrative: false }
+  ] } });
+  interceptor.dualSubtitleEnabled = false;
+  harness.capture({ videoId: 'episode-A', language: 'zh-Hant', text: 'primary' });
+  harness.capture({ videoId: 'episode-A', language: 'da', text: 'Danish secondary', trackId: 'da-track' });
+  interceptor.dualSubtitleEnabled = true;
+  assert.equal((await interceptor.ensureSecondaryLanguageAvailableOnce('effective-danish')).success, true);
+  await interceptor.loadLanguageDataFromCache('auto', 'secondary');
+  assert.equal(interceptor.debugEvents.filter(event => event.type === 'LANGUAGE_CACHE_SELECTED').at(-1).languageCode, 'da');
+  assert.equal((await interceptor.diagnoseLanguageAvailability('auto', 'secondary')).rawEntryCount, 1);
+  assert.equal(harness.readiness().secondary.language, 'da');
+  assert.equal(harness.readiness().secondary.ready, true);
+  assert.equal(harness.render().secondaryLanguage, 'da');
+  assert.equal(harness.render().secondaryText, 'Danish secondary');
+  assert.equal(interceptor.getStatus().configuredSecondaryLanguage, 'auto');
+  assert.equal(interceptor.getStatus().secondaryLanguage, 'da');
+  assert.equal(interceptor.debugEvents.find(event => event.type === 'SECONDARY_ACQUISITION_STARTED').inFlightKey,
+    'episode-A|1|da|da-track');
+  assert.equal(interceptor.debugEvents.some(event => event.languageCode === 'auto'), false);
+});
+
+test('setLanguages persists configured choices without mistaking an existing effective result for a setting', async () => {
+  const harness = await createTTMLHarness({ prepareSecondary: false });
+  const interceptor = harness.interceptor();
+  const writes = [];
+  interceptor.configBridge = { async setSubtitleLanguages(...languages) { writes.push(languages); } };
+  interceptor.applyConfiguredSecondaryLanguage('auto');
+  interceptor.setEffectiveSecondaryLanguage('en', { status: 'ready', reason: 'fixture-resolution' });
+  interceptor.dualSubtitleEnabled = false;
+  harness.setPlaybackResult('original-language', { ok: true, value: { variant: 'original-language', originalLanguage: {
+    status: 'resolved', reason: 'native-audio-language', baseLanguage: 'en', languages: ['en']
+  } } });
+  captureActiveEpisode(harness, 'episode-A', 'A');
+  interceptor.dualSubtitleEnabled = true;
+  await interceptor.ensureSecondaryLanguageAvailableOnce('configured-setting');
+  const callsBefore = harness.playbackCalls().length;
+  await interceptor.setLanguages('ja', 'auto');
+  assert.deepEqual(writes, [['ja', 'auto']]);
+  assert.equal(interceptor.getStatus().configuredSecondaryLanguage, 'auto');
+  assert.equal(interceptor.getStatus().effectiveSecondaryLanguage, 'en');
+  assert.equal(interceptor.getStatus().secondaryResolution.status, 'ready');
+  assert.equal(harness.readiness().secondary.ready, true);
+  assert.equal(harness.playbackCalls().length, callsBefore);
+  await interceptor.setLanguages('ja', 'en');
+  assert.deepEqual(writes, [['ja', 'auto'], ['ja', 'en']]);
+  assert.equal(interceptor.getStatus().configuredSecondaryLanguage, 'en');
+  assert.equal(interceptor.getStatus().effectiveSecondaryLanguage, 'en');
+  assert.equal(interceptor.getStatus().secondaryResolution.status, 'manual');
+  assert.equal(harness.readiness().secondary.ready, true);
+  await interceptor.setLanguages('ja', 'ko');
+  assert.equal(interceptor.getStatus().configuredSecondaryLanguage, 'ko');
+  assert.equal(interceptor.getStatus().effectiveSecondaryLanguage, 'ko');
+  assert.equal(interceptor.getStatus().selectedSecondaryTrack, null);
+  assert.equal(harness.readiness().secondary.ready, false);
 });
 
 test('manual secondary switches the selected full track and does not reuse same-language CC readiness', async () => {
@@ -389,7 +742,7 @@ test('Given episode A active and episode B TTML is prefetched When raw B arrives
   harness.render();
 
   assert.equal((await harness.readPageRawCacheKeys()).includes(prefetchedB), true);
-  assert.deepEqual(harness.render(), { primaryText: 'A primary', secondaryText: 'A secondary' });
+  assert.deepEqual(harness.render(), { primaryText: 'A primary', secondaryText: 'A secondary', secondaryLanguage: 'en' });
   assert.equal(harness.readiness().primary.cacheKey, activeA.primaryCacheKey);
   assert.equal(harness.readiness().secondary.cacheKey, activeA.secondaryCacheKey);
 });
@@ -403,7 +756,7 @@ test('Given retained B TTML from prefetch When PlaybackContext switches to B The
   await harness.reloadCurrentContext();
 
   assert.equal((await harness.readPageRawCacheKeys()).includes(prefetchedB), true);
-  assert.deepEqual(harness.render(), { primaryText: 'B primary', secondaryText: '' });
+  assert.deepEqual(harness.render(), { primaryText: 'B primary', secondaryText: '', secondaryLanguage: 'en' });
   assert.equal(harness.readiness().primary.cacheKey, prefetchedB);
 });
 
@@ -416,7 +769,7 @@ test('Given B is active When delayed A TTML arrives Then A is retained but canno
   harness.render();
 
   assert.equal((await harness.readPageRawCacheKeys()).includes(delayedA), true);
-  assert.deepEqual(harness.render(), { primaryText: 'B primary', secondaryText: 'B secondary' });
+  assert.deepEqual(harness.render(), { primaryText: 'B primary', secondaryText: 'B secondary', secondaryLanguage: 'en' });
   assert.equal(harness.readiness().primary.cacheKey, activeB.primaryCacheKey);
   assert.equal(harness.readiness().secondary.cacheKey, activeB.secondaryCacheKey);
 });
@@ -434,7 +787,7 @@ test('Given TTML capture evidence is old When cache is reevaluated Then age alon
   await harness.reloadCurrentContext();
 
   assert.equal((await harness.readPageRawCacheKeys()).includes(activeB.primaryCacheKey), true);
-  assert.deepEqual(harness.render(), { primaryText: 'A primary', secondaryText: 'A secondary' });
+  assert.deepEqual(harness.render(), { primaryText: 'A primary', secondaryText: 'A secondary', secondaryLanguage: 'en' });
   assert.equal(harness.readiness().primary.cacheKey, activeA.primaryCacheKey);
   assert.equal(harness.readiness().secondary.cacheKey, activeA.secondaryCacheKey);
 });
@@ -546,6 +899,41 @@ test('legacy secondary switching entry uses the same selected-track cache withou
   const result = await interceptor.switchLanguageAndWait('en', 'secondary', { timeoutMs: 1 });
   assert.equal(result.ready, true);
   assert.equal(harness.playbackCalls().some(call => call.variant.startsWith('switch-')), false);
+});
+
+test('secondary DOM recovery matches and promotes the effective language while configured auto stays out of cooldown and matcher targets', async () => {
+  const requestInfo = createRequestInfo('episode-A', 'da');
+  requestInfo.currentTrackAtRequest = { code: 'da', trackId: 'da-track' };
+  const harness = await createTTMLHarness({
+    prepareSecondary: false,
+    domSample: { text: 'Danish secondary', timestamp: 1 },
+    domMatchResult: { matched: true, result: {
+      cacheKey: 'da_episode-B_fixture_da-track', language: 'da', rawContent: 'Danish secondary', requestInfo,
+      score: 1, matchedUnits: 1, totalDomUnits: 1
+    } }
+  });
+  const interceptor = harness.interceptor();
+  interceptor.dualSubtitleEnabled = false;
+  harness.capture({ videoId: 'episode-A', language: 'zh-Hant', text: 'primary' });
+  harness.capture({ videoId: 'episode-B', language: 'da', text: 'Danish secondary', trackId: 'da-track' });
+  interceptor.applyConfiguredSecondaryLanguage('auto');
+  interceptor.setEffectiveSecondaryLanguage('da', { status: 'ready', reason: 'fixture-resolution' });
+  harness.setPlaybackResult('available-languages', { ok: true, value: { variant: 'available-languages', languages: [
+    { code: 'da', trackId: 'da-track', trackType: 'PRIMARY', rawTrackType: 'SUBTITLES',
+      isNoneTrack: false, isForcedNarrative: false }
+  ] } });
+  interceptor.dualSubtitleEnabled = true;
+  interceptor.sleep = async () => {};
+  assert.equal(await interceptor.trySecondaryDomRecovery('effective-recovery'), true);
+  assert.deepEqual(harness.matcherLanguages(), ['da']);
+  assert.equal(harness.readiness().secondary.ready, true);
+  assert.equal(harness.readiness().secondary.language, 'da');
+  assert.equal(harness.render().secondaryText, 'Danish secondary');
+  const started = interceptor.debugEvents.find(event => event.type === 'SECONDARY_DOM_RECOVERY_STARTED');
+  assert.equal(started.cooldownKey, 'episode-A|1|da');
+  assert.equal(started.secondaryLanguage, 'da');
+  assert.equal(interceptor.getStatus().configuredSecondaryLanguage, 'auto');
+  assert.equal(harness.playbackCalls().some(call => call.variant === 'original-language' || call.payload?.languageCode === 'auto'), false);
 });
 
 test('Given raw TTML and a diagnostic summary owned by the ingress When cache, diagnosis, and primary discovery run Then callers use the normalized reader and matcher receives it', async () => {

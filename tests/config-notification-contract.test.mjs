@@ -189,11 +189,12 @@ async function loadConfigModules(transport, createSnapshotClient = () => ({
     ConfigManager: configManagerModule.namespace.ConfigManager,
     ConfigBridge: configBridgeModule.namespace.ConfigBridge,
     createSettings: settingsModule.namespace.createSettings,
-    getAllConfigKeys: configSchemaModule.namespace.getAllConfigKeys
+    getAllConfigKeys: configSchemaModule.namespace.getAllConfigKeys,
+    schema: configSchemaModule.namespace
   };
 }
 
-async function createConfigHarness() {
+async function createConfigHarness({ storedSecondaryLanguage } = {}) {
   const messages = new Set();
   const requests = [];
   let manager;
@@ -228,6 +229,7 @@ async function createConfigHarness() {
   };
   const { ConfigManager, ConfigBridge, createSettings, getAllConfigKeys } = await loadConfigModules(transport);
   const storage = new ObservableStorage();
+  if (storedSecondaryLanguage !== undefined) storage.roots.subtitle = { secondaryLanguage: storedSecondaryLanguage };
   manager = new ConfigManager({ storage });
   await manager.initialize();
   settings = createSettings({
@@ -256,6 +258,30 @@ async function createConfigHarness() {
   await bridge.initialize();
   return { bridge, manager, requests, storage };
 }
+
+test('Given new and existing installs When config initializes Then only a missing secondary setting defaults to auto and no language allowlist is expanded', async () => {
+  const fresh = await createConfigHarness();
+  assert.equal(fresh.bridge.get('subtitle.secondaryLanguage'), 'auto');
+  assert.equal(fresh.storage.roots.subtitle.secondaryLanguage, 'auto');
+  for (const language of ['en', 'ja']) {
+    const existing = await createConfigHarness({ storedSecondaryLanguage: language });
+    assert.equal(existing.bridge.get('subtitle.secondaryLanguage'), language);
+    assert.equal(existing.storage.roots.subtitle.secondaryLanguage, language);
+  }
+  const { schema } = await loadConfigModules({});
+  assert.equal(schema.SUPPORTED_LANGUAGES.some(language => language.code === 'auto'), false);
+  assert.equal(schema.getAllConfigKeys().some(key => /lastManual|runtime|resolution/i.test(key)), false);
+});
+
+test('Given a typed auto change When storage notifies ConfigBridge Then the configured mode propagates once without changing primary validation', async () => {
+  const { bridge } = await createConfigHarness({ storedSecondaryLanguage: 'ja' });
+  const values = [];
+  bridge.subscribe('subtitle.secondaryLanguage', value => values.push(value));
+  await bridge.setSubtitleLanguages('zh-Hant', 'auto');
+  assert.equal(bridge.get('subtitle.secondaryLanguage'), 'auto');
+  assert.deepEqual(values, ['auto']);
+  await assert.rejects(bridge.setSubtitleLanguages('auto', 'en'));
+});
 
 async function createSyntheticModule(context, identifier, exports) {
   const module = new vm.SyntheticModule(Object.keys(exports), function initialize() {
@@ -444,7 +470,8 @@ test('Given a rejecting typed language bridge write When SubtitleInterceptor set
 
   assert.deepEqual(bridgeCalls, [{ method: 'setSubtitleLanguages', args: ['ja', 'ko'] }]);
   assert.equal(interceptor.primaryLanguage, 'zh-Hant');
-  assert.equal(interceptor.secondaryLanguage, 'en');
+  assert.equal(interceptor.configuredSecondaryLanguage, 'en');
+  assert.equal(interceptor.effectiveSecondaryLanguage, 'en');
   assert.equal(reloadCount(), 0);
 });
 
@@ -459,14 +486,16 @@ test('Given a deferred typed language bridge write When SubtitleInterceptor sets
 
   assert.deepEqual(bridgeCalls, [{ method: 'setSubtitleLanguages', args: ['ja', 'ko'] }]);
   assert.equal(interceptor.primaryLanguage, 'zh-Hant');
-  assert.equal(interceptor.secondaryLanguage, 'en');
+  assert.equal(interceptor.configuredSecondaryLanguage, 'en');
+  assert.equal(interceptor.effectiveSecondaryLanguage, 'en');
   assert.equal(reloadCount(), 0);
 
   languageWrite.resolve();
   await pending;
 
   assert.equal(interceptor.primaryLanguage, 'ja');
-  assert.equal(interceptor.secondaryLanguage, 'ko');
+  assert.equal(interceptor.configuredSecondaryLanguage, 'ko');
+  assert.equal(interceptor.effectiveSecondaryLanguage, 'ko');
   assert.equal(reloadCount(), 1);
 });
 
@@ -557,9 +586,9 @@ test('Given a storage root deletion or partial replacement When leaves are absen
     ['subtitle.primaryLanguage', 'en', 'ja'],
     ['subtitle.primaryLanguage', 'zh-Hant', 'en']
   ]);
-  assert.deepEqual(secondaryEvents, [['subtitle.secondaryLanguage', 'en', 'ko']]);
+  assert.deepEqual(secondaryEvents, [['subtitle.secondaryLanguage', 'auto', 'ko']]);
   assert.equal(manager.get('subtitle.primaryLanguage'), 'zh-Hant');
-  assert.equal(manager.get('subtitle.secondaryLanguage'), 'en');
+  assert.equal(manager.get('subtitle.secondaryLanguage'), 'auto');
 });
 
 test('Given validation or storage failures When ConfigManager rejects Then it publishes nothing', async () => {

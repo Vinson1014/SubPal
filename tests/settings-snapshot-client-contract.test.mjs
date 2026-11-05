@@ -123,6 +123,24 @@ function invalidSnapshot() {
   return { ok: false, error: { kind: 'invalid', code: 'settings-snapshot-malformed', retryable: false } };
 }
 
+test('Given auto secondary snapshot and notifications When the settings client validates Then auto survives only on the secondary key', async () => {
+  const { createSettingsSnapshotClient, subscribeSettingsChanges } = await loadClient();
+  const route = createContentRoute();
+  const client = createSettingsSnapshotClient(clientOptions(route, createClock()));
+  route.window.addEventListener('messageToContentScript', event => {
+    route.respond(event.detail.messageId, { ok: true, value: { 'subtitle.secondaryLanguage': 'auto' } });
+  });
+  assert.deepEqual(plain(await client.read()), { ok: true, value: { 'subtitle.secondaryLanguage': 'auto' } });
+  const values = [];
+  subscribeSettingsChanges(value => values.push(value), { window: route.window });
+  for (const key of ['subtitle.secondaryLanguage', 'subtitle.primaryLanguage']) {
+    route.window.emit('messageFromContentScript', {
+      detail: { message: { type: 'CONFIG_CHANGED', key, newValue: 'auto', oldValue: 'en' } }
+    });
+  }
+  assert.deepEqual(plain(values), [{ key: 'subtitle.secondaryLanguage', newValue: 'auto', oldValue: 'en' }]);
+});
+
 test('Given the private content route When a settings client reads Then it exposes only read/dispose, sends the exact request, and returns a validated non-identity snapshot', async () => {
   const { createSettingsSnapshotClient } = await loadClient();
   const clock = createClock();

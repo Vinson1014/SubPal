@@ -265,6 +265,27 @@ test('Given a complete canonical v4 backup When Options restores it Then it perf
   assert.deepEqual(harness.alerts, ['資料已成功恢復']);
 });
 
+test('Given v3 and exact-key v4 backups with auto When Options restores and exports Then secondary auto round trips without private preference keys or a format bump', async () => {
+  for (const version of ['3.0', '4.0']) {
+    const harness = await loadOptionsBackupHarness();
+    const envelope = canonicalEnvelope(harness.schema, { 'subtitle.secondaryLanguage': 'auto' });
+    envelope.version = version;
+    await harness.restore(JSON.stringify(envelope));
+    assert.equal(harness.storageCalls.sets.length, 1);
+    assert.equal(harness.storage.subtitle.secondaryLanguage, 'auto');
+    await harness.api.backupData();
+    const exported = JSON.parse(await harness.downloads[0].blob.text());
+    assert.equal(exported.version, '4.0');
+    assert.deepEqual(exported.config, envelope.config);
+    assert.deepEqual(Object.keys(exported.config).sort(), [...BACKUP_ROOTS].sort());
+
+    const invalid = await loadOptionsBackupHarness();
+    envelope.config.subtitle.primaryLanguage = 'auto';
+    await invalid.restore(JSON.stringify(envelope));
+    assertRejectedWithoutWrites(invalid, stable(protectedStorage()), `${version} primary auto`);
+  }
+});
+
 test('Given a 0.4.1 v3 backup When Options restores it Then only validated editable settings are imported and legacy authority roots are ignored', async () => {
   const harness = await loadOptionsBackupHarness();
   const protectedBefore = Object.fromEntries(PROTECTED_KEYS.map((key) => [key, clone(harness.storage[key])]));

@@ -80,6 +80,11 @@ class FakeElement {
     this.listeners.set(type, listeners);
   }
 
+  add(option) {
+    this.options ||= [];
+    this.options.push(option);
+  }
+
   async dispatch(type) {
     const listeners = this.listeners.get(type) || [];
     await Promise.all(listeners.map(listener => listener({ target: this })));
@@ -152,11 +157,12 @@ async function loadOptionsHarness({ storage = {} } = {}) {
   const source = (await readFile(new URL('../options.js', import.meta.url), 'utf8'))
     .replace(/import\s+\{[\s\S]*?getDefaultValues\s*\}\s+from\s+'\.\/content\/system\/config\/config-schema\.js';\n/, '')
     .replace(/import\s+\{[\s\S]*?renderSubtitlePreview\s*\}\s+from\s+'\.\/shared\/subtitle-preview-renderer\.js';\n/, '')
-    .concat('\nglobalThis.__optionsApi = { restoreOptionsUI, updateStyleControls, getPreviewConfigFromControls, setupStyleControlListeners, resetStyles };\n');
+    .concat('\nglobalThis.__optionsApi = { restoreOptionsUI, updateStyleControls, getPreviewConfigFromControls, setupStyleControlListeners, resetStyles, populateLanguageSelects, setupEventListeners };\n');
 
   const context = vm.createContext({
     console: { log() {}, error() {} },
     confirm: () => true,
+    Option: class { constructor(text, value) { this.text = text; this.value = value; } },
     SUPPORTED_LANGUAGES: [{ code: 'zh-Hant', name: '繁體中文' }, { code: 'en', name: 'English' }],
     SUBTITLE_FONT_PRESETS: [{ value: 'clearSans', label: 'Clear Sans', fontFamily: DEFAULT_CONFIG['subtitle.style.fontFamily'] }],
     SUBTITLE_FONT_WEIGHT_OPTIONS: [{ value: '400', label: '400' }, { value: '700', label: '700' }],
@@ -189,6 +195,19 @@ async function loadOptionsHarness({ storage = {} } = {}) {
 
   return { api: context.__optionsApi, elements, previewCalls, setCalls, stored };
 }
+
+test('Given options language controls When selecting auto Then only secondary offers the mode and saves auto while preserving stored siblings', async () => {
+  const { api, elements, stored } = await loadOptionsHarness({ storage: { subtitle: { primaryLanguage: 'en', secondaryLanguage: 'en' } } });
+  api.populateLanguageSelects();
+  api.setupEventListeners();
+  assert.deepEqual(elements.secondaryLanguageSelect.options.map(option => option.value), ['auto', 'zh-Hant', 'en']);
+  assert.equal(elements.secondaryLanguageSelect.options[0].text, '自動（跟隨影片原始語言）');
+  assert.deepEqual(elements.primaryLanguageSelect.options.map(option => option.value), ['zh-Hant', 'en']);
+  elements.secondaryLanguageSelect.value = 'auto';
+  await elements.secondaryLanguageSelect.dispatch('change');
+  assert.equal(stored.subtitle.secondaryLanguage, 'auto');
+  assert.equal(stored.subtitle.primaryLanguage, 'en');
+});
 
 test('Given old options storage missing outline controls When restoreOptionsUI loads Then controls and preview config use schema defaults', async () => {
   const { api, elements, previewCalls } = await loadOptionsHarness({

@@ -192,16 +192,16 @@ export const CONFIG_SCHEMA = {
 
     /**
      * 次要字幕語言
-     * 預設為英文
+     * 預設跟隨影片原始語言；auto 僅屬次要模式，不是支援語言。
      */
     secondaryLanguage: {
       type: 'string',
-      default: 'en',
+      default: 'auto',
       description: '次要字幕語言',
       category: 'subtitle',
       validation: (value) => {
         if (typeof value !== 'string') return false;
-        return isLanguageSupported(value);
+        return value === 'auto' || isLanguageSupported(value);
       },
       validationError: '不支持的語言代碼'
     },

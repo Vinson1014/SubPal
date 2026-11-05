@@ -123,6 +123,19 @@ function expectedFailure(kind, code, retryable) {
   return { ok: false, error: { kind, code, retryable } };
 }
 
+test('Given auto secondary mode When Settings changes languages Then auto is acknowledged only for secondary and primary remains supported-only', async () => {
+  const createSettings = await loadSettings();
+  const writes = [];
+  const settings = createSettings({ write(changes) { writes.push(plain(changes)); } });
+
+  assert.deepEqual(plain(await settings.change(subtitleLanguages('zh-Hant', 'auto'))), {
+    ok: true, value: { variant: 'subtitle-languages', primaryLanguage: 'zh-Hant', secondaryLanguage: 'auto' }
+  });
+  assert.deepEqual(plain(await settings.change(subtitleLanguages('auto', 'en'))),
+    expectedFailure('domain-rejected', 'settings-validation-failed', false));
+  assert.deepEqual(writes, [{ 'subtitle.primaryLanguage': 'zh-Hant', 'subtitle.secondaryLanguage': 'auto' }]);
+});
+
 test('Given allowlisted MAIN subtitle settings When Settings changes them Then one writer receives exact mapped values and only a variant-specific acknowledgement returns', async () => {
   const createSettings = await loadSettings();
   const calls = [];

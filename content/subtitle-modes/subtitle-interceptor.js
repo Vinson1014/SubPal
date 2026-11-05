@@ -25,7 +25,9 @@ class SubtitleInterceptor {
     
     // 語言設置（默認值）
     this.primaryLanguage = 'zh-Hant';
-    this.secondaryLanguage = 'en';
+    this.configuredSecondaryLanguage = 'en';
+    this.effectiveSecondaryLanguage = 'en';
+    this.secondaryResolution = { status: 'manual', reason: 'configured-language' };
     this.dualSubtitleEnabled = true; // 是否啟用雙語模式
     
     // 字幕數據
@@ -37,6 +39,7 @@ class SubtitleInterceptor {
     this.secondarySubtitleMeta = null;
     this.selectedSecondaryTrack = null;
     this._secondaryTrackSelection = null;
+    this._originalLanguageResolution = null;
     
     // 攔截的原始字幕數據
     this.interceptedSubtitles = new Map();
@@ -94,7 +97,7 @@ class SubtitleInterceptor {
     // Secondary acquisition in-flight tracking（idempotent 用）
     this._secondaryAcquisitionInFlight = null;
 
-    // Secondary DOM recovery cooldown（per videoId|epoch|secondaryLanguage）
+    // Secondary DOM recovery cooldown（per videoId|epoch|effectiveSecondaryLanguage）
     this._secondaryRecoveryCooldown = new Map();
     this._secondaryRecoveryLastResult = null;
 
@@ -118,6 +121,75 @@ class SubtitleInterceptor {
     }
   }
 
+  // 設定套用與 runtime 推導分開；只有 setLanguages 會要求持久化設定。
+  applyConfiguredSecondaryLanguage(languageCode) {
+    if (this.configuredSecondaryLanguage === languageCode) return;
+    this._originalLanguageResolution = null;
+    this.configuredSecondaryLanguage = languageCode;
+    this.setEffectiveSecondaryLanguage(languageCode, languageCode === 'auto' ?
+      { status: 'resolving', reason: 'original-language-not-resolved' } :
+      { status: 'manual', reason: 'configured-language' });
+  }
+
+  setEffectiveSecondaryLanguage(languageCode, resolution) {
+    // auto 是模式，不是語言；尚未解析時必須 fail closed。
+    const effectiveLanguage = normalizeSubtitleLanguage(languageCode) ? languageCode : null;
+    if (this.effectiveSecondaryLanguage !== effectiveLanguage) {
+      this.secondarySubtitles = [];
+      this.secondaryTimeIndex = null;
+      this.secondarySubtitleMeta = null;
+      this.selectedSecondaryTrack = null;
+      this._secondaryTrackSelection = null;
+      this.lastSubtitleMissingReasons.secondary = null;
+      this.lastAcquisitionResults.secondary = null;
+      this.lastRenderedSubtitle = null;
+    }
+    this.effectiveSecondaryLanguage = effectiveLanguage;
+    this.secondaryResolution = { ...resolution };
+  }
+
+  isOriginalLanguageResolutionCurrent(record) {
+    const context = this.getCurrentPlaybackContext();
+    return this.configuredSecondaryLanguage === 'auto' && this._originalLanguageResolution === record &&
+      context.state === 'ready' && context.videoId === record.context.videoId &&
+      context.sessionId === record.context.sessionId && context.epoch === record.context.epoch;
+  }
+
+  // 每個 watch context 共用一次唯讀解析；配音與目前字幕軌不是 cache identity。
+  async resolveAutoSecondaryLanguage() {
+    if (!this.dualSubtitleEnabled || this.configuredSecondaryLanguage !== 'auto') return null;
+    const context = this.getCurrentPlaybackContext();
+    if (context.state !== 'ready' || !context.videoId || !context.sessionId) return null;
+    let record = this._originalLanguageResolution;
+    if (!record || record.context.videoId !== context.videoId || record.context.sessionId !== context.sessionId ||
+        record.context.epoch !== context.epoch) {
+      record = { context, result: null, promise: null };
+      this._originalLanguageResolution = record;
+      this.setEffectiveSecondaryLanguage(null, { status: 'resolving', reason: 'original-language-not-resolved' });
+      this.recordDebugEvent('ORIGINAL_LANGUAGE_RESOLUTION_STARTED', { context });
+      record.promise = this.performPlayback('original-language', {}).then(result => {
+        record.result = result?.ok ? result.value.originalLanguage : {
+          status: 'unavailable', reason: this.getPlaybackFailureCode(result, 'original-language-unavailable')
+        };
+      });
+    }
+    await record.promise;
+    if (!this.isOriginalLanguageResolutionCurrent(record)) return null;
+    const resolution = record.result;
+    if (resolution.status === 'resolved') {
+      if (!this.effectiveSecondaryLanguage) {
+        this.setEffectiveSecondaryLanguage(resolution.languages[0], {
+          status: 'resolving', reason: 'secondary-track-not-selected'
+        });
+        this.recordDebugEvent('ORIGINAL_LANGUAGE_RESOLVED', resolution);
+      }
+    } else {
+      this.setEffectiveSecondaryLanguage(null, { status: resolution.status, reason: resolution.reason });
+      this.recordDebugEvent('ORIGINAL_LANGUAGE_RESOLUTION_FAILED', resolution);
+    }
+    return resolution;
+  }
+
   async initialize() {
     this.log('字幕攔截模式初始化中...');
 
@@ -130,9 +202,9 @@ class SubtitleInterceptor {
       this.debug = configBridge.get('debugMode');
       this.dualSubtitleEnabled = configBridge.get('subtitle.dualModeEnabled');
       this.primaryLanguage = configBridge.get('subtitle.primaryLanguage');
-      this.secondaryLanguage = configBridge.get('subtitle.secondaryLanguage');
+      this.applyConfiguredSecondaryLanguage(configBridge.get('subtitle.secondaryLanguage'));
 
-      this.log(`配置已載入: debug=${this.debug}, dualMode=${this.dualSubtitleEnabled}, primary=${this.primaryLanguage}, secondary=${this.secondaryLanguage}`);
+      this.log(`配置已載入: debug=${this.debug}, dualMode=${this.dualSubtitleEnabled}, primary=${this.primaryLanguage}, secondary=${this.effectiveSecondaryLanguage}`);
 
       // 訂閱配置變更（通過 messaging 接收通知）
       configBridge.subscribe('debugMode', (newValue) => {
@@ -157,7 +229,7 @@ class SubtitleInterceptor {
       });
 
       configBridge.subscribe('subtitle.secondaryLanguage', (newValue) => {
-        this.secondaryLanguage = newValue;
+        this.applyConfiguredSecondaryLanguage(newValue);
         this.log('次要語言已更新:', newValue);
         if (this.isActive) {
           this.loadInterceptedSubtitles();
@@ -630,7 +702,7 @@ class SubtitleInterceptor {
       success: true,
       context,
       primaryLanguage: this.primaryLanguage,
-      secondaryLanguage: this.secondaryLanguage,
+      secondaryLanguage: this.effectiveSecondaryLanguage,
       activeSubtitleCounts: {
         primary: this.primarySubtitles.length,
         secondary: this.secondarySubtitles.length
@@ -662,19 +734,19 @@ class SubtitleInterceptor {
   analyzeCacheStatus(existingCache) {
     // 使用 base-code fallback 檢查緩存（如 "zh" 匹配 "zh-Hant"）
     const hasPrimary = Array.from(existingCache.keys()).some(k => this.matchesLanguageForAcquisition(k, this.primaryLanguage));
-    const hasSecondary = Array.from(existingCache.keys()).some(k => this.matchesLanguageForAcquisition(k, this.secondaryLanguage));
+    const hasSecondary = Array.from(existingCache.keys()).some(k => this.matchesLanguageForAcquisition(k, this.effectiveSecondaryLanguage));
     
     const status = {
       hasPrimary,
       hasSecondary,
       availableLanguages: Array.from(existingCache.keys()),
       needsPrimary: !hasPrimary,
-      needsSecondary: this.dualSubtitleEnabled && !hasSecondary
+      needsSecondary: this.dualSubtitleEnabled && !!this.effectiveSecondaryLanguage && !hasSecondary
     };
     
     this.log('緩存狀態分析:', {
       主要語言: `${this.primaryLanguage} (${hasPrimary ? '已緩存' : '需要獲取'})`,
-      次要語言: `${this.secondaryLanguage} (${hasSecondary ? '已緩存' : this.dualSubtitleEnabled ? '需要獲取' : '不需要'})`,
+      次要語言: `${this.effectiveSecondaryLanguage} (${hasSecondary ? '已緩存' : this.dualSubtitleEnabled ? '需要獲取' : '不需要'})`,
       可用語言: status.availableLanguages
     });
     
@@ -735,13 +807,13 @@ class SubtitleInterceptor {
         
       case 'FETCH_SECONDARY':
         this.log('只需要獲取次要語言');
-        await this.fetchLanguageIfNeeded(this.secondaryLanguage, defaultLanguage);
+        await this.fetchLanguageIfNeeded(this.effectiveSecondaryLanguage, defaultLanguage);
         break;
         
       case 'FETCH_BOTH':
         this.log('需要獲取兩種語言');
         await this.fetchLanguageIfNeeded(this.primaryLanguage, defaultLanguage);
-        await this.fetchLanguageIfNeeded(this.secondaryLanguage, defaultLanguage);
+        await this.fetchLanguageIfNeeded(this.effectiveSecondaryLanguage, defaultLanguage);
         break;
     }
   }
@@ -750,6 +822,9 @@ class SubtitleInterceptor {
    * 智能語言切換：只在需要時切換
    */
   async fetchLanguageIfNeeded(languageCode, defaultLanguage) {
+    if (!normalizeSubtitleLanguage(languageCode)) {
+      return { success: false, reason: 'missing-target-language' };
+    }
     if (this.resolveLanguageRole(languageCode, 'auto') === 'secondary') {
       return this.ensureLanguageAvailable(languageCode, 'secondary', { defaultLanguage });
     }
@@ -772,6 +847,10 @@ class SubtitleInterceptor {
    * 優先選目前時間能命中的資料，避免第一筆短片段 cache 讓字幕被誤判為空。
    */
   selectBestLanguageCacheEntry(languageCode, role = 'primary') {
+    if (role === 'secondary') {
+      languageCode = this.effectiveSecondaryLanguage;
+      if (!normalizeSubtitleLanguage(languageCode)) return null;
+    }
     const currentTime = getCurrentTimestamp();
     const candidates = [];
 
@@ -867,6 +946,10 @@ class SubtitleInterceptor {
    * 從緩存載入語言數據（不觸發語言切換）
    */
   async loadLanguageDataFromCache(languageCode, type) {
+    if (type === 'secondary') {
+      languageCode = this.effectiveSecondaryLanguage;
+      if (!normalizeSubtitleLanguage(languageCode)) return;
+    }
     try {
       this.log(`從緩存載入 ${languageCode} (${type}) 字幕數據...`);
 
@@ -953,25 +1036,44 @@ class SubtitleInterceptor {
 
   matchesSelectedSecondaryTrack(languageCode, evidence) {
     const selected = this.selectedSecondaryTrack;
+    const effective = normalizeSubtitleLanguage(this.effectiveSecondaryLanguage);
+    if (!effective || (effective !== normalizeSubtitleLanguage(selected?.code) &&
+      effective !== normalizeSubtitleLanguage(this._secondaryTrackSelection?.languageCode))) return false;
     const sourceLanguage = evidence?.requestInfo?.currentTrackAtRequest?.code || evidence?.sourceLanguage || languageCode;
     if (!selected || normalizeSubtitleLanguage(sourceLanguage) !== normalizeSubtitleLanguage(selected.code)) return false;
     const trackId = evidence?.trackId ?? evidence?.requestInfo?.currentTrackAtRequest?.trackId ?? null;
     return selected.trackId === null || selected.trackId === undefined || trackId === selected.trackId;
   }
 
-  async prepareSecondaryTrack(languageCode) {
+  async prepareSecondaryTrack() {
+    const languageCode = this.effectiveSecondaryLanguage;
+    if (!normalizeSubtitleLanguage(languageCode)) {
+      return { status: 'unavailable', track: null, candidates: [], reason: 'missing-secondary-language' };
+    }
     const context = this.getCurrentPlaybackContext();
     const cached = this._secondaryTrackSelection;
     if (cached?.languageCode === languageCode && cached.context.videoId === context.videoId &&
       cached.context.sessionId === context.sessionId && cached.context.epoch === context.epoch) return cached;
     const tracks = await this.getAvailableNetflixLanguages();
     const current = this.getCurrentPlaybackContext();
-    if (current.videoId !== context.videoId || current.sessionId !== context.sessionId || current.epoch !== context.epoch) {
+    if (current.videoId !== context.videoId || current.sessionId !== context.sessionId || current.epoch !== context.epoch ||
+      this.effectiveSecondaryLanguage !== languageCode) {
       return { status: 'unavailable', track: null, candidates: [], reason: 'stale-secondary-selection' };
     }
-    const selection = { ...selectSecondaryTrack([languageCode], tracks), languageCode, context };
+    const original = this._originalLanguageResolution?.result;
+    const targetLanguages = this.configuredSecondaryLanguage === 'auto' && original?.status === 'resolved' ?
+      original.languages : [languageCode];
+    const selection = { ...selectSecondaryTrack(targetLanguages, tracks), languageCode, context };
+    if (this.configuredSecondaryLanguage === 'auto' && selection.track) {
+      // 使用實際字幕語言，而非 native audio 的標籤，讓 cache／render 與 selected identity 一致。
+      this.setEffectiveSecondaryLanguage(selection.track.code, this.secondaryResolution);
+      selection.languageCode = this.effectiveSecondaryLanguage;
+    }
     this._secondaryTrackSelection = selection;
     this.selectedSecondaryTrack = selection.track;
+    if (this.configuredSecondaryLanguage === 'auto' && !selection.track) {
+      this.secondaryResolution = { status: selection.status, reason: selection.reason };
+    }
     this.recordDebugEvent('SECONDARY_TRACK_SELECTED', { ...selection.track, status: selection.status, reason: selection.reason });
     return selection;
   }
@@ -983,6 +1085,9 @@ class SubtitleInterceptor {
       ...result
     };
     this.lastAcquisitionResults[role] = normalized;
+    if (role === 'secondary' && this.configuredSecondaryLanguage === 'auto' && normalized.success) {
+      this.secondaryResolution = { status: 'ready', reason: 'original-language-subtitles-ready' };
+    }
 
     if (!normalized.success && normalized.reason) {
       this.lastSubtitleMissingReasons[role] = normalized.reason;
@@ -997,6 +1102,7 @@ class SubtitleInterceptor {
   }
 
   async tryLoadLanguageFromCaches(languageCode, role, reason) {
+    if (role === 'secondary') languageCode = this.effectiveSecondaryLanguage;
     await this.checkExistingCache();
     await this.loadLanguageDataFromCache(languageCode, role);
 
@@ -1028,24 +1134,32 @@ class SubtitleInterceptor {
       return { success: false, reason: 'dual-subtitle-disabled' };
     }
 
+    if (this.configuredSecondaryLanguage === 'auto') {
+      const resolution = await this.resolveAutoSecondaryLanguage();
+      if (!this.dualSubtitleEnabled) return { success: false, reason: 'dual-subtitle-disabled' };
+      if (!resolution) return { success: false, reason: 'stale-original-language-resolution' };
+    }
+
     // 2. Secondary language 未設定 → skip
-    if (!this.secondaryLanguage) {
+    if (!this.effectiveSecondaryLanguage) {
       this.recordDebugEvent('SECONDARY_ACQUISITION_SKIPPED_INVALID_CONTEXT', {
         reason,
-        missingField: 'secondaryLanguage'
+        missingField: 'effectiveSecondaryLanguage'
       });
-      return { success: false, reason: 'missing-secondary-language' };
+      return this.configuredSecondaryLanguage === 'auto' ? this.setLanguageAcquisitionResult('secondary', {
+        success: false, languageCode: null, reason: this.secondaryResolution.reason
+      }) : { success: false, reason: 'missing-secondary-language' };
     }
 
     const context = this.getCurrentPlaybackContext();
 
-    const selection = await this.prepareSecondaryTrack(this.secondaryLanguage);
+    const selection = await this.prepareSecondaryTrack();
     if (!selection.track) return this.setLanguageAcquisitionResult('secondary', {
-      success: false, languageCode: this.secondaryLanguage, reason: selection.reason
+      success: false, languageCode: this.effectiveSecondaryLanguage, reason: selection.reason
     });
 
     // 3. Secondary slot already ready for current context → 不回傳 success 以外的資訊，不切 track
-    if (this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+    if (this.isLanguageSlotReady(this.effectiveSecondaryLanguage, 'secondary')) {
       this.recordDebugEvent('SECONDARY_ACQUISITION_SKIPPED_READY', { reason, context });
       return { success: true, source: 'already-ready', reason };
     }
@@ -1056,7 +1170,7 @@ class SubtitleInterceptor {
       this.recordDebugEvent('SECONDARY_ACQUISITION_DEFERRED_PRIMARY_NOT_READY', {
         reason,
         primaryLanguage: this.primaryLanguage,
-        secondaryLanguage: this.secondaryLanguage
+        secondaryLanguage: this.effectiveSecondaryLanguage
       });
       return { success: false, reason: 'deferred-primary-not-ready' };
     }
@@ -1073,7 +1187,7 @@ class SubtitleInterceptor {
 
     // 6. In-flight key 檢查（videoId + epoch + language）
     const epoch = context.epoch ?? 'null';
-    const inFlightKey = `${context.videoId}|${epoch}|${this.secondaryLanguage}|${selection.track.trackId ?? 'unknown'}`;
+    const inFlightKey = `${context.videoId}|${epoch}|${this.effectiveSecondaryLanguage}|${selection.track.trackId ?? 'unknown'}`;
 
     this.recordDebugEvent('SECONDARY_ACQUISITION_REQUESTED', { reason, inFlightKey, context });
 
@@ -1091,7 +1205,7 @@ class SubtitleInterceptor {
     // 6. 建立新的 in-flight record
     const inFlightRecord = {
       key: inFlightKey,
-      language: this.secondaryLanguage,
+      language: this.effectiveSecondaryLanguage,
       didSwitch: false,
       promise: null
     };
@@ -1103,7 +1217,7 @@ class SubtitleInterceptor {
       // ★ 擷取 starting track 供 restore 使用
       const startTrack = await this.captureCurrentNetflixTrack();
       try {
-        const result = await this.ensureLanguageAvailable(this.secondaryLanguage, 'secondary', options);
+        const result = await this.ensureLanguageAvailable(this.effectiveSecondaryLanguage, 'secondary', options);
         this.recordDebugEvent('SECONDARY_ACQUISITION_COMPLETED', {
           ...result,
           reason,
@@ -1157,8 +1271,9 @@ class SubtitleInterceptor {
     return await acquisitionPromise;
   }
 
-  async ensureSecondaryTrackAvailable(languageCode, options = {}) {
-    const selection = await this.prepareSecondaryTrack(languageCode);
+  async ensureSecondaryTrackAvailable(options = {}) {
+    const languageCode = this.effectiveSecondaryLanguage;
+    const selection = await this.prepareSecondaryTrack();
     if (!selection.track) return this.setLanguageAcquisitionResult('secondary', {
       success: false, languageCode, reason: selection.reason
     });
@@ -1227,7 +1342,7 @@ class SubtitleInterceptor {
   }
 
   async ensureLanguageAvailable(languageCode, role, options = {}) {
-    if (role === 'secondary') return this.ensureSecondaryTrackAvailable(languageCode, options);
+    if (role === 'secondary') return this.ensureSecondaryTrackAvailable(options);
     const startedAt = Date.now();
     const context = this.getCurrentPlaybackContext();
 
@@ -1486,7 +1601,7 @@ class SubtitleInterceptor {
       return 'primary';
     }
 
-    if (this.matchesLanguageForAcquisition(languageCode, this.secondaryLanguage)) {
+    if (this.matchesLanguageForAcquisition(languageCode, this.effectiveSecondaryLanguage)) {
       return 'secondary';
     }
 
@@ -1511,7 +1626,7 @@ class SubtitleInterceptor {
 
   async switchLanguageAndWait(languageCode, role, options = {}) {
     if (role === 'secondary') {
-      const result = await this.ensureSecondaryTrackAvailable(languageCode, options);
+      const result = await this.ensureSecondaryTrackAvailable(options);
       return { ...result, ready: result.success };
     }
     const timeoutMs = options.timeoutMs || 10000;
@@ -1561,7 +1676,7 @@ class SubtitleInterceptor {
 
   async refreshLanguageTrack(languageCode, role, currentLanguage, options = {}) {
     if (role === 'secondary') {
-      const result = await this.ensureSecondaryTrackAvailable(languageCode, options);
+      const result = await this.ensureSecondaryTrackAvailable(options);
       return { ...result, ready: result.success };
     }
     const availableLanguages = await this.getAvailableNetflixLanguages();
@@ -1599,6 +1714,7 @@ class SubtitleInterceptor {
   }
 
   async diagnoseLanguageAvailability(languageCode, role = null) {
+    if (role === 'secondary') languageCode = this.effectiveSecondaryLanguage;
     const context = this.getCurrentPlaybackContext();
     const matchingParsedEntries = Array.from(this.interceptedSubtitles.entries())
       .filter(([, data]) => this.matchesLanguageForAcquisition(data?.language, languageCode));
@@ -1744,9 +1860,10 @@ class SubtitleInterceptor {
 
   // 為特定語言載入字幕（使用事件通知的攔截邏輯）
   async loadSubtitleForLanguage(languageCode, type) {
-    this.log(`載入 ${type} 語言字幕: ${languageCode}`);
-
     const role = this.resolveLanguageRole(languageCode, type);
+    if (role === 'secondary') languageCode = this.effectiveSecondaryLanguage;
+    if (!normalizeSubtitleLanguage(languageCode)) return;
+    this.log(`載入 ${role} 語言字幕: ${languageCode}`);
     const result = await this.switchLanguageAndWait(languageCode, role, {
       reason: 'legacy-load-subtitle-for-language',
       timeoutMs: 10000
@@ -1833,7 +1950,7 @@ class SubtitleInterceptor {
         primaryText: primarySubtitle?.text || '',
         secondaryText: this.dualSubtitleEnabled ? (secondarySubtitle?.text || '') : '',
         primaryLanguage: this.primaryLanguage,
-        secondaryLanguage: this.secondaryLanguage,
+        secondaryLanguage: this.effectiveSecondaryLanguage,
         timestamp: primarySubtitle?.startTime ?? currentTime,
         primarySubtitle: primarySubtitle,
         secondarySubtitle: this.dualSubtitleEnabled ? secondarySubtitle : null,
@@ -1948,7 +2065,7 @@ class SubtitleInterceptor {
       // 本地設置會通過訂閱機制自動更新
       // 但為了避免訂閱回調觸發 loadInterceptedSubtitles 之前就返回，也手動更新
       this.primaryLanguage = primaryLanguage;
-      this.secondaryLanguage = secondaryLanguage;
+      this.applyConfiguredSecondaryLanguage(secondaryLanguage);
 
       // 如果已經初始化，重新載入字幕
       if (this.isInitialized && this.isActive) {
@@ -1990,8 +2107,12 @@ class SubtitleInterceptor {
       isInitialized: this.isInitialized,
       dualSubtitleEnabled: this.dualSubtitleEnabled,
       primaryLanguage: this.primaryLanguage,
-      secondaryLanguage: this.secondaryLanguage,
+      secondaryLanguage: this.effectiveSecondaryLanguage,
       currentTimestamp: this.currentTimestamp,
+      configuredSecondaryLanguage: this.configuredSecondaryLanguage,
+      effectiveSecondaryLanguage: this.effectiveSecondaryLanguage,
+      selectedSecondaryTrack: this.selectedSecondaryTrack,
+      secondaryResolution: { ...this.secondaryResolution },
       primarySubtitleCount: this.primarySubtitles.length,
       secondarySubtitleCount: this.secondarySubtitles.length,
       currentVideoId: getVideoId(),
@@ -2101,14 +2222,14 @@ class SubtitleInterceptor {
         missingReason: primaryReady ? null : this.computeSubtitleMissingReason('primary', this.primaryLanguage, context)
       },
       secondary: {
-        language: this.secondaryLanguage,
+        language: this.effectiveSecondaryLanguage,
         ready: secondaryReady,
         count: this.secondarySubtitles.length,
         cacheKey: this.secondarySubtitleMeta?.cacheKey || null,
         metaCurrent: secondaryMetaCurrent,
         trackId: this.secondarySubtitleMeta?.trackId ?? null,
         selectedTrack: this.selectedSecondaryTrack,
-        missingReason: secondaryReady ? null : this.computeSubtitleMissingReason('secondary', this.secondaryLanguage, context)
+        missingReason: secondaryReady ? null : this.computeSubtitleMissingReason('secondary', this.effectiveSecondaryLanguage, context)
       },
       renderReadiness: {
         interceptModeActive: this.isActive,
@@ -2147,8 +2268,10 @@ class SubtitleInterceptor {
   }
 
   computeSubtitleMissingReason(slot, languageCode, context = this.getCurrentPlaybackContext()) {
+    if (slot === 'secondary') languageCode = this.effectiveSecondaryLanguage;
     if (!languageCode) {
-      return 'missing-target-language';
+      return slot === 'secondary' && this.configuredSecondaryLanguage === 'auto' ?
+        this.secondaryResolution.reason : 'missing-target-language';
     }
 
     if (!context.videoId || context.videoId === 'unknown') {
@@ -3143,7 +3266,7 @@ class SubtitleInterceptor {
           });
 
           // ★ C: primary recovery 成功後立即觸發 secondary acquisition（idempotent，不 await）
-          if (this.dualSubtitleEnabled && !this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+          if (this.dualSubtitleEnabled && !this.isLanguageSlotReady(this.effectiveSecondaryLanguage, 'secondary')) {
             this.ensureSecondaryLanguageAvailableOnce('primary-dom-recovery-ready').catch(error => {
               this.log('Secondary acquisition triggered by primary recovery failed:', error.message);
             });
@@ -3318,7 +3441,7 @@ class SubtitleInterceptor {
           }
 
           // ★ C: primary recovery 成功後立即觸發 secondary acquisition（idempotent，不 await）
-          if (this.dualSubtitleEnabled && !this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+          if (this.dualSubtitleEnabled && !this.isLanguageSlotReady(this.effectiveSecondaryLanguage, 'secondary')) {
             this.ensureSecondaryLanguageAvailableOnce('primary-dom-recovery-ready').catch(error => {
               this.log('Secondary acquisition triggered by primary recovery failed:', error.message);
             });
@@ -3393,7 +3516,7 @@ class SubtitleInterceptor {
   /**
    * 次要語言 DOM recovery（fallback-only）。
    * 當 secondary acquisition 因 polluted request evidence 失敗時，
-   * 嘗試暫時切換 Netflix active track 到 secondaryLanguage，
+   * 嘗試暫時切換 Netflix active track 到 effectiveSecondaryLanguage，
    * 收集 DOM sample 並使用 DOMOverlapMatcher 比對 raw TTML pool 中的候選，
    *
    * 設計原則：
@@ -3422,7 +3545,7 @@ class SubtitleInterceptor {
     this._cleanupSecondaryRecoveryCooldown();
 
     // === Guard checks ===
-    if (!this.dualSubtitleEnabled || !this.secondaryLanguage) {
+    if (!this.dualSubtitleEnabled || !this.effectiveSecondaryLanguage) {
       this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED', {
         reason,
         detail: !this.dualSubtitleEnabled ? 'dual-disabled' : 'no-secondary-language'
@@ -3440,7 +3563,7 @@ class SubtitleInterceptor {
     }
 
     // Secondary slot must still be missing
-    if (this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+    if (this.isLanguageSlotReady(this.effectiveSecondaryLanguage, 'secondary')) {
       this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED', {
         reason,
         detail: 'secondary-already-ready'
@@ -3458,7 +3581,7 @@ class SubtitleInterceptor {
     }
 
     // Per-context cooldown guard
-    const cooldownKey = `${context.videoId}|${context.epoch || 'null'}|${this.secondaryLanguage}`;
+    const cooldownKey = `${context.videoId}|${context.epoch || 'null'}|${this.effectiveSecondaryLanguage}`;
     const cooldownTs = this._secondaryRecoveryCooldown?.get(cooldownKey);
     if (cooldownTs && (Date.now() - cooldownTs) < 60000) {
       this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED', {
@@ -3471,22 +3594,22 @@ class SubtitleInterceptor {
     }
 
     // Recovery 也只可取得結構化選中的軌道，不可回到名稱／語言猜測。
-    const selection = await this.prepareSecondaryTrack(this.secondaryLanguage);
+    const selection = await this.prepareSecondaryTrack();
     const selected = this.selectedSecondaryTrack;
     if (!selection.track || !selected) {
       this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED_NO_TRACK', {
         reason,
-        secondaryLanguage: this.secondaryLanguage
+        secondaryLanguage: this.effectiveSecondaryLanguage
       });
       return false;
     }
 
-    // Raw TTML pool must have at least one candidate matching secondaryLanguage
-    const hasRaw = await this.hasRawTTMLCandidateForLanguage(this.secondaryLanguage);
+    // Raw TTML pool must have at least one candidate matching effectiveSecondaryLanguage
+    const hasRaw = await this.hasRawTTMLCandidateForLanguage(this.effectiveSecondaryLanguage);
     if (!hasRaw) {
       this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SKIPPED_NO_RAW_CANDIDATE', {
         reason,
-        secondaryLanguage: this.secondaryLanguage
+        secondaryLanguage: this.effectiveSecondaryLanguage
       });
       return false;
     }
@@ -3509,7 +3632,7 @@ class SubtitleInterceptor {
     this.recordDebugEvent('SECONDARY_DOM_RECOVERY_STARTED', {
       reason,
       cooldownKey,
-      secondaryLanguage: this.secondaryLanguage,
+      secondaryLanguage: this.effectiveSecondaryLanguage,
       context: { videoId: context.videoId, epoch: context.epoch }
     });
 
@@ -3518,7 +3641,7 @@ class SubtitleInterceptor {
     let switchedAway = false;
 
     try {
-      // If not already on secondaryLanguage, switch to it to let Netflix DOM update
+      // If not already on the effective track, switch to it to let Netflix DOM update
       if (!startTrack || (selected.trackId !== null && selected.trackId !== undefined ?
         startTrack.trackId !== selected.trackId :
         normalizeSubtitleLanguage(startTrack.code) !== normalizeSubtitleLanguage(selected.code))) {
@@ -3559,8 +3682,8 @@ class SubtitleInterceptor {
         return false;
       }
 
-      // Run one-shot match for secondaryLanguage
-      const matchResult = await this.domOverlapMatcher.runMatchOnce(this.secondaryLanguage, {
+      // Run one-shot match for effectiveSecondaryLanguage
+      const matchResult = await this.domOverlapMatcher.runMatchOnce(this.effectiveSecondaryLanguage, {
         domSample: sample,
         source: 'secondary-dom-recovery'
       });
@@ -3587,7 +3710,7 @@ class SubtitleInterceptor {
         score: Math.round(match.score * 1000) / 1000,
         matchedUnits: match.matchedUnits,
         totalDomUnits: match.totalDomUnits,
-        secondaryLanguage: this.secondaryLanguage,
+        secondaryLanguage: this.effectiveSecondaryLanguage,
         videoId: context.videoId
       });
 
@@ -3617,7 +3740,7 @@ class SubtitleInterceptor {
         });
 
         // Verify secondary slot became ready/current
-        const secondaryReady = this.isLanguageSlotReady(this.secondaryLanguage, 'secondary');
+        const secondaryReady = this.isLanguageSlotReady(this.effectiveSecondaryLanguage, 'secondary');
         if (secondaryReady) {
           this._secondaryRecoveryLastResult = {
             success: true,
@@ -3765,7 +3888,7 @@ class SubtitleInterceptor {
       if (this.matchesLanguageForAcquisition(language, this.primaryLanguage)) {
         this.lastSubtitleMissingReasons.primary = `raw-ttml-gate-${gate.reason}`;
       }
-      if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage)) {
+      if (this.matchesLanguageForAcquisition(language, this.effectiveSecondaryLanguage)) {
         this.lastSubtitleMissingReasons.secondary = `raw-ttml-gate-${gate.reason}`;
       }
       this.recordDebugEvent('RAW_TTML_REJECTED_BY_GATE', {
@@ -3853,7 +3976,7 @@ class SubtitleInterceptor {
           // Promotion Guard：避免非當前影片的 TTML 覆蓋已 ready 的 active slot
           // 僅針對目標語言（primary/secondary）執行 guard；非目標語言不應產生誤判事件
           if (this.matchesLanguageForAcquisition(language, this.primaryLanguage, domMatchLangOpts) ||
-              (this.matchesLanguageForAcquisition(language, this.secondaryLanguage, domMatchLangOpts) && this.dualSubtitleEnabled)) {
+              (this.matchesLanguageForAcquisition(language, this.effectiveSecondaryLanguage, domMatchLangOpts) && this.dualSubtitleEnabled)) {
             const promotionRole = this.resolveLanguageRole(language);
             const promotion = this.shouldPromoteParsedTTMLToActiveSlot(language, subtitles, {
               cacheKey,
@@ -3894,7 +4017,7 @@ class SubtitleInterceptor {
         if (this.matchesLanguageForAcquisition(language, this.primaryLanguage)) {
           this.lastSubtitleMissingReasons.primary = 'parse-empty';
         }
-        if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage)) {
+        if (this.matchesLanguageForAcquisition(language, this.effectiveSecondaryLanguage)) {
           this.lastSubtitleMissingReasons.secondary = 'parse-empty';
         }
         this.dispatchSubtitleReadinessChanged('raw-ttml-parse-empty', { cacheKey, language });
@@ -3912,7 +4035,7 @@ class SubtitleInterceptor {
       if (this.matchesLanguageForAcquisition(language, this.primaryLanguage)) {
         this.lastSubtitleMissingReasons.primary = 'parse-error';
       }
-      if (this.matchesLanguageForAcquisition(language, this.secondaryLanguage)) {
+      if (this.matchesLanguageForAcquisition(language, this.effectiveSecondaryLanguage)) {
         this.lastSubtitleMissingReasons.secondary = 'parse-error';
       }
       this.dispatchSubtitleReadinessChanged('raw-ttml-parse-error', { cacheKey, language, reason: 'parse-error' });
@@ -3939,7 +4062,7 @@ class SubtitleInterceptor {
 
     // Promotion Guard (入口防禦)：避免其他路徑繞過既有歸屬檢查。
     if (this.matchesLanguageForAcquisition(language, this.primaryLanguage, langMatchOpts) ||
-        (this.matchesLanguageForAcquisition(language, this.secondaryLanguage, langMatchOpts) && this.dualSubtitleEnabled)) {
+        (this.matchesLanguageForAcquisition(language, this.effectiveSecondaryLanguage, langMatchOpts) && this.dualSubtitleEnabled)) {
       const promotionRole = this.resolveLanguageRole(language);
       const promotion = this.shouldPromoteParsedTTMLToActiveSlot(language, subtitles, metadata, promotionRole);
       if (!promotion.promote) {
@@ -3973,9 +4096,9 @@ class SubtitleInterceptor {
       });
       this.log(`主要語言字幕已更新: ${language} (目標: ${this.primaryLanguage})`);
 
-      if (this.dualSubtitleEnabled && !this.isLanguageSlotReady(this.secondaryLanguage, 'secondary')) {
+      if (this.dualSubtitleEnabled && !this.isLanguageSlotReady(this.effectiveSecondaryLanguage, 'secondary')) {
         this.recordDebugEvent('SECONDARY_ACQUISITION_TRIGGERED_AFTER_PRIMARY_READY', {
-          language: this.secondaryLanguage,
+          language: this.effectiveSecondaryLanguage,
           primaryLanguage: this.primaryLanguage
         });
         this.ensureSecondaryLanguageAvailableOnce('primary-ready-trigger', {
@@ -3999,14 +4122,14 @@ class SubtitleInterceptor {
         cacheKey: metadata.cacheKey || null,
         language
       });
-      this.log(`次要語言字幕已更新: ${language} (目標: ${this.secondaryLanguage})`);
+      this.log(`次要語言字幕已更新: ${language} (目標: ${this.effectiveSecondaryLanguage})`);
     } else if (isDomMatchEntry) {
       // DOM match entry 但語言仍無法匹配 — 記錄診斷事件以利除錯
       this.primaryDiscovery.lastFailureReason = 'language-mismatch';
       this.recordDebugEvent('PRIMARY_DISCOVERY_LANGUAGE_MISMATCH', {
         language,
         primaryLanguage: this.primaryLanguage,
-        secondaryLanguage: this.secondaryLanguage,
+        secondaryLanguage: this.effectiveSecondaryLanguage,
         cacheKey: metadata.cacheKey
       });
     }
@@ -4081,9 +4204,9 @@ class SubtitleInterceptor {
     
     // 檢查次要語言字幕
     if (this.secondarySubtitles.length > 0) {
-      const isValid = this.isSubtitlesValidForVideo(this.secondaryLanguage, currentVideoId);
+      const isValid = this.isSubtitlesValidForVideo(this.effectiveSecondaryLanguage, currentVideoId);
       if (!isValid) {
-        this.log(`次要語言字幕不屬於當前影片，清空: ${this.secondaryLanguage}`);
+        this.log(`次要語言字幕不屬於當前影片，清空: ${this.effectiveSecondaryLanguage}`);
         this.secondarySubtitles = [];
         this.secondaryTimeIndex = null;
         this.secondarySubtitleMeta = null;

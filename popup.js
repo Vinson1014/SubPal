@@ -209,6 +209,7 @@ function populateLanguageSelects() {
 
     if (secondarySelect) {
         secondarySelect.innerHTML = '';
+        secondarySelect.add(new Option('自動（跟隨影片原始語言）', 'auto'));
         for (const lang of SUPPORTED_LANGUAGES) {
             secondarySelect.add(new Option(lang.name, lang.code));
         }
@@ -320,7 +321,8 @@ function setupSubtitleCardListeners() {
         secondarySelect.addEventListener('change', async (e) => {
             try {
                 await configManager.set('subtitle.secondaryLanguage', e.target.value);
-                const langName = SUPPORTED_LANGUAGES.find(l => l.code === e.target.value)?.name || e.target.value;
+                const langName = e.target.value === 'auto' ? '自動（跟隨影片原始語言）' :
+                    SUPPORTED_LANGUAGES.find(l => l.code === e.target.value)?.name || e.target.value;
                 showToast(`次要語言: ${langName}`);
             } catch (error) {
                 console.error('[Popup] 設置次要語言失敗:', error);

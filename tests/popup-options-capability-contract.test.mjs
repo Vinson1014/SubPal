@@ -40,7 +40,7 @@ function statsResult(points = 5) {
 async function loadPopupHarness({ automaticResponse } = {}) {
   const elements = new Map([
     'profile-user-id', 'score', 'contrib-count', 'replace-count', 'translation-views', 'upvotes-received',
-    'success-toast', 'mainToggle', 'settings-btn'
+    'success-toast', 'mainToggle', 'settings-btn', 'popup-primary-lang', 'popup-secondary-lang'
   ].map((id) => [id, createElement()]));
   const documentListeners = new Map();
   const runtimeMessages = [];
@@ -49,6 +49,7 @@ async function loadPopupHarness({ automaticResponse } = {}) {
   const timers = new Map();
   let nextTimerId = 0;
   const configGets = [];
+  const configWrites = [];
   const configManager = {
     isInitialized: true,
     get(key) {
@@ -61,7 +62,7 @@ async function loadPopupHarness({ automaticResponse } = {}) {
         'subtitle.style.primary.fontSize': 55
       }[key];
     },
-    async set() {},
+    async set(key, value) { configWrites.push({ key, value }); },
     subscribe() {}
   };
   const runtime = {
@@ -90,7 +91,7 @@ async function loadPopupHarness({ automaticResponse } = {}) {
       return id;
     },
     clearTimeout(id) { timers.delete(id); },
-    Option: class {},
+    Option: class { constructor(text, value) { this.text = text; this.value = value; } },
     chrome: { runtime, tabs: { create() {} }, storage: { local: {} } }
   });
   const source = await readFile(new URL('popup.js', root), 'utf8');
@@ -99,7 +100,7 @@ async function loadPopupHarness({ automaticResponse } = {}) {
     this.setExport('configManager', configManager);
   }, { context, identifier: 'config-manager.js' });
   const schemaModule = new vm.SyntheticModule(['SUPPORTED_LANGUAGES'], function initialize() {
-    this.setExport('SUPPORTED_LANGUAGES', []);
+    this.setExport('SUPPORTED_LANGUAGES', [{ code: 'en', name: 'English' }, { code: 'ja', name: '日本語' }]);
   }, { context, identifier: 'config-schema.js' });
   await configModule.link(() => { throw new Error('Unexpected config dependency'); });
   await schemaModule.link(() => { throw new Error('Unexpected schema dependency'); });
@@ -115,6 +116,7 @@ async function loadPopupHarness({ automaticResponse } = {}) {
   return {
     callbacks,
     configGets,
+    configWrites,
     elements,
     runtime,
     runtimeListeners,
@@ -129,6 +131,19 @@ async function loadPopupHarness({ automaticResponse } = {}) {
     }
   };
 }
+
+test('Given popup language controls When secondary auto is selected Then only secondary offers auto and persists the mode with a readable label', async () => {
+  const popup = await loadPopupHarness({ automaticResponse: statsResult() });
+  const secondary = popup.elements.get('popup-secondary-lang');
+  const primary = popup.elements.get('popup-primary-lang');
+  assert.deepEqual(secondary.options.map(option => option.value), ['auto', 'en', 'ja']);
+  assert.equal(secondary.options[0].text, '自動（跟隨影片原始語言）');
+  assert.deepEqual(primary.options.map(option => option.value), ['en', 'ja']);
+  secondary.value = 'auto';
+  await secondary.listener('change')({ target: secondary });
+  assert.deepEqual(popup.configWrites, [{ key: 'subtitle.secondaryLanguage', value: 'auto' }]);
+  assert.equal(popup.elements.get('success-toast').textContent, '次要語言: 自動（跟隨影片原始語言）');
+});
 
 test('Given Popup startup When active-profile stats succeed Then it sends only the sealed request, renders the fixed projection, and never reads raw identity or active-tab state', async () => {
   const popup = await loadPopupHarness({ automaticResponse: statsResult() });

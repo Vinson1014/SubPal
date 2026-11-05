@@ -451,6 +451,7 @@ function populateLanguageSelects() {
 
   if (secondarySelect) {
     secondarySelect.innerHTML = '';
+    secondarySelect.add(new Option('自動（跟隨影片原始語言）', 'auto'));
     for (const lang of SUPPORTED_LANGUAGES) {
       secondarySelect.add(new Option(lang.name, lang.code));
     }
