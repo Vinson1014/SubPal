@@ -18,6 +18,7 @@ import { getPlayerAdapter } from './netflix-player-adapter.js';
 import { registerInternalEventHandler, dispatchInternalEvent } from '../system/messaging.js';
 import { createPageContributions } from '../system/capabilities/contributions.js';
 import { SubtitleReplacer } from '../core/subtitle-replacer.js';
+import { SUPPORTED_LANGUAGES } from '../system/config/config-schema.js';
 
 const MS_PER_SECOND = 1000;
 let contributions;
@@ -51,6 +52,7 @@ class UIManager {
     this.nativeHideReason = 'not-hidden';
     this.nativeSubtitleVisibilityUpdatedAt = null;
     this.acquisitionToastKeys = new Set();
+    this.autoSecondaryToastKeys = new Set();
     
     // 備援通知狀態機（fallback/recovery toast 控制）
     this.recoveryNotificationState = null;
@@ -534,6 +536,7 @@ class UIManager {
     this.internalEventDisposers.push(registerInternalEventHandler('SUBTITLE_READINESS_CHANGED', (event) => {
       this.syncNativeSubtitleVisibility(event.readiness?.renderReadiness, event.reason || 'subtitle-readiness-changed');
       this.handleFallbackNotification(event);
+      if (event.slot === 'secondary') this.handleAcquisitionFailureNotification(event);
     }));
 
     this.internalEventDisposers.push(registerInternalEventHandler('SUBTITLE_RENDER_RESET', (event) => {
@@ -1264,6 +1267,10 @@ class UIManager {
   }
 
   handleAcquisitionFailureNotification(event) {
+    if (event?.reason === 'language-acquisition-failed' && event.slot === 'secondary') {
+      this.handleAutoSecondaryFailureNotification(event);
+      return;
+    }
     if (event?.reason !== 'language-acquisition-failed' || event.slot !== 'primary') {
       return;
     }
@@ -1314,6 +1321,33 @@ class UIManager {
     }[reason] || '尚未找到可用字幕資料';
 
     return `SubPal 未能建立自訂主字幕：${reasonText}。目前會保留 Netflix 原生字幕。`;
+  }
+
+  handleAutoSecondaryFailureNotification(event) {
+    const secondary = event.readiness?.secondary;
+    const videoId = event.readiness?.context?.videoId;
+    if (!videoId || secondary?.configuredLanguage !== 'auto' || secondary.dualEnabled !== true || secondary.ready) return;
+    const resolution = secondary.resolution || {};
+    const kind = resolution.failureKind || resolution.status;
+    const text = {
+      missing: '此影片沒有原始語言字幕',
+      unknown: '無法判斷原始語言',
+      ambiguous: '無法判斷原始語言：此影片有多種原始語言或字幕語言',
+      unavailable: '原始語言解析失敗',
+      'acquisition-failed': '原始語言字幕取得失敗'
+    }[kind];
+    if (!text) return;
+    // 與 primary 的 epoch 去重不同，auto 警告在同影片／原因只出現一次。
+    const key = `auto-secondary|${videoId}|${kind}|${resolution.reason}`;
+    if (this.autoSecondaryToastKeys.has(key)) return;
+    this.autoSecondaryToastKeys.add(key);
+    const codes = secondary.originalLanguages?.length ? secondary.originalLanguages : [secondary.language];
+    const names = [...new Set(codes.filter(code => code && code !== 'auto').map(code =>
+      SUPPORTED_LANGUAGES.find(language => language.code.toLowerCase() === code.toLowerCase())?.name ||
+      SUPPORTED_LANGUAGES.find(language => language.code.split('-')[0] === code.split('-')[0])?.name || code))];
+    this.showWarningToast(`SubPal 自動次要字幕：${text}${names.length ? `（${names.join('、')}）` : ''}。主要字幕不受影響。`, {
+      duration: 8000, showIcon: true
+    });
   }
 
   // ==================== 備援通知控制器 ====================

@@ -168,11 +168,15 @@ class PlaybackContextManager {
         this.context = {
           ...this.context,
           snapshot: playback,
+          trackListRevision: playback.trackListRevision ?? this.context.trackListRevision ?? null,
           updatedAt: Date.now(),
           source: reason
         };
       }
 
+      if (reason === 'poll') {
+        dispatchInternalEvent({ type: 'PLAYBACK_CONTEXT_POLLED', reason, context: this.getCurrentContext() });
+      }
       return this.context;
     } finally {
       if (this.pendingRefreshAbortController === controller) {
@@ -246,6 +250,7 @@ class PlaybackContextManager {
       updatedAt: Date.now(),
       source,
       snapshot: playback,
+      trackListRevision: playback.trackListRevision ?? null,
       selectedSessionReason,
       sessionSelectionConfidence
     };

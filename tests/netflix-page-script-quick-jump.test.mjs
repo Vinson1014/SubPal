@@ -505,6 +505,34 @@ async function settlePageCommand() {
 
 const validExpected = { videoId: '81234567', sessionId: 'watch-fa058b0f-0000-4000-8000-000000000001', epoch: 3, targetTimestamp: 12.5 };
 
+test('context snapshot exposes only an opaque track-list revision that ignores selection but changes with available native or subtitle tracks', async () => {
+  const tracks = [{ bcp47: 'ja', trackId: 'ja', trackType: 'PRIMARY', rawTrackType: 'SUBTITLES', isNoneTrack: false }];
+  const harness = createPageHarness({ timedTextTracks: () => tracks });
+  const audio = [{ bcp47: 'ja', isNative: true, trackId: 'audio-ja', selected: false, secret: 'private' }];
+  harness.selectedPlayer.getAudioTrackList = () => audio;
+  const read = async () => {
+    harness.sendTyped(typedRequest('revision', 'playback', 'context-snapshot', {}));
+    await settlePageCommand();
+    const response = plain(harness.responses.at(-1)).response;
+    assert.equal(response.ok, true);
+    assert.equal(JSON.stringify(response).includes('audio-ja'), false);
+    assert.equal(JSON.stringify(response).includes('private'), false);
+    return response.value.playback.trackListRevision;
+  };
+  const initial = await read();
+  assert.equal(Number.isSafeInteger(initial), true);
+  audio[0].selected = true;
+  await harness.selectedPlayer.setTimedTextTrack({ ...tracks[0], trackId: 'different-current' });
+  assert.equal(await read(), initial);
+  tracks.push({ ...tracks[0], trackId: 'ja-cc', rawTrackType: 'CLOSEDCAPTIONS' });
+  const textChanged = await read();
+  assert.equal(textChanged > initial, true);
+  audio[0].isNative = false;
+  assert.equal(await read() > textChanged, true);
+  harness.selectedPlayer.getAudioTrackList = () => { throw new Error('not-ready'); };
+  assert.equal(await read(), null);
+});
+
 test('Given a trusted watch session Then original-language reads only that session native audio and returns no raw audio data', async () => {
   const harness = createPageHarness();
   let reads = 0;
@@ -680,7 +708,7 @@ test('Given canonical typed Playback requests When received by the page Then all
       playback: {
         pageUrlVideoId: '81234567', playerApiVideoId: '81234567', movieId: '81234567',
         selectedSessionId: typedContext.sessionId, selectedSessionReason: 'watch-player-api-video-id-match',
-        sessionSelectionConfidence: 'high', currentTime: 120000, duration: 300000, currentTrack: track
+        sessionSelectionConfidence: 'high', currentTime: 120000, duration: 300000, currentTrack: track, trackListRevision: null
       }
     }],
     ['available-languages', {}, typedContext, { languages: [track] }],

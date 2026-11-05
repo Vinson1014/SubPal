@@ -2078,7 +2078,7 @@
   const PRIVATE_CONTEXT_KEYS = new Set(['videoId', 'sessionId', 'epoch']);
   const PRIVATE_SNAPSHOT_KEYS = new Set([
     'pageUrlVideoId', 'playerApiVideoId', 'movieId', 'selectedSessionId', 'selectedSessionReason',
-    'sessionSelectionConfidence', 'currentTime', 'duration', 'currentTrack'
+    'sessionSelectionConfidence', 'currentTime', 'duration', 'currentTrack', 'trackListRevision'
   ]);
   const PRIVATE_PLAYBACK_VARIANTS = Object.freeze({
     'context-snapshot': new Set(),
@@ -2313,7 +2313,7 @@
     try {
       if (!value || typeof value !== 'object') return null;
       const snapshot = {};
-      for (const key of PRIVATE_SNAPSHOT_KEYS) snapshot[key] = value[key];
+      for (const key of PRIVATE_SNAPSHOT_KEYS) snapshot[key] = key === 'trackListRevision' ? value[key] ?? null : value[key];
       const currentTrack = snapshot.currentTrack === null ? null : projectPrivateTrack(snapshot.currentTrack);
       if ((snapshot.pageUrlVideoId !== null && typeof snapshot.pageUrlVideoId !== 'string') ||
         (snapshot.playerApiVideoId !== null && typeof snapshot.playerApiVideoId !== 'string') ||
@@ -2323,6 +2323,7 @@
         (snapshot.sessionSelectionConfidence !== null && typeof snapshot.sessionSelectionConfidence !== 'string') ||
         (snapshot.currentTime !== null && !Number.isFinite(snapshot.currentTime)) ||
         (snapshot.duration !== null && !Number.isFinite(snapshot.duration)) ||
+        (snapshot.trackListRevision !== null && (!Number.isSafeInteger(snapshot.trackListRevision) || snapshot.trackListRevision < 0)) ||
         (snapshot.currentTrack !== null && !currentTrack)) return null;
       return { ...snapshot, currentTrack };
     } catch {
@@ -2347,6 +2348,40 @@
   function isTrustedOriginalLanguageSnapshot(snapshot) {
     return Boolean(snapshot?.pageUrlVideoId) && isWatchSessionId(snapshot?.selectedSessionId) &&
       ['high', 'medium'].includes(snapshot?.sessionSelectionConfidence);
+  }
+
+  let privateTrackListObservation = null;
+  let privateTrackListRevision = 0;
+
+  // 僅在既有 context-snapshot 輪詢讀清單；raw audio 留在 MAIN，不讀目前音軌。
+  function observePrivateTrackLists(snapshot) {
+    if (!isTrustedOriginalLanguageSnapshot(snapshot) || snapshot.pageUrlVideoId !== snapshot.playerApiVideoId) return null;
+    try {
+      const player = getNetflixPlayerAPI()?.videoPlayer?.getVideoPlayerBySessionId?.(snapshot.selectedSessionId);
+      if (typeof player?.getAudioTrackList !== 'function' || typeof player?.getTimedTextTrackList !== 'function') return null;
+      const audio = player.getAudioTrackList();
+      const text = player.getTimedTextTrackList();
+      if (!Array.isArray(audio) || !Array.isArray(text)) return null;
+      const string = value => typeof value === 'string' ? value : null;
+      const identity = value => typeof value === 'string' || Number.isFinite(value) ? value : null;
+      const fingerprint = JSON.stringify([
+        snapshot.pageUrlVideoId, snapshot.selectedSessionId,
+        audio.map(track => [identity(track?.trackId), string(track?.bcp47), track?.isNative === true]),
+        text.map(track => [identity(track?.trackId), string(track?.bcp47), string(track?.trackType),
+          string(track?.rawTrackType), track?.isNoneTrack === true, track?.isForcedNarrative === true])
+      ]);
+      const after = getPrivatePlaybackSnapshot();
+      if (!isTrustedOriginalLanguageSnapshot(after) || after.selectedSessionId !== snapshot.selectedSessionId ||
+          after.pageUrlVideoId !== snapshot.pageUrlVideoId || after.playerApiVideoId !== snapshot.playerApiVideoId) return null;
+      if (fingerprint !== privateTrackListObservation) {
+        privateTrackListObservation = fingerprint;
+        privateTrackListRevision += 1;
+      }
+      return privateTrackListRevision;
+    } catch {
+      // 暫時讀不到清單不是變更訊號，不得重置 retry 額度。
+      return null;
+    }
   }
 
   async function dispatchPrivateOriginalLanguage(context) {
@@ -2387,7 +2422,8 @@
   async function dispatchPrivatePlayback(envelope) {
     try {
       if (envelope.variant === 'context-snapshot') {
-        const playback = projectPrivateSnapshot(getPrivatePlaybackSnapshot());
+        const snapshot = getPrivatePlaybackSnapshot();
+        const playback = projectPrivateSnapshot({ ...snapshot, trackListRevision: observePrivateTrackLists(snapshot) });
         return playback ? privateOk({ playback }) : privateFail('domain-rejected', 'invalid-playback-snapshot');
       }
       if (envelope.variant === 'original-language') {

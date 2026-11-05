@@ -9,6 +9,7 @@ const SNAPSHOT_KEYS = new Set([
   'pageUrlVideoId', 'playerApiVideoId', 'movieId', 'selectedSessionId', 'selectedSessionReason',
   'sessionSelectionConfidence', 'currentTime', 'duration', 'currentTrack'
 ]);
+const SNAPSHOT_ALLOWED_KEYS = new Set([...SNAPSHOT_KEYS, 'trackListRevision']);
 const VARIANTS = Object.freeze({
   'context-snapshot': { payloadKeys: EMPTY_KEYS, deadlineMs: 3000, contextBound: false },
   'available-languages': { payloadKeys: EMPTY_KEYS, deadlineMs: 3000, contextBound: true },
@@ -183,13 +184,15 @@ function projectLanguage(value) {
 }
 
 function projectSnapshot(value) {
-  const playback = strictOwnRecord(value, SNAPSHOT_KEYS, SNAPSHOT_KEYS);
+  const playback = strictOwnRecord(value, SNAPSHOT_ALLOWED_KEYS, SNAPSHOT_KEYS);
   if (!playback || !isControlledString(playback.pageUrlVideoId) || !isControlledString(playback.playerApiVideoId) ||
     !isControlledString(playback.movieId) || !isControlledString(playback.selectedSessionId) ||
     !isControlledString(playback.selectedSessionReason) || !isControlledString(playback.sessionSelectionConfidence) ||
     !isControlledNumber(playback.currentTime) || !isControlledNumber(playback.duration)) return null;
   const currentTrack = projectLanguage(playback.currentTrack);
   if (currentTrack === null && playback.currentTrack !== null) return null;
+  if (Object.hasOwn(playback, 'trackListRevision') && playback.trackListRevision !== null &&
+      (!Number.isSafeInteger(playback.trackListRevision) || playback.trackListRevision < 0)) return null;
   return {
     pageUrlVideoId: playback.pageUrlVideoId,
     playerApiVideoId: playback.playerApiVideoId,
@@ -199,7 +202,8 @@ function projectSnapshot(value) {
     sessionSelectionConfidence: playback.sessionSelectionConfidence,
     currentTime: playback.currentTime,
     duration: playback.duration,
-    currentTrack
+    currentTrack,
+    ...(Object.hasOwn(playback, 'trackListRevision') ? { trackListRevision: playback.trackListRevision } : {})
   };
 }
 

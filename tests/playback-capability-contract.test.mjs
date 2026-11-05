@@ -174,6 +174,22 @@ function outcomeFor(variant) {
   return { variant, ...responseFor(variant) };
 }
 
+test('context snapshot accepts only an optional opaque nonnegative safe integer track-list revision and rejects raw audio or unknown fields', async () => {
+  const { createPlayback } = await loadPlayback();
+  for (const [extra, valid] of [
+    [{ trackListRevision: 0 }, true], [{ trackListRevision: 12 }, true], [{ trackListRevision: null }, true],
+    [{ trackListRevision: -1 }, false], [{ trackListRevision: 1.2 }, false], [{ trackListRevision: '12' }, false],
+    [{ trackListRevision: Number.MAX_SAFE_INTEGER + 1 }, false], [{ audioTracks: [] }, false],
+    [{ trackListRevision: 1, unknown: true }, false]
+  ]) {
+    const playback = createPlayback({ getCurrentContext: () => context(),
+      adapter: createAdapter({ ok: true, value: { playback: { ...snapshot(), ...extra } } }) });
+    const result = await playback.perform(intent('context-snapshot'));
+    assert.equal(result.ok, valid, JSON.stringify(extra));
+    if (valid) assert.equal(result.value.playback.trackListRevision, extra.trackListRevision);
+  }
+});
+
 function createAdapter(result) {
   const calls = [];
   let disposed = 0;

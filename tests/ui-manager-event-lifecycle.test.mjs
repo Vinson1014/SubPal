@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { SUPPORTED_LANGUAGES } from '../content/system/config/config-schema.js';
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const deferred = () => {
@@ -61,6 +62,9 @@ async function loadManager() {
   context.sendMessage = async () => ({});
   context.contributionProjection = async () => ({ ok: true, value: {} });
   const dependencies = new Map([
+    ['../system/config/config-schema.js', new vm.SyntheticModule(['SUPPORTED_LANGUAGES'], function () {
+      this.setExport('SUPPORTED_LANGUAGES', SUPPORTED_LANGUAGES);
+    }, { context })],
     ['./subtitle-display.js', componentModule('SubtitleDisplay', 'show(value) { globalThis.lifecycle.renders.push(value); } hide() {}')],
     ['./interaction-panel.js', componentModule('InteractionPanel', 'onSubmitClick() {} onLikeClick() {} onDislikeClick() {} updateVoteDisplay() {} updatePosition(value) { globalThis.lifecycle.avoidanceUpdates.push({ panel: this, value }); } hide() {}')],
     ['./submission-dialog.js', componentModule('SubmissionDialog', 'onSubmit(callback) { globalThis.lifecycle.submissionCallback = callback; } onCancel() {} onClose() {}')],
@@ -133,6 +137,52 @@ test('Given component reinitialization is pending When a subtitle callback arriv
   assert.equal(fixture.lifecycle.renders.length, 0);
   fixture.releaseInitialization();
   await flush();
+});
+
+test('auto secondary warnings distinguish failures, require dual auto, and deduplicate per video and reason across epochs', async () => {
+  const { manager, handlers } = await loadManager();
+  const messages = [];
+  manager.showWarningToast = message => messages.push(message);
+  const notify = (status, reason, language = 'ja-JP', overrides = {}) => {
+    handlers.get('SUBTITLE_READINESS_CHANGED')({
+      reason: 'language-acquisition-failed', slot: 'secondary', failureReason: reason,
+      readiness: { context: { videoId: 'A', epoch: 1 }, secondary: {
+        configuredLanguage: 'auto', dualEnabled: true, language, originalLanguages: language ? [language] : [],
+        resolution: { status, reason, ...(reason === 'parse-empty' ? { failureKind: 'acquisition-failed' } : {}) },
+        ...overrides
+      } }
+    });
+  };
+  notify('missing', 'no-eligible-secondary-track', 'ja', { dualEnabled: false });
+  notify('missing', 'no-eligible-secondary-track', 'ja', { configuredLanguage: 'en' });
+  assert.equal(messages.length, 0);
+  notify('missing', 'no-eligible-secondary-track');
+  notify('missing', 'no-eligible-secondary-track', 'ja');
+  notify('unknown', 'no-valid-native-audio-language', null);
+  notify('ambiguous', 'multiple-native-audio-languages', 'da');
+  notify('unavailable', 'original-language-unavailable', null);
+  notify('unavailable', 'parse-empty', 'da');
+  assert.equal(messages.length, 5);
+  assert.match(messages[0], /沒有原始語言字幕.*日本語/);
+  assert.match(messages[1], /無法判斷原始語言/);
+  assert.match(messages[2], /多種原始語言.*da/);
+  assert.match(messages[3], /原始語言解析失敗/);
+  assert.match(messages[4], /字幕取得失敗.*da/);
+  handlers.get('SUBTITLE_READINESS_CHANGED')({ reason: 'language-acquisition-failed', slot: 'secondary',
+    readiness: { context: { videoId: 'A', epoch: 2 }, secondary: { configuredLanguage: 'auto', dualEnabled: true,
+      language: 'ja', resolution: { status: 'missing', reason: 'no-eligible-secondary-track' } } } });
+  assert.equal(messages.length, 5);
+  handlers.get('SUBTITLE_READINESS_CHANGED')({ reason: 'language-acquisition-failed', slot: 'secondary',
+    readiness: { context: { videoId: 'B', epoch: 3 }, secondary: { configuredLanguage: 'auto', dualEnabled: true,
+      language: 'ja', resolution: { status: 'missing', reason: 'no-eligible-secondary-track' } } } });
+  assert.equal(messages.length, 6);
+  for (let epoch = 4; epoch < 60; epoch += 1) {
+    manager.handleAcquisitionFailureNotification({ reason: 'language-acquisition-failed', slot: 'primary',
+      failureReason: 'parse-empty', readiness: { context: { videoId: 'A', epoch } } });
+  }
+  const afterPrimaryWarnings = messages.length;
+  notify('missing', 'no-eligible-secondary-track');
+  assert.equal(messages.length, afterPrimaryWarnings, 'primary warning eviction must not lose per-video secondary deduplication');
 });
 
 test('Given one pending transition When VIDEO_ID_CHANGED repeats Then only one component rebuild runs', async () => {

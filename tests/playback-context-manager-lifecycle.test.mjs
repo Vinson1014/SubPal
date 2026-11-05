@@ -8,6 +8,7 @@ async function loadManagerHarness() {
   const handlers = [];
   const dispatchedEvents = [];
   const scheduledTimeouts = [];
+  const scheduledIntervals = [];
   const clearedTimeoutIds = [];
   const playbackCalls = [];
   const createdPlaybacks = [];
@@ -58,7 +59,7 @@ async function loadManagerHarness() {
     clearTimeout: (id) => {
       clearedTimeoutIds.push(id);
     },
-    setInterval: () => 1,
+    setInterval: (callback, delay) => { scheduledIntervals.push({ callback, delay }); return 1; },
     clearInterval() {},
     handlers,
     dispatchedEvents
@@ -80,6 +81,7 @@ async function loadManagerHarness() {
     handlers,
     dispatchedEvents,
     scheduledTimeouts,
+    scheduledIntervals,
     clearedTimeoutIds,
     playbackCalls,
     createdPlaybacks,
@@ -132,6 +134,23 @@ test('playback context preserves timed-text flags and the valid numeric zero tra
   assert.equal(track.trackId, 0);
   assert.equal(track.isNoneTrack, false);
   assert.equal(track.isForcedNarrative, true);
+  manager.cleanup();
+});
+
+test('the existing three-second timer publishes poll completion even when context and selected track do not change', async () => {
+  const { Manager, dispatchedEvents, scheduledIntervals } = await loadManagerHarness();
+  const manager = new Manager();
+  await manager.initialize();
+  assert.equal(scheduledIntervals.length, 1);
+  assert.equal(scheduledIntervals[0].delay, 3000);
+  dispatchedEvents.length = 0;
+  await scheduledIntervals[0].callback();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(dispatchedEvents.filter(event => event.type === 'PLAYBACK_CONTEXT_CHANGED').length, 0);
+  const polls = dispatchedEvents.filter(event => event.type === 'PLAYBACK_CONTEXT_POLLED');
+  assert.equal(polls.length, 1);
+  assert.equal(polls[0].context.state, 'ready');
+  assert.equal(polls[0].context.videoId, '81234567');
   manager.cleanup();
 });
 

@@ -40,6 +40,8 @@ class SubtitleInterceptor {
     this.selectedSecondaryTrack = null;
     this._secondaryTrackSelection = null;
     this._originalLanguageResolution = null;
+    this._autoSecondaryRetry = null;
+    this._autoSecondaryFailureReadinessKey = null;
     
     // 攔截的原始字幕數據
     this.interceptedSubtitles = new Map();
@@ -125,6 +127,7 @@ class SubtitleInterceptor {
   applyConfiguredSecondaryLanguage(languageCode) {
     if (this.configuredSecondaryLanguage === languageCode) return;
     this._originalLanguageResolution = null;
+    this._autoSecondaryRetry = null;
     this.configuredSecondaryLanguage = languageCode;
     this.setEffectiveSecondaryLanguage(languageCode, languageCode === 'auto' ?
       { status: 'resolving', reason: 'original-language-not-resolved' } :
@@ -1088,9 +1091,21 @@ class SubtitleInterceptor {
     if (role === 'secondary' && this.configuredSecondaryLanguage === 'auto' && normalized.success) {
       this.secondaryResolution = { status: 'ready', reason: 'original-language-subtitles-ready' };
     }
+    if (role === 'secondary' && this.configuredSecondaryLanguage === 'auto' && !normalized.success &&
+        this.selectedSecondaryTrack && normalized.reason !== 'deferred-primary-not-ready' &&
+        !normalized.reason?.startsWith('stale-')) {
+      this.secondaryResolution = { status: 'unavailable', reason: normalized.reason, failureKind: 'acquisition-failed' };
+    }
 
     if (!normalized.success && normalized.reason) {
       this.lastSubtitleMissingReasons[role] = normalized.reason;
+      if (role === 'secondary' && this.configuredSecondaryLanguage === 'auto') {
+        const context = this.getCurrentPlaybackContext();
+        const key = JSON.stringify([context.videoId, context.sessionId, context.epoch,
+          this.secondaryResolution.status, this.secondaryResolution.failureKind, normalized.reason]);
+        if (this._autoSecondaryFailureReadinessKey === key) return normalized;
+        this._autoSecondaryFailureReadinessKey = key;
+      }
       this.dispatchSubtitleReadinessChanged('language-acquisition-failed', {
         slot: role,
         languageCode: normalized.languageCode,
@@ -1128,6 +1143,61 @@ class SubtitleInterceptor {
    * @returns {Promise<Object>} { success, reason, ... }
    */
   async ensureSecondaryLanguageAvailableOnce(reason, options = {}) {
+    if (!this.dualSubtitleEnabled || this.configuredSecondaryLanguage !== 'auto') {
+      return this.acquireSecondaryLanguageOnce(reason, options);
+    }
+    const context = this.getCurrentPlaybackContext();
+    if (context.state !== 'ready' || !context.videoId || !context.sessionId) {
+      return { success: false, reason: 'invalid-context' };
+    }
+    let record = this._autoSecondaryRetry;
+    const revision = context.trackListRevision ?? record?.revision ?? null;
+    if (!record || record.context.videoId !== context.videoId || record.context.sessionId !== context.sessionId ||
+        record.context.epoch !== context.epoch || record.revision !== revision) {
+      // 清單 revision 不含目前音軌／字幕軌選取，不能被 SubPal 自己的切軌重置。
+      record = { context, revision, attempts: 0, result: null, promise: null };
+      this._autoSecondaryRetry = record;
+      this._originalLanguageResolution = null;
+      this._secondaryTrackSelection = null;
+    }
+    if (record.promise) return record.promise;
+    // 一般 cache reload 不重試；只有既有 context poll 可以消耗下一次額度。
+    if (record.result && (record.result.success || !options.retryAuto || record.attempts >= 3)) return record.result;
+    if (record.result) {
+      if (this._originalLanguageResolution?.result?.status !== 'resolved') this._originalLanguageResolution = null;
+      this._secondaryTrackSelection = null;
+    }
+    record.attempts += 1;
+    this.recordDebugEvent('AUTO_SECONDARY_ATTEMPT', { attempt: record.attempts, maxAttempts: 3, reason, context });
+    const run = async () => {
+      const result = await this.acquireSecondaryLanguageOnce(reason, options);
+      if (this._autoSecondaryRetry !== record || !this.dualSubtitleEnabled ||
+          this.configuredSecondaryLanguage !== 'auto') return result;
+      const latest = this.getCurrentPlaybackContext();
+      if (latest.videoId !== context.videoId || latest.sessionId !== context.sessionId || latest.epoch !== context.epoch) return result;
+      if (result.reason === 'deferred-primary-not-ready' || result.reason === 'dual-subtitle-disabled' ||
+          result.reason?.startsWith('stale-') || result.reason === 'invalid-context') {
+        record.attempts -= 1;
+        return result;
+      }
+      record.result = result;
+      if (!result.success) {
+        this.setLanguageAcquisitionResult('secondary', result);
+        this.recordDebugEvent('AUTO_SECONDARY_ATTEMPT_FAILED', {
+          attempt: record.attempts, exhausted: record.attempts >= 3, failureReason: result.reason
+        });
+      }
+      return result;
+    };
+    record.promise = run();
+    try {
+      return await record.promise;
+    } finally {
+      record.promise = null;
+    }
+  }
+
+  async acquireSecondaryLanguageOnce(reason, options = {}) {
     // 1. Dual subtitle disabled → skip
     if (!this.dualSubtitleEnabled) {
       this.recordDebugEvent('SECONDARY_ACQUISITION_SKIPPED_DISABLED', { reason });
@@ -2223,6 +2293,10 @@ class SubtitleInterceptor {
       },
       secondary: {
         language: this.effectiveSecondaryLanguage,
+        configuredLanguage: this.configuredSecondaryLanguage,
+        dualEnabled: this.dualSubtitleEnabled,
+        resolution: { ...this.secondaryResolution },
+        originalLanguages: this._originalLanguageResolution?.result?.languages || [],
         ready: secondaryReady,
         count: this.secondarySubtitles.length,
         cacheKey: this.secondarySubtitleMeta?.cacheKey || null,
@@ -4281,6 +4355,16 @@ class SubtitleInterceptor {
       this.tryStartPrimaryDiscovery('early-context-ready');
 
       this.scheduleReloadAfterContextReady(event.reason, context);
+    }));
+
+    // CHANGED 在 context 沒變時不發事件；有限 retry 必須接真正的 3 秒 poll。
+    this._internalEventDisposers.push(registerInternalEventHandler('PLAYBACK_CONTEXT_POLLED', async () => {
+      if (!this.isActive || !this.dualSubtitleEnabled || this.configuredSecondaryLanguage !== 'auto') return;
+      try {
+        await this.ensureSecondaryLanguageAvailableOnce('context-poll', { retryAuto: true });
+      } catch (error) {
+        this.recordDebugEvent('AUTO_SECONDARY_POLL_FAILED', { error: error.message });
+      }
     }));
 
     this._internalEventDisposers.push(registerInternalEventHandler('PLAYER_STATE_CHANGED', (event) => {

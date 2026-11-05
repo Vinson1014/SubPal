@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { SUPPORTED_LANGUAGES } from '../content/system/config/config-schema.js';
 
 test('Given a pending avoidance update When current subtitle clears before timeout Then callback does not dereference mutable null state', async () => {
   const jobs = [];
@@ -10,6 +11,9 @@ test('Given a pending avoidance update When current subtitle clears before timeo
   const module = new vm.SourceTextModule(source, { context, identifier: 'content/ui/ui-manager-new.js' });
   const emptyClass = (name) => new vm.SourceTextModule(`export class ${name} {}`, { context });
   const dependencies = new Map([
+    ['../system/config/config-schema.js', new vm.SyntheticModule(['SUPPORTED_LANGUAGES'], function () {
+      this.setExport('SUPPORTED_LANGUAGES', SUPPORTED_LANGUAGES);
+    }, { context })],
     ['./subtitle-display.js', emptyClass('SubtitleDisplay')], ['./interaction-panel.js', emptyClass('InteractionPanel')],
     ['./submission-dialog.js', emptyClass('SubmissionDialog')], ['./fullscreen-handler.js', emptyClass('FullscreenHandler')],
     ['./ui-avoidance-handler.js', emptyClass('UIAvoidanceHandler')], ['./toast-manager.js', emptyClass('ToastManager')],
