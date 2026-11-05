@@ -14,6 +14,17 @@ function priority(track) {
   return 2;
 }
 
+/** 已知 identity 優先；任一 identity 缺少時才比較完整 canonical 語言，不做 base 回退。 */
+export function isSameSubtitleSource(primary, secondary) {
+  if (!primary || !secondary) return false;
+  if (primary.trackId !== null && primary.trackId !== undefined &&
+    secondary.trackId !== null && secondary.trackId !== undefined) {
+    return primary.trackId === secondary.trackId;
+  }
+  const language = normalizeSubtitleLanguage(primary.code);
+  return !!language && language === normalizeSubtitleLanguage(secondary.code);
+}
+
 export function selectSecondaryTrack(languageCodes, tracks) {
   const targets = (Array.isArray(languageCodes) ? languageCodes : [languageCodes])
     .map(normalizeSubtitleLanguage).filter(Boolean);

@@ -1,10 +1,22 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { selectSecondaryTrack } from '../shared/secondary-track-selection.js';
+import { selectSecondaryTrack, isSameSubtitleSource } from '../shared/secondary-track-selection.js';
 
 const track = (code, trackId, extra = {}) => ({
   code, trackId, name: '關閉', trackType: 'PRIMARY', rawTrackType: 'SUBTITLES',
   isNoneTrack: false, isForcedNarrative: false, ...extra
+});
+
+test('same-source suppression trusts known IDs and falls back to canonical exact language when either ID is missing', () => {
+  assert.equal(isSameSubtitleSource(track('ja', 0), track('en', 0)), true);
+  assert.equal(isSameSubtitleSource(track('ja', 'full'), track('ja', 'cc')), false);
+  for (const [primaryId, secondaryId] of [[null, null], [null, 'full'], ['full', null]]) {
+    assert.equal(isSameSubtitleSource(track('EN-us', primaryId), track('en-US', secondaryId)), true);
+    assert.equal(isSameSubtitleSource(track('en', primaryId), track('en-US', secondaryId)), false);
+    assert.equal(isSameSubtitleSource(track('zh-Hant', primaryId), track('zh', secondaryId)), false);
+  }
+  assert.equal(isSameSubtitleSource(null, track('en', null)), false);
+  assert.equal(isSameSubtitleSource(track('auto', null), track('auto', null)), false);
 });
 
 test('secondary selection uses exact language and structured priority, never names, none or forced', () => {

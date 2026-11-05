@@ -185,6 +185,24 @@ test('auto secondary warnings distinguish failures, require dual auto, and dedup
   assert.equal(messages.length, afterPrimaryWarnings, 'primary warning eviction must not lose per-video secondary deduplication');
 });
 
+test('ready auto same-track suppression never warns despite a false secondary slot and does not consume later failure notifications', async () => {
+  const { manager, handlers } = await loadManager();
+  const messages = [];
+  manager.showWarningToast = message => messages.push(message);
+  const notify = (epoch, status, reason) => handlers.get('SUBTITLE_READINESS_CHANGED')({
+    reason: 'language-acquisition-failed', slot: 'secondary', failureReason: reason,
+    readiness: { context: { videoId: 'A', epoch }, secondary: {
+      configuredLanguage: 'auto', dualEnabled: true, language: 'en', originalLanguages: ['en'],
+      ready: false, missingReason: reason, resolution: { status, reason }
+    } }
+  });
+  for (let epoch = 1; epoch <= 4; epoch += 1) notify(epoch, 'ready', 'same-primary-track');
+  assert.equal(messages.length, 0);
+  notify(4, 'missing', 'no-eligible-secondary-track');
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /沒有原始語言字幕/);
+});
+
 test('Given one pending transition When VIDEO_ID_CHANGED repeats Then only one component rebuild runs', async () => {
   const fixture = await loadManager();
   fixture.blockInitialization();
