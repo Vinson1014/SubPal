@@ -15,12 +15,24 @@ import {
 import {
   renderSubtitlePreview
 } from './shared/subtitle-preview-renderer.js';
+import { createSecondaryLanguagePreference, renderLastManualSecondaryLanguage } from './shared/secondary-language-preference.js';
 
 // ==================== 配置管理 ====================
 
 // 從 config-schema.js 獲取預設值
 const DEFAULT_CONFIG = getDefaultValues();
 let lastPreviewConfig = { ...DEFAULT_CONFIG };
+const secondaryLanguagePreference = createSecondaryLanguagePreference(chrome.storage.local);
+
+async function updateLastManualLanguage(configuredLanguage) {
+  let language = 'en';
+  try {
+    language = await secondaryLanguagePreference.read();
+  } catch (error) {
+    console.error('[Options] 讀取上次手動語言失敗:', error);
+  }
+  renderLastManualSecondaryLanguage(document.getElementById('lastManualSecondaryLanguage'), configuredLanguage, language);
+}
 
 /**
  * 從嵌套對象中獲取值（支援點記法）
@@ -213,6 +225,7 @@ async function restoreOptionsUI() {
     }
     if (secondaryLanguageSelect) {
       secondaryLanguageSelect.value = config['subtitle.secondaryLanguage'];
+      await updateLastManualLanguage(config['subtitle.secondaryLanguage']);
     }
 
     // 字幕外觀模式
@@ -452,6 +465,7 @@ function populateLanguageSelects() {
   if (secondarySelect) {
     secondarySelect.innerHTML = '';
     secondarySelect.add(new Option('自動（跟隨影片原始語言）', 'auto'));
+    secondarySelect.add(new Option('手動（恢復上次語言）', 'manual'));
     for (const lang of SUPPORTED_LANGUAGES) {
       secondarySelect.add(new Option(lang.name, lang.code));
     }
@@ -575,7 +589,11 @@ function setupEventListeners() {
 
   if (secondaryLanguageSelect) {
     secondaryLanguageSelect.addEventListener('change', async (e) => {
-      await saveConfig('subtitle.secondaryLanguage', e.target.value);
+      const config = await loadConfig();
+      const language = await secondaryLanguagePreference.change(config['subtitle.secondaryLanguage'], e.target.value,
+        value => saveConfig('subtitle.secondaryLanguage', value));
+      secondaryLanguageSelect.value = language;
+      await updateLastManualLanguage(language);
       updatePreviewFromControls();
     });
   }

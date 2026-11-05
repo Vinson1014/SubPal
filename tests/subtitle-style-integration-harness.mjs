@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { createSecondaryLanguagePreference, renderLastManualSecondaryLanguage } from '../shared/secondary-language-preference.js';
 
 import {
   SUBTITLE_FONT_PRESETS,
@@ -147,8 +148,10 @@ export async function loadOptionsHarness(storage) {
   const source = (await readFile(new URL('../options.js', import.meta.url), 'utf8'))
     .replace(/import\s+\{[\s\S]*?getDefaultValues\s*\}\s+from\s+'\.\/content\/system\/config\/config-schema\.js';\n/, '')
     .replace(/import\s+\{[\s\S]*?renderSubtitlePreview\s*\}\s+from\s+'\.\/shared\/subtitle-preview-renderer\.js';\n/, '')
+    .replace(/import \{ createSecondaryLanguagePreference, renderLastManualSecondaryLanguage \} from '.\/shared\/secondary-language-preference.js';\n/, '')
     .concat('\nglobalThis.__optionsApi = { restoreOptionsUI, getPreviewConfigFromControls, setupStyleControlListeners };\n');
   const context = vm.createContext({
+    createSecondaryLanguagePreference, renderLastManualSecondaryLanguage,
     console: { log() {}, error() {}, warn() {} },
     SUPPORTED_LANGUAGES,
     SUBTITLE_FONT_PRESETS,

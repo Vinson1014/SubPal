@@ -42,7 +42,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["content/*", "netflix-page-script.js", "shared/secondary-track-selection.js", "shared/original-language-resolver.js"],
+      "resources": ["content/*", "netflix-page-script.js", "shared/secondary-track-selection.js", "shared/original-language-resolver.js", "shared/secondary-language-preference.js"],
       "matches": ["*://*.netflix.com/*"]
     }
   ],

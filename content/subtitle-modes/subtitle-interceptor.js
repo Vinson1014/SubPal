@@ -16,6 +16,7 @@ import { getPlayerAdapter, setRegionConfigs } from '../ui/netflix-player-adapter
 import { DOMOverlapMatcher } from './dom-overlap-matcher.js';
 import { TtmlAcquisitionIngress, bindTtmlAcquisitionCapture } from '../system/capabilities/ttml-acquisition-ingress.js';
 import { selectSecondaryTrack, normalizeSubtitleLanguage, isSameSubtitleSource } from '../../shared/secondary-track-selection.js';
+import { normalizeLastManualSecondaryLanguage } from '../../shared/secondary-language-preference.js';
 
 class SubtitleInterceptor {
   constructor() {
@@ -173,10 +174,22 @@ class SubtitleInterceptor {
       this._originalLanguageResolution = record;
       this.setEffectiveSecondaryLanguage(null, { status: 'resolving', reason: 'original-language-not-resolved' });
       this.recordDebugEvent('ORIGINAL_LANGUAGE_RESOLUTION_STARTED', { context });
-      record.promise = this.performPlayback('original-language', {}).then(result => {
+      record.promise = this.performPlayback('original-language', {}).then(async result => {
         record.result = result?.ok ? result.value.originalLanguage : {
           status: 'unavailable', reason: this.getPlaybackFailureCode(result, 'original-language-unavailable')
         };
+        // 只有音軌讀取本身失敗才回退；timeout／斷線／stale／格式錯誤不是此授權。
+        if (result?.error?.kind === 'domain-rejected' && result.error.code === 'original-language-unavailable' && result.error.retryable === false) {
+          const playback = await this.performPlayback('available-languages', {});
+          if (!playback?.ok || !this.isOriginalLanguageResolutionCurrent(record)) return;
+          let language = 'en';
+          try {
+            language = await this.configBridge?.readLastManualSecondaryLanguage?.();
+          } catch (error) {
+            this.log('最後手動次要語言不可讀，使用 en:', error.message);
+          }
+          record.fallbackLanguage = normalizeLastManualSecondaryLanguage(language);
+        }
       });
     }
     await record.promise;
@@ -188,6 +201,13 @@ class SubtitleInterceptor {
           status: 'resolving', reason: 'secondary-track-not-selected'
         });
         this.recordDebugEvent('ORIGINAL_LANGUAGE_RESOLVED', resolution);
+      }
+    } else if (record.fallbackLanguage) {
+      if (!this.effectiveSecondaryLanguage) {
+        this.setEffectiveSecondaryLanguage(record.fallbackLanguage, {
+          status: 'unavailable', reason: 'original-language-unavailable-fallback'
+        });
+        this.recordDebugEvent('ORIGINAL_LANGUAGE_MANUAL_FALLBACK', { language: record.fallbackLanguage });
       }
     } else {
       this.setEffectiveSecondaryLanguage(null, { status: resolution.status, reason: resolution.reason });
@@ -1085,7 +1105,8 @@ class SubtitleInterceptor {
     }
     if (wasSuppressed && this.configuredSecondaryLanguage === 'auto') {
       this.secondaryResolution = this.isLanguageSlotReady(this.effectiveSecondaryLanguage, 'secondary') ?
-        { status: 'ready', reason: 'original-language-subtitles-ready' } :
+        { status: 'ready', reason: this._originalLanguageResolution?.fallbackLanguage ?
+          'last-manual-subtitles-ready' : 'original-language-subtitles-ready' } :
         { status: 'resolving', reason: 'secondary-subtitles-not-acquired' };
     }
     return false;
@@ -1133,7 +1154,9 @@ class SubtitleInterceptor {
     };
     this.lastAcquisitionResults[role] = normalized;
     if (role === 'secondary' && this.configuredSecondaryLanguage === 'auto' && normalized.success) {
-      this.secondaryResolution = { status: 'ready', reason: 'original-language-subtitles-ready' };
+      this.secondaryResolution = { status: 'ready', reason: normalized.source === 'suppressed' ?
+        'same-primary-track' : (this._originalLanguageResolution?.fallbackLanguage ?
+          'last-manual-subtitles-ready' : 'original-language-subtitles-ready') };
     }
     if (role === 'secondary' && this.configuredSecondaryLanguage === 'auto' && !normalized.success &&
         this.selectedSecondaryTrack && normalized.reason !== 'deferred-primary-not-ready' &&

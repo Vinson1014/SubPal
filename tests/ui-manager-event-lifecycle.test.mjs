@@ -185,18 +185,20 @@ test('auto secondary warnings distinguish failures, require dual auto, and dedup
   assert.equal(messages.length, afterPrimaryWarnings, 'primary warning eviction must not lose per-video secondary deduplication');
 });
 
-test('ready auto same-track suppression never warns despite a false secondary slot and does not consume later failure notifications', async () => {
+test('ready auto original or manual-fallback same-track suppression never warns or consumes later failure notifications', async () => {
   const { manager, handlers } = await loadManager();
   const messages = [];
   manager.showWarningToast = message => messages.push(message);
-  const notify = (epoch, status, reason) => handlers.get('SUBTITLE_READINESS_CHANGED')({
+  const notify = (epoch, status, reason, originalLanguages = ['en']) => handlers.get('SUBTITLE_READINESS_CHANGED')({
     reason: 'language-acquisition-failed', slot: 'secondary', failureReason: reason,
     readiness: { context: { videoId: 'A', epoch }, secondary: {
-      configuredLanguage: 'auto', dualEnabled: true, language: 'en', originalLanguages: ['en'],
+      configuredLanguage: 'auto', dualEnabled: true, language: 'en', originalLanguages,
       ready: false, missingReason: reason, resolution: { status, reason }
     } }
   });
-  for (let epoch = 1; epoch <= 4; epoch += 1) notify(epoch, 'ready', 'same-primary-track');
+  for (const originalLanguages of [['en'], []]) {
+    for (let epoch = 1; epoch <= 4; epoch += 1) notify(epoch, 'ready', 'same-primary-track', originalLanguages);
+  }
   assert.equal(messages.length, 0);
   notify(4, 'missing', 'no-eligible-secondary-track');
   assert.equal(messages.length, 1);

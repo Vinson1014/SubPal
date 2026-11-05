@@ -158,6 +158,14 @@ export class ConfigBridge {
 
   // ==================== 配置寫入 ====================
 
+  async readLastManualSecondaryLanguage() {
+    this.ensureInitialized();
+    const { createPageSecondaryLanguagePreference } = await import('../capabilities/secondary-language-preference.js');
+    const result = await createPageSecondaryLanguagePreference().read();
+    // 偏好不存在／不可讀的便利預設，不進入 cache 或設定通知。
+    return result.ok ? result.value.language : 'en';
+  }
+
   async setSubtitleLanguages(primaryLanguage, secondaryLanguage) {
     this.ensureInitialized();
 

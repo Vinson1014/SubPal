@@ -1,11 +1,24 @@
 // 引入配置管理系統
 import { configManager } from './content/system/config/config-manager.js';
 import { SUPPORTED_LANGUAGES } from './content/system/config/config-schema.js';
+import { createSecondaryLanguagePreference, renderLastManualSecondaryLanguage } from './shared/secondary-language-preference.js';
 
 let isEnabled = true;
 let activeProfileUserMask = '--';
 let activeProfileTotals = createEmptyProfileTotals();
 let activeProfileStatsRequest = null;
+const secondaryLanguagePreference = createSecondaryLanguagePreference(chrome.storage.local);
+
+async function updateLastManualLanguage() {
+    let language = 'en';
+    try {
+        language = await secondaryLanguagePreference.read();
+    } catch (error) {
+        console.warn('[Popup] 讀取上次手動語言失敗:', error);
+    }
+    renderLastManualSecondaryLanguage(document.getElementById('popup-last-manual-language'),
+        configManager.get('subtitle.secondaryLanguage'), language);
+}
 
 const POPUP_ACTIVE_PROFILE_STATS_REQUEST = Object.freeze({ type: 'POPUP_ACTIVE_PROFILE_STATS' });
 const POPUP_ACTIVE_PROFILE_STATS_RESULT = 'POPUP_ACTIVE_PROFILE_STATS_RESULT';
@@ -210,6 +223,7 @@ function populateLanguageSelects() {
     if (secondarySelect) {
         secondarySelect.innerHTML = '';
         secondarySelect.add(new Option('自動（跟隨影片原始語言）', 'auto'));
+        secondarySelect.add(new Option('手動（恢復上次語言）', 'manual'));
         for (const lang of SUPPORTED_LANGUAGES) {
             secondarySelect.add(new Option(lang.name, lang.code));
         }
@@ -219,7 +233,7 @@ function populateLanguageSelects() {
 /**
  * 初始化字幕設定卡片
  */
-function initSubtitleCard() {
+async function initSubtitleCard() {
     // 填充語言選單
     populateLanguageSelects();
 
@@ -241,6 +255,7 @@ function initSubtitleCard() {
     if (secondarySelect) secondarySelect.value = secondaryLang;
     if (fontSizeSlider) fontSizeSlider.value = fontSize;
     if (fontSizeValue) fontSizeValue.textContent = `${fontSize}px`;
+    await updateLastManualLanguage();
 }
 
 /**
@@ -320,9 +335,13 @@ function setupSubtitleCardListeners() {
     if (secondarySelect) {
         secondarySelect.addEventListener('change', async (e) => {
             try {
-                await configManager.set('subtitle.secondaryLanguage', e.target.value);
-                const langName = e.target.value === 'auto' ? '自動（跟隨影片原始語言）' :
-                    SUPPORTED_LANGUAGES.find(l => l.code === e.target.value)?.name || e.target.value;
+                const language = await secondaryLanguagePreference.change(
+                    configManager.get('subtitle.secondaryLanguage'), e.target.value,
+                    value => configManager.set('subtitle.secondaryLanguage', value));
+                secondarySelect.value = language;
+                await updateLastManualLanguage();
+                const langName = language === 'auto' ? '自動（跟隨影片原始語言）' :
+                    SUPPORTED_LANGUAGES.find(l => l.code === language)?.name || language;
                 showToast(`次要語言: ${langName}`);
             } catch (error) {
                 console.error('[Popup] 設置次要語言失敗:', error);
@@ -383,6 +402,7 @@ function setupSubtitleCardListeners() {
         if (secondarySelect && secondarySelect.value !== newValue) {
             secondarySelect.value = newValue;
         }
+        void updateLastManualLanguage();
     });
 
     configManager.subscribe('subtitle.style.primary.fontSize', (_key, newValue) => {
@@ -400,7 +420,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     getInitialSettings();
     setupConfigSubscriptions();
-    initSubtitleCard();
+    await initSubtitleCard();
     setupSubtitleCardListeners();
 
     // 設定按鈕

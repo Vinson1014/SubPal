@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import * as secondaryPreference from '../shared/secondary-language-preference.js';
 
 const root = new URL('../', import.meta.url);
 
@@ -422,6 +423,11 @@ async function loadOptionsProfilesHarness({ confirmations = [], initialProfiles,
     }
   });
   await module.link(specifier => {
+    if (specifier === './shared/secondary-language-preference.js') {
+      return new vm.SyntheticModule(Object.keys(secondaryPreference), function initialize() {
+        for (const [name, value] of Object.entries(secondaryPreference)) this.setExport(name, value);
+      }, { context });
+    }
     if (specifier === './content/system/config/config-schema.js') {
       return new vm.SyntheticModule(
         ['SUPPORTED_LANGUAGES', 'SUBTITLE_FONT_PRESETS', 'SUBTITLE_FONT_WEIGHT_OPTIONS', 'SUBTITLE_STYLE_MODES', 'getDefaultValues'],

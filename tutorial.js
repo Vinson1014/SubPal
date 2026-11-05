@@ -11,6 +11,7 @@ import {
 import {
   renderSubtitlePreview
 } from './shared/subtitle-preview-renderer.js';
+import { createSecondaryLanguagePreference } from './shared/secondary-language-preference.js';
 
 const DEFAULT_CONFIG = getDefaultValues();
 
@@ -145,6 +146,7 @@ function toRgba(hex, opacity) {
 }
 
 function getLanguageName(languageCode) {
+  if (languageCode === 'auto') return '自動（跟隨影片原始語言）';
   return SUPPORTED_LANGUAGES.find(language => language.code === languageCode)?.name || languageCode;
 }
 
@@ -181,6 +183,10 @@ class TutorialManager {
     if (!select) return;
 
     select.innerHTML = '';
+    if (id === 'setupSecondaryLanguage') {
+      select.add(new Option('自動（跟隨影片原始語言）', 'auto'));
+      select.add(new Option('手動（恢復上次語言）', 'manual'));
+    }
     for (const language of SUPPORTED_LANGUAGES) {
       select.add(new Option(language.name, language.code));
     }
@@ -407,6 +413,17 @@ class TutorialManager {
 
   async updateLanguage(type, value) {
     const key = type === 'primary' ? 'subtitle.primaryLanguage' : 'subtitle.secondaryLanguage';
+    if (type === 'secondary') {
+      const storage = hasChromeStorage() ? chrome.storage.local : {
+        async get() { return readFallbackStorage(); },
+        async set(items) { writeFallbackStorage(items); }
+      };
+      value = await createSecondaryLanguagePreference(storage).change(this.config[key], value,
+        language => saveConfig(key, language));
+      this.setValue('setupSecondaryLanguage', value);
+    } else {
+      await saveConfig(key, value);
+    }
     this.config[key] = value;
     if (type === 'primary') {
       this.setValue('submitLanguageSelect', value);
@@ -414,7 +431,6 @@ class TutorialManager {
     this.updateLanguageLabels();
     this.updatePreviews();
     this.updateSummary();
-    await saveConfig(key, value);
   }
 
   async updateStyleMode(value) {

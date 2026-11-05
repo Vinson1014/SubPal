@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import * as secondaryPreference from '../shared/secondary-language-preference.js';
 
 const root = new URL('../', import.meta.url);
 
@@ -37,10 +38,10 @@ function statsResult(points = 5) {
   };
 }
 
-async function loadPopupHarness({ automaticResponse } = {}) {
+async function loadPopupHarness({ automaticResponse, secondaryLanguage = 'en', lastManual } = {}) {
   const elements = new Map([
     'profile-user-id', 'score', 'contrib-count', 'replace-count', 'translation-views', 'upvotes-received',
-    'success-toast', 'mainToggle', 'settings-btn', 'popup-primary-lang', 'popup-secondary-lang'
+    'success-toast', 'mainToggle', 'settings-btn', 'popup-primary-lang', 'popup-secondary-lang', 'popup-last-manual-language'
   ].map((id) => [id, createElement()]));
   const documentListeners = new Map();
   const runtimeMessages = [];
@@ -50,6 +51,7 @@ async function loadPopupHarness({ automaticResponse } = {}) {
   let nextTimerId = 0;
   const configGets = [];
   const configWrites = [];
+  const privateStorage = { [secondaryPreference.LAST_MANUAL_SECONDARY_LANGUAGE_KEY]: lastManual };
   const configManager = {
     isInitialized: true,
     get(key) {
@@ -58,11 +60,11 @@ async function loadPopupHarness({ automaticResponse } = {}) {
         isEnabled: true,
         'subtitle.dualModeEnabled': false,
         'subtitle.primaryLanguage': 'zh-Hant',
-        'subtitle.secondaryLanguage': 'en',
+        'subtitle.secondaryLanguage': secondaryLanguage,
         'subtitle.style.primary.fontSize': 55
       }[key];
     },
-    async set(key, value) { configWrites.push({ key, value }); },
+    async set(key, value) { configWrites.push({ key, value }); if (key === 'subtitle.secondaryLanguage') secondaryLanguage = value; },
     subscribe() {}
   };
   const runtime = {
@@ -92,7 +94,10 @@ async function loadPopupHarness({ automaticResponse } = {}) {
     },
     clearTimeout(id) { timers.delete(id); },
     Option: class { constructor(text, value) { this.text = text; this.value = value; } },
-    chrome: { runtime, tabs: { create() {} }, storage: { local: {} } }
+    chrome: { runtime, tabs: { create() {} }, storage: { local: {
+      async get() { return privateStorage; },
+      async set(items) { Object.assign(privateStorage, items); }
+    } } }
   });
   const source = await readFile(new URL('popup.js', root), 'utf8');
   const module = new vm.SourceTextModule(source, { context, identifier: 'popup.js' });
@@ -102,11 +107,17 @@ async function loadPopupHarness({ automaticResponse } = {}) {
   const schemaModule = new vm.SyntheticModule(['SUPPORTED_LANGUAGES'], function initialize() {
     this.setExport('SUPPORTED_LANGUAGES', [{ code: 'en', name: 'English' }, { code: 'ja', name: '日本語' }]);
   }, { context, identifier: 'config-schema.js' });
+  const preferenceModule = new vm.SyntheticModule(Object.keys(secondaryPreference), function initialize() {
+    for (const [name, value] of Object.entries(secondaryPreference)) this.setExport(name, value);
+  }, { context, identifier: 'secondary-language-preference.js' });
+  await preferenceModule.link(() => { throw new Error('Unexpected preference dependency'); });
+  await preferenceModule.evaluate();
   await configModule.link(() => { throw new Error('Unexpected config dependency'); });
   await schemaModule.link(() => { throw new Error('Unexpected schema dependency'); });
   await module.link((specifier) => {
     if (specifier.endsWith('config-manager.js')) return configModule;
     if (specifier.endsWith('config-schema.js')) return schemaModule;
+    if (specifier.endsWith('secondary-language-preference.js')) return preferenceModule;
     throw new Error(`Unexpected popup dependency: ${specifier}`);
   });
   await configModule.evaluate();
@@ -117,6 +128,7 @@ async function loadPopupHarness({ automaticResponse } = {}) {
     callbacks,
     configGets,
     configWrites,
+    privateStorage,
     elements,
     runtime,
     runtimeListeners,
@@ -136,13 +148,34 @@ test('Given popup language controls When secondary auto is selected Then only se
   const popup = await loadPopupHarness({ automaticResponse: statsResult() });
   const secondary = popup.elements.get('popup-secondary-lang');
   const primary = popup.elements.get('popup-primary-lang');
-  assert.deepEqual(secondary.options.map(option => option.value), ['auto', 'en', 'ja']);
+  assert.deepEqual(secondary.options.map(option => option.value), ['auto', 'manual', 'en', 'ja']);
   assert.equal(secondary.options[0].text, '自動（跟隨影片原始語言）');
   assert.deepEqual(primary.options.map(option => option.value), ['en', 'ja']);
   secondary.value = 'auto';
   await secondary.listener('change')({ target: secondary });
   assert.deepEqual(popup.configWrites, [{ key: 'subtitle.secondaryLanguage', value: 'auto' }]);
   assert.equal(popup.elements.get('success-toast').textContent, '次要語言: 自動（跟隨影片原始語言）');
+});
+
+test('popup remembers Japanese before auto, shows readonly preference, restores manual and honors explicit language choices', async () => {
+  const popup = await loadPopupHarness({ automaticResponse: statsResult(), secondaryLanguage: 'ja' });
+  const secondary = popup.elements.get('popup-secondary-lang');
+  const hint = popup.elements.get('popup-last-manual-language');
+  secondary.value = 'auto';
+  await secondary.listener('change')({ target: secondary });
+  assert.equal(popup.privateStorage[secondaryPreference.LAST_MANUAL_SECONDARY_LANGUAGE_KEY], 'ja');
+  assert.equal(hint.hidden, false);
+  assert.equal(hint.textContent, '上次手動語言：日本語');
+  secondary.value = 'manual';
+  await secondary.listener('change')({ target: secondary });
+  assert.equal(secondary.value, 'ja');
+  assert.equal(popup.configWrites.at(-1).value, 'ja');
+  assert.equal(hint.hidden, true);
+  const fresh = await loadPopupHarness({ automaticResponse: statsResult(), secondaryLanguage: 'auto', lastManual: 'auto' });
+  const freshSelect = fresh.elements.get('popup-secondary-lang');
+  freshSelect.value = 'manual';
+  await freshSelect.listener('change')({ target: freshSelect });
+  assert.equal(fresh.configWrites.at(-1).value, 'en');
 });
 
 test('Given Popup startup When active-profile stats succeed Then it sends only the sealed request, renders the fixed projection, and never reads raw identity or active-tab state', async () => {

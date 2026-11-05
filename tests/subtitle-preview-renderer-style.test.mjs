@@ -109,3 +109,15 @@ test('Given old preview config without outline or letter-spacing keys When previ
   assert.equal(`${primaryElement.style.fontSize} ${primaryElement.style.letterSpacing} ${secondaryElement.style.letterSpacing}`.includes('undefinedpx'), false);
   assert.equal(`${primaryElement.style.fontSize} ${primaryElement.style.letterSpacing} ${secondaryElement.style.letterSpacing}`.includes('NaNpx'), false);
 });
+
+test('auto preview always explains the original-language mode instead of inventing a language, including tutorial fixed examples', async () => {
+  const renderer = await loadRenderer();
+  const secondaryElement = { style: {}, textContent: '' };
+  renderer.renderSubtitlePreview({
+    secondaryElement,
+    config: createFlatConfig({ 'subtitle.secondaryLanguage': 'auto' }),
+    secondaryText: 'This is a clearer subtitle'
+  });
+  assert.equal(secondaryElement.textContent, '播放時自動顯示影片原始語言字幕');
+  assert.equal(secondaryElement.style.display, 'inline-block');
+});

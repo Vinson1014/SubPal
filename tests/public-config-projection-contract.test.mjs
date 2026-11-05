@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { createSecondaryLanguagePreference, LAST_MANUAL_SECONDARY_LANGUAGE_KEY } from '../shared/secondary-language-preference.js';
+import { parseLastManualSecondaryLanguageRequest } from '../content/system/capabilities/secondary-language-preference.js';
 
 function plain(value) { return value === undefined ? undefined : JSON.parse(JSON.stringify(value)); }
 
@@ -20,7 +22,7 @@ async function settle() {
   for (let index = 0; index < 16; index += 1) await Promise.resolve();
 }
 
-async function createContentHarness(initialConfig) {
+async function createContentHarness(initialConfig, lastManual = 'ja') {
   const listeners = new Map();
   const bridgeEvents = [];
   const responses = [];
@@ -64,10 +66,12 @@ async function createContentHarness(initialConfig) {
         connect() { return { postMessage() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }; },
         getURL(path) { return `chrome-extension://test/${path}`; }
       },
-      storage: { local: { async get() { return {}; } } }
+      storage: { local: { async get() { return { [LAST_MANUAL_SECONDARY_LANGUAGE_KEY]: lastManual }; } } }
     }
   });
   const modules = {
+    preference: await createModule(context, 'secondary-language-preference.js', { createSecondaryLanguagePreference }),
+    preferenceCapability: await createModule(context, 'preference-capability.js', { parseLastManualSecondaryLanguageRequest }),
     config: await createModule(context, 'config-manager.js', {
       ConfigManager: class ConfigManager {
         async initialize() {}
@@ -90,6 +94,8 @@ async function createContentHarness(initialConfig) {
   const source = await readFile(new URL('../content.js', import.meta.url), 'utf8');
   const script = new vm.Script(source, {
     importModuleDynamically(specifier) {
+      if (specifier.endsWith('capabilities/secondary-language-preference.js')) return modules.preferenceCapability;
+      if (specifier.endsWith('shared/secondary-language-preference.js')) return modules.preference;
       if (specifier.endsWith('config-manager.js')) return modules.config;
       if (specifier.endsWith('config-schema.js')) return modules.schema;
       if (specifier.endsWith('messaging.js')) return modules.messaging;
@@ -108,6 +114,11 @@ async function createContentHarness(initialConfig) {
     emitChange(key, newValue, oldValue) { publicSubscription.callback(key, newValue, oldValue); },
     failChange() {},
     getConfig: () => config,
+    async readLastManual(message = { category: 'settings-read', variant: 'last-manual-secondary-language', payload: {} }) {
+      window.dispatchEvent(new context.CustomEvent('messageToContentScript', { detail: { messageId: 'last-manual', message } }));
+      await settle();
+      return responses.at(-1)?.response;
+    },
     async requestSnapshot() {
       window.dispatchEvent(new context.CustomEvent('messageToContentScript', {
         detail: { messageId: 'settings-snapshot', message: { category: 'settings-read', variant: 'snapshot', payload: {} } }
@@ -147,6 +158,20 @@ test('Given a public settings snapshot When legacy authority and unknown config 
       }
     }
   });
+});
+
+test('isolated preference bridge returns only the validated last manual language, outside settings snapshots and notifications', async () => {
+  const harness = await createContentHarness({ debugMode: false, [LAST_MANUAL_SECONDARY_LANGUAGE_KEY]: 'ja' });
+  assert.deepEqual(plain(await harness.readLastManual()), { ok: true, value: { language: 'ja' } });
+  assert.equal(Object.hasOwn((await harness.requestSnapshot()).response.value, LAST_MANUAL_SECONDARY_LANGUAGE_KEY), false);
+  harness.emitChange(LAST_MANUAL_SECONDARY_LANGUAGE_KEY, 'ko', 'ja');
+  assert.deepEqual(harness.bridgeEvents, []);
+  for (const message of [
+    { category: 'settings-read', variant: 'last-manual-secondary-language', payload: { key: 'JWT' } },
+    { category: 'settings-read', variant: 'last-manual-secondary-language', payload: {}, storage: 'JWT' }
+  ]) assert.equal((await harness.readLastManual(message)).ok, false);
+  const invalid = await createContentHarness({ debugMode: false }, 'auto');
+  assert.deepEqual(plain(await invalid.readLastManual()), { ok: true, value: { language: 'en' } });
 });
 
 test('Given the production ConfigManager subscription callback When authority, unsafe, unknown, stale, or failed changes occur Then content emits no public CONFIG_CHANGED event', async () => {

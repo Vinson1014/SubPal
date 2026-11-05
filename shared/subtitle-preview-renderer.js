@@ -78,6 +78,7 @@ export function createTextOutlineShadow({ enabled, width, color, baseShadow }) {
 }
 
 export function getPreviewText(languageCode, type, languages = []) {
+  if (type === 'secondary' && languageCode === 'auto') return '播放時自動顯示影片原始語言字幕';
   if (PREVIEW_TEXT_BY_LANGUAGE[languageCode]) {
     return PREVIEW_TEXT_BY_LANGUAGE[languageCode];
   }
@@ -207,7 +208,9 @@ export function renderSubtitlePreview({
   }
 
   if (secondaryElement) {
-    secondaryElement.textContent = secondaryText || getPreviewText(previewConfig.secondaryLanguage, 'secondary', languages);
+    secondaryElement.textContent = previewConfig.secondaryLanguage === 'auto'
+      ? getPreviewText('auto', 'secondary', languages)
+      : secondaryText || getPreviewText(previewConfig.secondaryLanguage, 'secondary', languages);
     secondaryElement.style.display = previewConfig.isDualMode ? 'inline-block' : 'none';
 
     if (previewConfig.isDualMode) {

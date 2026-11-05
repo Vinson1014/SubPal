@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { createSecondaryLanguagePreference, renderLastManualSecondaryLanguage, LAST_MANUAL_SECONDARY_LANGUAGE_KEY } from '../shared/secondary-language-preference.js';
 
 const DEFAULT_CONFIG = {
   debugMode: false,
@@ -131,7 +132,7 @@ function deepMerge(existing, updates) {
 function createElementMap() {
   const ids = [
     'debugModeCheckbox', 'endscreenTasksEnabledCheckbox', 'apiBaseUrlInput',
-    'singleMode', 'dualMode', 'primaryLanguageSelect', 'secondaryLanguageSelect',
+    'singleMode', 'dualMode', 'primaryLanguageSelect', 'secondaryLanguageSelect', 'lastManualSecondaryLanguage',
     'subtitleStyleMode', 'subtitleFontPreset', 'fontPresetControl',
     'primaryPreview', 'secondaryPreview', 'secondaryLanguageGroup', 'secondaryStyleSection'
   ];
@@ -157,9 +158,11 @@ async function loadOptionsHarness({ storage = {} } = {}) {
   const source = (await readFile(new URL('../options.js', import.meta.url), 'utf8'))
     .replace(/import\s+\{[\s\S]*?getDefaultValues\s*\}\s+from\s+'\.\/content\/system\/config\/config-schema\.js';\n/, '')
     .replace(/import\s+\{[\s\S]*?renderSubtitlePreview\s*\}\s+from\s+'\.\/shared\/subtitle-preview-renderer\.js';\n/, '')
+    .replace(/import \{ createSecondaryLanguagePreference, renderLastManualSecondaryLanguage \} from '.\/shared\/secondary-language-preference.js';\n/, '')
     .concat('\nglobalThis.__optionsApi = { restoreOptionsUI, updateStyleControls, getPreviewConfigFromControls, setupStyleControlListeners, resetStyles, populateLanguageSelects, setupEventListeners };\n');
 
   const context = vm.createContext({
+    createSecondaryLanguagePreference, renderLastManualSecondaryLanguage,
     console: { log() {}, error() {} },
     confirm: () => true,
     Option: class { constructor(text, value) { this.text = text; this.value = value; } },
@@ -200,13 +203,29 @@ test('Given options language controls When selecting auto Then only secondary of
   const { api, elements, stored } = await loadOptionsHarness({ storage: { subtitle: { primaryLanguage: 'en', secondaryLanguage: 'en' } } });
   api.populateLanguageSelects();
   api.setupEventListeners();
-  assert.deepEqual(elements.secondaryLanguageSelect.options.map(option => option.value), ['auto', 'zh-Hant', 'en']);
+  assert.deepEqual(elements.secondaryLanguageSelect.options.map(option => option.value), ['auto', 'manual', 'zh-Hant', 'en']);
   assert.equal(elements.secondaryLanguageSelect.options[0].text, '自動（跟隨影片原始語言）');
   assert.deepEqual(elements.primaryLanguageSelect.options.map(option => option.value), ['zh-Hant', 'en']);
   elements.secondaryLanguageSelect.value = 'auto';
   await elements.secondaryLanguageSelect.dispatch('change');
   assert.equal(stored.subtitle.secondaryLanguage, 'auto');
   assert.equal(stored.subtitle.primaryLanguage, 'en');
+});
+
+test('options auto displays private manual preference and restores it without persisting the UI action', async () => {
+  const { api, elements, stored } = await loadOptionsHarness({ storage: { subtitle: { secondaryLanguage: 'zh-Hant', dualModeEnabled: true } } });
+  await api.restoreOptionsUI();
+  api.setupEventListeners();
+  elements.secondaryLanguageSelect.value = 'auto';
+  await elements.secondaryLanguageSelect.dispatch('change');
+  assert.equal(stored[LAST_MANUAL_SECONDARY_LANGUAGE_KEY], 'zh-Hant');
+  assert.equal(elements.lastManualSecondaryLanguage.hidden, false);
+  assert.equal(elements.lastManualSecondaryLanguage.textContent, '上次手動語言：繁體中文');
+  elements.secondaryLanguageSelect.value = 'manual';
+  await elements.secondaryLanguageSelect.dispatch('change');
+  assert.equal(stored.subtitle.secondaryLanguage, 'zh-Hant');
+  assert.equal(elements.secondaryLanguageSelect.value, 'zh-Hant');
+  assert.equal(elements.lastManualSecondaryLanguage.hidden, true);
 });
 
 test('Given old options storage missing outline controls When restoreOptionsUI loads Then controls and preview config use schema defaults', async () => {

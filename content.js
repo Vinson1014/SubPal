@@ -397,6 +397,23 @@
     return settingsCapabilityPromise;
   }
 
+  async function readLastManualSecondaryLanguage(messageId, observation) {
+    try {
+      const { parseLastManualSecondaryLanguageRequest } = await import(chrome.runtime.getURL('content/system/capabilities/secondary-language-preference.js'));
+      if (observation.authorityEscalated || !parseLastManualSecondaryLanguageRequest(observation.input)) {
+        respondToPageObservation(messageId, terminalIngressFailure(observation.authorityEscalated).terminal);
+        return;
+      }
+      const { createSecondaryLanguagePreference } = await import(chrome.runtime.getURL('shared/secondary-language-preference.js'));
+      const language = await createSecondaryLanguagePreference(chrome.storage.local).read();
+      respondToPageObservation(messageId, { ok: true, value: { language } });
+    } catch {
+      respondToPageObservation(messageId, {
+        ok: false, error: { kind: 'disconnected', code: 'last-manual-secondary-language-unavailable', retryable: true }
+      });
+    }
+  }
+
   function getContributionsCapability() {
     if (!contributionsCapabilityPromise) {
       contributionsCapabilityPromise = Promise.all([
@@ -489,6 +506,10 @@
     debugLog('Received from page:', messageId, rawMessage);
 
     if (pageIngressMessage.category === 'settings-read') {
+      if (ownDataProperty(rawMessage, 'variant')?.value === 'last-manual-secondary-language') {
+        void readLastManualSecondaryLanguage(messageId, pageIngressMessage);
+        return;
+      }
       const snapshotRequest = parseSettingsSnapshotRequest(rawMessage, pageIngressMessage.authorityEscalated);
       if (snapshotRequest?.ok === false) {
         respondToPageObservation(messageId, snapshotRequest);

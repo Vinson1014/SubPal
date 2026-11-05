@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import * as secondaryPreference from '../shared/secondary-language-preference.js';
 
 const BACKUP_ROOTS = ['debugMode', 'isEnabled', 'crowdsourcing', 'subtitle'];
-const PROTECTED_KEYS = ['backendProfiles', 'voteQueue', 'translationHistory', 'user', 'jwt'];
+const PROTECTED_KEYS = ['backendProfiles', 'voteQueue', 'translationHistory', 'user', 'jwt', secondaryPreference.LAST_MANUAL_SECONDARY_LANGUAGE_KEY];
 
 function clone(value) {
   return structuredClone(value);
@@ -54,6 +55,7 @@ function canonicalEnvelope(schema, overrides = {}) {
 
 function protectedStorage() {
   return {
+    [secondaryPreference.LAST_MANUAL_SECONDARY_LANGUAGE_KEY]: 'ja',
     debugMode: false,
     subtitle: { dualModeEnabled: true, secretUnknownSubtitleValue: 'subtitle-secret' },
     backendProfiles: {
@@ -150,6 +152,7 @@ async function loadOptionsBackupHarness({ initialStorage = protectedStorage() } 
         local: {
           async get(keys) {
             storageCalls.gets.push(clone(keys));
+            keys = typeof keys === 'string' ? [keys] : keys;
             return Object.fromEntries(
               keys.filter((key) => Object.hasOwn(storage, key)).map((key) => [key, clone(storage[key])])
             );
@@ -171,6 +174,11 @@ async function loadOptionsBackupHarness({ initialStorage = protectedStorage() } 
   await previewModule.link(() => { throw new Error('Unexpected preview dependency'); });
   await schemaModule.evaluate();
   await previewModule.evaluate();
+  const preferenceModule = new vm.SyntheticModule(Object.keys(secondaryPreference), function initialize() {
+    for (const [name, value] of Object.entries(secondaryPreference)) this.setExport(name, value);
+  }, { context });
+  await preferenceModule.link(() => { throw new Error('Unexpected preference dependency'); });
+  await preferenceModule.evaluate();
   const optionsModule = new vm.SourceTextModule(source, {
     context,
     identifier: 'options.js',
@@ -182,6 +190,7 @@ async function loadOptionsBackupHarness({ initialStorage = protectedStorage() } 
   await optionsModule.link((specifier) => {
     if (specifier === './content/system/config/config-schema.js') return schemaModule;
     if (specifier === './shared/subtitle-preview-renderer.js') return previewModule;
+    if (specifier === './shared/secondary-language-preference.js') return preferenceModule;
     throw new Error(`Unexpected static import: ${specifier}`);
   });
   await optionsModule.evaluate();
