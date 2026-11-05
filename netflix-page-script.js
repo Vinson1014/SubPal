@@ -365,6 +365,9 @@
         // 智能選擇字幕軌道
         const targetTrack = this.selectBestSubtitleTrack(matchingTracks, languageCode);
 
+        const target = projectPrivateTrack(targetTrack);
+        if (!target) throw new Error('無效的字幕目標');
+        Object.freeze(target);
         await this.videoPlayer.setTimedTextTrack(targetTrack);
         debugLog(`✅ 成功切換到 ${languageCode}`, {
           selectedTrack: targetTrack.displayName,
@@ -372,7 +375,7 @@
           rawTrackType: targetTrack.rawTrackType,
           trackId: targetTrack.trackId
         });
-        return true;
+        return target;
 
       } catch (error) {
         console.error(`切換到 ${languageCode} 失敗:`, error);
@@ -385,9 +388,12 @@
           const targetTrack = trackList.find(track => track.bcp47 === languageCode);
 
           if (targetTrack) {
+            const target = projectPrivateTrack(targetTrack);
+            if (!target) throw new Error('無效的字幕目標');
+            Object.freeze(target);
             await this.videoPlayer.setTimedTextTrack(targetTrack);
             debugLog(`✅ 重試成功切換到 ${languageCode}`);
-            return true;
+            return target;
           }
         } catch (retryError) {
           debugLog('重試也失敗:', retryError);
@@ -507,13 +513,16 @@
           throw new Error(`找不到 trackId: ${trackId}`);
         }
 
+        const target = projectPrivateTrack(targetTrack);
+        if (!target) throw new Error('無效的字幕目標');
+        Object.freeze(target);
         await this.videoPlayer.setTimedTextTrack(targetTrack);
         debugLog(`✅ 成功切換到 trackId ${trackId}`, {
           displayName: targetTrack.displayName,
           code: targetTrack.bcp47,
           trackType: targetTrack.trackType
         });
-        return true;
+        return target;
       } catch (error) {
         console.error(`切換到 trackId ${trackId} 失敗:`, error);
         throw error;
@@ -2445,6 +2454,7 @@
         const projected = language === null ? null : projectPrivateTrack(language);
         return language === null || projected ? privateOk({ language: projected }) : privateFail('domain-rejected', 'invalid-language-response');
       }
+      let targetLanguage;
       if (envelope.variant === 'switch-secondary-language') {
         const { selectSecondaryTrack } = await import('./shared/secondary-track-selection.js');
         if (!privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) return privateFail('stale-context', 'page-context-mismatch');
@@ -2459,13 +2469,17 @@
           track.trackId === target.trackId && track.code === target.code && track.trackType === target.trackType &&
           track.rawTrackType === target.rawTrackType && !track.isNoneTrack && !track.isForcedNarrative)];
         if (!rawTarget) return privateFail('domain-rejected', 'secondary-track-unavailable');
+        targetLanguage = Object.freeze(projectPrivateTrack(rawTarget));
+        if (!targetLanguage) return privateFail('domain-rejected', 'invalid-language-response');
         await playerHelper.videoPlayer.setTimedTextTrack(rawTarget);
         if (!privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) return privateFail('stale-context', 'page-context-mismatch');
       } else if (envelope.variant === 'switch-language') {
-        if (!await playerHelper.switchToLanguage(envelope.payload.languageCode) ||
+        targetLanguage = await playerHelper.switchToLanguage(envelope.payload.languageCode);
+        if (!targetLanguage ||
           !privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) return privateFail('stale-context', 'page-context-mismatch');
       } else if (envelope.variant === 'switch-track') {
-        if (!await playerHelper.switchToTrack(envelope.payload.trackId) ||
+        targetLanguage = await playerHelper.switchToTrack(envelope.payload.trackId);
+        if (!targetLanguage ||
           !privateContextMatches(getPrivatePlaybackSnapshot(), envelope.context)) return privateFail('stale-context', 'page-context-mismatch');
       } else {
         const request = {
@@ -2480,9 +2494,8 @@
         }
         return privateFail('domain-rejected', 'jump-to-timecode-failed');
       }
-      const language = playerHelper.getCurrentLanguage();
-      const projected = language === null ? null : projectPrivateTrack(language);
-      return language === null || projected ? privateOk({ language: projected }) : privateFail('domain-rejected', 'invalid-language-response');
+      // Setter ack 是當次送入 setter 的不可變目標，不是 await 後可能已被使用者換掉的 current。
+      return targetLanguage ? privateOk({ language: targetLanguage }) : privateFail('domain-rejected', 'invalid-language-response');
     } catch {
       return privateFail('domain-rejected', 'private-playback-dispatch-failed');
     }

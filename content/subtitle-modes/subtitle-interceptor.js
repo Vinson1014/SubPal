@@ -198,12 +198,25 @@ class SubtitleInterceptor {
       current.epoch === work.context.epoch;
   }
 
-  isNativeWorkCurrent(work) {
+  isNativeContextCurrent(work) {
     const current = this.getCurrentPlaybackContext();
     return !work.cancelled && !this._stopped && work.generation === this._nativeWorkGeneration &&
       current.state === 'ready' && current.videoId === work.context.videoId &&
-      current.sessionId === work.context.sessionId && current.epoch === work.context.epoch &&
+      current.sessionId === work.context.sessionId && current.epoch === work.context.epoch;
+  }
+
+  isNativeWorkCurrent(work) {
+    return this.isNativeContextCurrent(work) &&
       (work.role !== 'secondary' || (this.isSecondaryWorkCurrent(work.secondaryWork) &&
+        work.language === this.effectiveSecondaryLanguage && work.selectedTrack === this.selectedSecondaryTrack));
+  }
+
+  isNativeRestoreCurrent(work) {
+    // 關雙語撤銷取得／promotion，不撤銷同 context 仍 owned 的 finally cleanup。
+    // 模式、target ABA、停止與 context 邊界仍須 fail closed；current native identity 另於讀取後驗證。
+    return this.isNativeContextCurrent(work) && (work.role !== 'secondary' ||
+      (work.secondaryWork.configured === this.configuredSecondaryLanguage &&
+        work.secondaryWork.targetGeneration === this._secondaryTargetGeneration &&
         work.language === this.effectiveSecondaryLanguage && work.selectedTrack === this.selectedSecondaryTrack));
   }
 
@@ -243,11 +256,12 @@ class SubtitleInterceptor {
     return run;
   }
 
-  async switchOwnedNetflixTrack(work, variant, payload) {
+  async switchOwnedNetflixTrack(work, variant, payload, restoring = false) {
     const stale = () => ({ ok: false, error: { kind: 'stale-context', code: 'stale-native-work', retryable: false } });
-    if (!this.isNativeWorkCurrent(work)) return stale();
+    const isCurrent = () => restoring ? this.isNativeRestoreCurrent(work) : this.isNativeWorkCurrent(work);
+    if (!isCurrent()) return stale();
     const current = await this.performPlayback('current-language', {}, work.context);
-    if (!this.isNativeWorkCurrent(work)) return stale();
+    if (!isCurrent()) return stale();
     if (!work.startTrack && !work.ownedTarget && current?.ok && current.value.language) {
       work.startTrack = Object.freeze({ ...current.value.language });
     }
@@ -258,8 +272,21 @@ class SubtitleInterceptor {
       return stale();
     }
     const result = await this.performPlayback(variant, payload, work.context);
-    // 記錄 setter 實際回報的 target，而非稍後讀到、可能已是使用者選取的軌。
-    if (result?.ok && result.value.language) work.ownedTarget = Object.freeze({ ...result.value.language });
+    if (result?.ok) {
+      const target = result.value.language;
+      // Producer 的 language 契約是 setter 前的 actual target；認領前仍驗本次請求，不能信任晚到 current。
+      const matches = target && (variant === 'switch-track' ? target.trackId === payload.trackId :
+        variant === 'switch-secondary-language' ? this.sameNetflixTrack(target, work.selectedTrack) &&
+          !payload.excludedTrackIds.includes(target.trackId) && !target.isNoneTrack && !target.isForcedNarrative :
+        normalizeSubtitleLanguage(target.code) !== null &&
+          normalizeSubtitleLanguage(target.code) === normalizeSubtitleLanguage(payload.languageCode));
+      if (!matches) {
+        work.cancelled = true;
+        this.recordDebugEvent('NATIVE_TRACK_OWNERSHIP_LOST', { role: work.role, reason: 'setter-target-mismatch' });
+        return stale();
+      }
+      work.ownedTarget = Object.freeze({ ...target });
+    }
     return result;
   }
 
@@ -1470,7 +1497,20 @@ class SubtitleInterceptor {
     }
     if (record.promise) return record.promise;
     // 一般 cache reload 不重試；只有既有 context poll 可以消耗下一次額度。
-    if (record.result && (record.result.success || !options.retryAuto || record.attempts >= 3)) return record.result;
+    if (record.result && (record.result.success || !options.retryAuto || record.attempts >= 3)) {
+      const resolution = this._originalLanguageResolution;
+      if (resolution && !resolution.pending && !this.isOriginalLanguageResolutionCurrent(resolution)) {
+        // 新 invocation 才能重新授權同 context 的完成資料；publisher／舊 pending snapshot 不可代勞。
+        const invocation = this.captureSecondaryWork();
+        await this.resolveAutoSecondaryLanguage();
+        if (this._autoSecondaryRetry !== record || !this.isSecondaryWorkCurrent(invocation) ||
+            !this.isOriginalLanguageResolutionCurrent(resolution)) {
+          return { success: false, reason: 'stale-secondary-cache' };
+        }
+      }
+      void this.publishSecondaryRuntimeStatus();
+      return record.result;
+    }
     if (record.result) {
       if (this._originalLanguageResolution?.result?.status !== 'resolved') this._originalLanguageResolution = null;
       this._secondaryTrackSelection = null;
@@ -1549,7 +1589,10 @@ class SubtitleInterceptor {
     // 3. Secondary slot already ready for current context → 不回傳 success 以外的資訊，不切 track
     if (this.isLanguageSlotReady(this.effectiveSecondaryLanguage, 'secondary')) {
       this.recordDebugEvent('SECONDARY_ACQUISITION_SKIPPED_READY', { reason, context });
-      return { success: true, source: 'already-ready', reason };
+      // 換集時 TTML 可能先於取得入口就緒；成功快取前仍須完成解析狀態與發布。
+      return this.setLanguageAcquisitionResult('secondary', {
+        success: true, languageCode: this.effectiveSecondaryLanguage, source: 'already-ready', reason
+      });
     }
 
     // 4. Primary 未 ready → 禁止 secondary track switching
@@ -1621,10 +1664,12 @@ class SubtitleInterceptor {
 
           if (isEligibleForRecovery) {
             try {
-              await this.trySecondaryDomRecovery('post-acquisition-failure', {
+              const recovered = await this.trySecondaryDomRecovery('post-acquisition-failure', {
                 ...options,
                 nativeWork
               });
+              // Recovery 已經過共同成功 handler；不可再把前一次 timeout 寫回 auto retry cache。
+              if (recovered && this.isNativeWorkCurrent(nativeWork)) return this.lastAcquisitionResults.secondary;
             } catch (recoveryError) {
               this.log('Secondary DOM recovery error:', recoveryError.message);
             }
@@ -1897,14 +1942,14 @@ class SubtitleInterceptor {
   async restoreNetflixTrack(startTrack, fallbackLanguage, reason, nativeWork = null) {
     if (!nativeWork) return this.runNativeTrackWork('primary', work =>
       this.restoreNetflixTrack(startTrack, fallbackLanguage, reason, work), false);
-    if (!this.isNativeWorkCurrent(nativeWork)) return;
+    if (!this.isNativeRestoreCurrent(nativeWork)) return;
     // 只有真的切過軌的工作可在 finally 還原；獨立 legacy 呼叫則以擷取的起始軌為 ownership。
     const current = await this.performPlayback('current-language', {}, nativeWork.context);
     if (!nativeWork.startTrack && !nativeWork.ownedTarget && current?.ok && current.value.language) {
       nativeWork.startTrack = Object.freeze({ ...current.value.language });
     }
     const owned = nativeWork.ownedTarget || nativeWork.startTrack;
-    if (!this.isNativeWorkCurrent(nativeWork) || !current?.ok || !owned ||
+    if (!this.isNativeRestoreCurrent(nativeWork) || !current?.ok || !owned ||
         !this.sameNetflixTrack(current.value.language, owned)) return;
     // 若無 startTrack，跳過 restore（null 可能代表字幕關閉或 track 不可用）
     if (!startTrack) {
@@ -1923,7 +1968,7 @@ class SubtitleInterceptor {
         code: startTrack.code
       });
       try {
-        const result = await this.switchOwnedNetflixTrack(nativeWork, 'switch-track', { trackId: startTrack.trackId });
+        const result = await this.switchOwnedNetflixTrack(nativeWork, 'switch-track', { trackId: startTrack.trackId }, true);
         if (!result?.ok) throw new Error(this.getPlaybackFailureCode(result, 'switch-track-failed'));
         this.recordDebugEvent('SECONDARY_TRACK_RESTORE_COMPLETED', {
           reason,
@@ -1953,7 +1998,7 @@ class SubtitleInterceptor {
     });
 
     try {
-      const result = await this.switchOwnedNetflixTrack(nativeWork, 'switch-language', { languageCode: targetCode });
+      const result = await this.switchOwnedNetflixTrack(nativeWork, 'switch-language', { languageCode: targetCode }, true);
       if (!result?.ok) throw new Error(this.getPlaybackFailureCode(result, 'switch-language-failed'));
       this.recordDebugEvent('SECONDARY_TRACK_RESTORE_COMPLETED', {
         reason,
@@ -4240,6 +4285,10 @@ class SubtitleInterceptor {
           this.recordDebugEvent('SECONDARY_DOM_RECOVERY_SUCCEEDED', {
             cacheKey: match.cacheKey,
             score: Math.round(match.score * 1000) / 1000
+          });
+          this.setLanguageAcquisitionResult('secondary', {
+            success: true, languageCode: this.effectiveSecondaryLanguage,
+            source: 'dom-recovery', selectedTrack: selected
           });
           return true;
         } else {
