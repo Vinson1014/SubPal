@@ -27,8 +27,15 @@ SubPal 是一個 Chrome 擴充功能，專注於改善 Netflix 字幕翻譯品�
 ## 專案規範
 
 - 中文註釋優先，重要邏輯需要詳細說明
-- 修改 `manifest.json` 時請同步更新 `version` 欄位
+- `manifest.json` 的功能欄位（`permissions`、`web_accessible_resources`、模組宣告）可隨功能提交；`version` 只在發佈提交中單獨更新，且是該次發佈的最後一筆提交
 - 發佈前確認移除測試用 log，且 `testcode/` 內容未被引用
+
+## 驗證指令
+
+- 全量檢查（語法 + 測試）：`./scripts/check.sh`；CI 執行同一支腳本
+- 單檔測試：`node --experimental-vm-modules --test tests/<name>.test.mjs`
+- 語法檢查：`node --check <file>`（本專案沒有 lint／typecheck）
+- 打包：`./extension_bundler.sh`（輸出 `SubPal-<timestamp>.zip`）
 
 ## 工作方式
 
