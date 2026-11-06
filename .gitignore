@@ -9,6 +9,9 @@ claude-doc/
 .opencode/
 .omo
 
+# 本機開發紀錄 (tickets、進度、驗收筆記，不進版本控制)
+.scratch/
+
 # 測試與實驗代碼
 testcode/
 testing-code/
