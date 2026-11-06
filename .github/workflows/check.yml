@@ -1,0 +1,25 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # tests/submission-dialog-viewport.test.mjs 需要 playwright 與 chromium
+      - run: npm install --no-audit --no-fund playwright
+      - run: npx playwright install --with-deps chromium
+
+      - run: ./scripts/check.sh
